@@ -22,18 +22,23 @@ def _get_engine(db_url: str):
     """Return a cached engine for the given URL, creating one if needed."""
     if db_url not in _engine_cache:
         connect_args = {}
-        if "sqlite" in db_url:
+        # SQLite (aiosqlite) uses NullPool — pool_size/max_overflow are
+        # invalid for NullPool and cause TypeError on startup.
+        # Only apply pool params to PG/MySQL.
+        kwargs: dict = {
+            "echo": settings.DEBUG,
+            "connect_args": connect_args,
+        }
+        if "sqlite" not in db_url:
+            connect_args = {}
+            kwargs["pool_size"] = 10
+            kwargs["max_overflow"] = 10
+            kwargs["pool_recycle"] = 3600
+            kwargs["pool_pre_ping"] = True
+        else:
             connect_args = {"check_same_thread": False}
 
-        _engine_cache[db_url] = create_async_engine(
-            db_url,
-            echo=settings.DEBUG,
-            connect_args=connect_args,
-            pool_size=10,
-            max_overflow=10,
-            pool_recycle=3600,
-            pool_pre_ping=True,  # Verify connections before use
-        )
+        _engine_cache[db_url] = create_async_engine(db_url, **kwargs)
     return _engine_cache[db_url]
 
 

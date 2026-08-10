@@ -1,0 +1,21 @@
+{
+  "template": "/Users/mac/Downloads/洞庭湖路征地稳评-原报告.docx",
+  "project": "洪拟征告〔2026〕7号（朱坝街道及三圩社区商业服务业设施用地项目）土地征收决策",
+  "timestamp": "20260804_100505",
+  "overall_score": 0.9053,
+  "dimension_scores": {
+    "chapter_coverage": 1.0,
+    "subsection_coverage": 0.6212,
+    "table_count": 1.0,
+    "key_elements": 1.0,
+    "writing_style": 1.0
+  },
+  "weak_chapters": [
+    9,
+    6,
+    7
+  ],
+  "summary": "综合90.5% | 章节100% | 子节62% | 表格100% | 要素100% | 文风100%",
+  "template_tables": 10,
+  "generated_tables": 8
+}

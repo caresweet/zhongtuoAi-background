@@ -1,0 +1,24 @@
+# 敏感配置
+.env
+.env.*
+!.env.example
+
+# 虚拟环境
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时数据（数据库/上传文件/会话）
+data/
+storage/
+
+# 生成物
+kb_engine/output/
+seed_data/crawled_reports/
+
+# 系统文件
+.DS_Store

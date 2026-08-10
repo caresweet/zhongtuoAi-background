@@ -1,0 +1,34 @@
+{
+  "step_1": {
+    "title": "测试预告〔2026〕5号（测试片区开发项目）",
+    "decision_name": "测试预告〔2026〕5号（测试片区开发项目）决策",
+    "org_name": "测试单位名称",
+    "person_in_charge": "张三",
+    "position": "主任",
+    "contact": "13800000000",
+    "implement_unit": "测试实施单位",
+    "eval_date": "2026年7月"
+  },
+  "step_2": {
+    "location": "测试街道测试社区一组、二组范围内",
+    "description": "地理位置如图所示"
+  },
+  "step_3": {
+    "area_mu": 150.5,
+    "land_type": "农用地、建设用地"
+  },
+  "step_6": {
+    "total_samples": 200,
+    "support_count": 190,
+    "oppose_count": 3,
+    "conditional_support_count": 7,
+    "support_rate": 95.0,
+    "survey_date": "2026年6月",
+    "scope": "测试社区全体居民"
+  },
+  "step_7": {
+    "unit_count": 15,
+    "support_count": 15,
+    "support_rate": 100.0
+  }
+}

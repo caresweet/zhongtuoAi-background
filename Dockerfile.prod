@@ -1,0 +1,54 @@
+# ── Backend Production Dockerfile ──────────────────────────────────────────
+# Multi-stage: builder installs deps, runtime is lean
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+# Build deps — use Aliyun mirror for speed in China
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -i https://pypi.tuna.tsinghua.edu.cn/simple/ -r requirements.txt
+
+
+# ── Runtime stage ──────────────────────────────────────────────────────────
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Runtime system deps (lighter than build deps)
+# libreoffice-headless NOT available on Debian Trixie — .doc→.docx conversion disabled for now
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
+
+# Copy application code
+COPY . .
+
+# Ensure scripts in .local/bin are on PATH
+ENV PATH=/root/.local/bin:$PATH
+
+EXPOSE 8000
+
+# Use Gunicorn with Uvicorn workers for production
+# WORKERS env var controls concurrency (default 4)
+CMD ["sh", "-c", "gunicorn app.main:app \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --workers ${WORKERS:-1} \
+    --bind 0.0.0.0:8000 \
+    --timeout 300 \
+    --graceful-timeout 30 \
+    --keep-alive 5 \
+    --max-requests 1000 \
+    --max-requests-jitter 100 \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level info"]

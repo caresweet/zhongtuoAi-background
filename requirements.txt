@@ -1,0 +1,45 @@
+# FastAPI & Server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+python-multipart==0.0.19
+sse-starlette==2.2.1
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+aiosqlite==0.20.0
+
+# AI / LLM
+langgraph==0.2.60
+langchain==0.3.13
+langchain-anthropic==0.3.4
+anthropic==0.42.0
+
+# Document Processing
+python-docx==1.1.2
+lxml==5.3.0
+pdfplumber==0.11.4
+
+# Data Validation
+pydantic==2.10.3
+pydantic-settings==2.7.0
+
+# Auth
+pyjwt==2.10.1
+bcrypt==4.2.1
+
+# Production DB
+asyncpg==0.30.0
+redis==5.2.1
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Utilities
+python-dotenv==1.0.1
+aiofiles==24.1.0
+httpx==0.28.1
+
+# Vector Store (RAG)
+chromadb==0.5.23

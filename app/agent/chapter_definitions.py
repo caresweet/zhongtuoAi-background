@@ -109,58 +109,128 @@ CHAPTER_RAG_QUERIES: Dict[int, str] = {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# Data Requirements per Chapter (was in data_validator_agent.py)
+# Data Requirements per Chapter (single source of truth — was duplicated in data_validator_agent.py)
+# Format: "required" → List[Tuple[key, display_name, criticality]]
+#         "recommended"/"optional" → List[Tuple[key, display_name]]
+#         "depends_on_chapters" → List[int] (optional)
 # ═══════════════════════════════════════════════════════════════
 
 CHAPTER_DATA_REQUIREMENTS: Dict[int, Dict[str, Any]] = {
     1: {
-        "required": ["report_title", "location"],
-        "recommended": ["org_name", "area_m2", "area_mu", "land_use", "funding"],
-        "optional": ["household_count", "compensation_standard", "doc_reference"],
+        "required": [
+            ("report_title", "报告标题（决策名称）", "critical"),
+            ("location", "拟征地位置（街道/社区/村组）", "critical"),
+        ],
+        "recommended": [
+            ("org_name", "稳评责任单位名称"),
+            ("area_m2", "征收面积（平方米/公顷）"),
+            ("area_mu", "征收面积（亩）"),
+            ("land_use", "土地用途"),
+            ("funding", "资金测算"),
+        ],
+        "optional": [
+            ("household_count", "涉及户数"),
+            ("compensation_standard", "补偿标准"),
+            ("doc_reference", "公告文号"),
+        ],
     },
     2: {
-        "required": ["report_title"],
-        "recommended": ["org_name"],
-        "optional": [],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("org_name", "稳评责任单位"),
+            ("commission_month", "委托日期"),
+        ],
+        "optional": [
+            ("survey_start", "调查开始日期"),
+            ("survey_end", "调查结束日期"),
+        ],
     },
     3: {
-        "required": ["report_title"],
-        "recommended": ["total_samples", "support_rate"],
-        "optional": ["survey_method", "stakeholder_demands"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("total_samples", "调查样本总数"),
+            ("support_rate", "群众支持率"),
+            ("survey_start", "调查开始日期"),
+            ("survey_end", "调查结束日期"),
+        ],
+        "optional": [
+            ("awareness_rate", "知晓率"),
+            ("grassroots_opinion", "基层组织意见"),
+            ("villager_demands", "村民诉求"),
+            ("online_opinion", "网络舆情"),
+        ],
     },
     4: {
-        "required": ["report_title"],
-        "recommended": ["org_name", "funding", "support_rate"],
-        "optional": ["stakeholder_demands"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("org_name", "责任单位"),
+            ("location", "项目位置"),
+            ("land_use", "土地用途"),
+        ],
+        "optional": [
+            ("support_rate", "支持率"),
+            ("funding", "资金来源"),
+        ],
     },
     5: {
-        "required": ["report_title"],
-        "recommended": ["support_rate"],
-        "optional": ["stakeholder_demands"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("support_rate", "群众支持率"),
+        ],
+        "optional": [
+            ("compensation_standard", "补偿标准"),
+            ("funding", "资金测算"),
+        ],
     },
     6: {
-        "required": ["report_title"],
-        "recommended": [],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("support_rate", "群众支持率（影响打分）"),
+        ],
         "optional": [],
     },
     7: {
-        "required": ["report_title"],
-        "recommended": ["org_name"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("org_name", "责任单位（措施责任主体）"),
+        ],
         "optional": [],
     },
     8: {
-        "required": ["report_title"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
         "recommended": [],
         "optional": [],
+        "depends_on_chapters": [6],
     },
     9: {
-        "required": ["report_title"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
         "recommended": [],
         "optional": [],
+        "depends_on_chapters": [4, 5, 6, 8],
     },
     10: {
-        "required": ["report_title"],
-        "recommended": ["org_name"],
+        "required": [
+            ("report_title", "报告标题", "critical"),
+        ],
+        "recommended": [
+            ("org_name", "责任单位（应急指挥部名称）"),
+        ],
         "optional": [],
     },
 }

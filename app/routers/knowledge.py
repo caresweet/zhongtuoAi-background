@@ -608,11 +608,14 @@ async def delete_knowledge_document(
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
 
-    # Remove from vector store
+    # Remove from vector store — 按 domain 找对应 collection（物理隔离）
     try:
         from app.rag.vector_store import VectorStoreService
+        from app.domains import get_domain
         vs = VectorStoreService()
-        collection = vs.get_or_create_global_collection()
+        domain_val = getattr(doc, "domain", "stability") or "stability"
+        collection_name = str(getattr(doc, "collection_name", "") or get_domain(domain_val).default_collection)
+        collection = vs.get_or_create_collection(collection_name)
         prefix = f"doc_{document_id}"
         removed = vs.remove_by_prefix(collection, prefix)
     except Exception as e:

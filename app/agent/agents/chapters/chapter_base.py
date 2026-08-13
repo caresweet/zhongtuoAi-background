@@ -15,8 +15,62 @@ from typing import Dict, List, Any, Optional
 
 from ..base_agent import BaseAgent
 from ..knowledge_agent import get_knowledge_context_for_chapter
+from app.validation.content_guardrails import AI_BUZZWORDS
 
 logger = logging.getLogger(__name__)
+
+# ── Learning hints cache (shared across all chapter agents) ──
+_learning_cache = {"hints": {}, "updated": 0}  # hints by chapter_num
+
+
+def _refresh_learning_cache():
+    """Refresh cached learning hints from the learning service."""
+    import time as _t
+    now = _t.time()
+    if now - _learning_cache["updated"] < 300:
+        return  # still fresh
+    try:
+        import asyncio
+        from app.services.learning_service import learning_service
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            return  # can't run async in sync context
+        async def _fetch():
+            for ch in range(1, 11):
+                hints = await learning_service.build_learning_hints("stability")
+                common = await learning_service.get_common_issues("stability", 10)
+                ch_issues = [c for c in common if _is_chapter_relevant(c["type"], ch)]
+                if ch_issues:
+                    _learning_cache["hints"][ch] = ch_issues
+        loop.run_until_complete(_fetch())
+        _learning_cache["updated"] = now
+    except Exception:
+        pass
+
+
+def _is_chapter_relevant(issue_type: str, chapter_num: int) -> bool:
+    """Check if an issue type is relevant to a specific chapter."""
+    ch_specific = {
+        "fabricated_data": [1, 3, 6, 8],  # chapters with numbers
+        "data_validity": [3, 6, 8],        # support rate, scores
+        "hallucinated_regulation": [2, 4, 9],  # legal references
+        "invalid_range": [1, 6, 8],         # area, scores
+    }
+    if issue_type in ch_specific:
+        return chapter_num in ch_specific[issue_type]
+    return True  # general issues apply to all
+
+
+def _get_cached_learning_hints(chapter_num: int) -> str:
+    """Get learning hints for a specific chapter from the cache."""
+    _refresh_learning_cache()
+    ch_hints = _learning_cache["hints"].get(chapter_num, [])
+    if not ch_hints:
+        return ""
+    lines = ["\n## ⚠️ 本章历史常见问题（请务必避免）"]
+    for item in ch_hints:
+        lines.append(f"- {item['label']}（近30天出现{item['count']}次）")
+    return "\n".join(lines) + "\n"
 
 
 class ChapterAgentBase(BaseAgent):
@@ -670,30 +724,31 @@ class ChapterAgentBase(BaseAgent):
     def _derive_survey_from_facts(filled: dict) -> dict:
         """Derive survey statistics from known project facts when OCR isn't available.
 
-        Uses household_count, support_rate, and other facts to estimate
-        reasonable survey numbers until full OCR can be performed.
+        🔴 ONLY uses explicitly provided data (household_count, support_rate from filled_data).
+        Does NOT fabricate or estimate any percentages or distributions.
         """
         stats = {}
-        total = int(filled.get("household_count", 0))
-        support_rate = float(filled.get("support_rate", 0))
+        total = int(filled.get("household_count", 0) or 0)
+        support_rate_str = filled.get("support_rate", "")
 
-        if total > 0 and support_rate > 0:
+        # Parse support_rate
+        support_rate = 0.0
+        if support_rate_str:
+            try:
+                support_rate = float(str(support_rate_str).replace('%', ''))
+            except (ValueError, TypeError):
+                pass
+
+        if total > 0:
             stats["total_surveys"] = str(total)
+        if support_rate > 0 and total > 0:
             support = int(total * support_rate / 100)
             oppose = total - support
-
             stats["support_count"] = str(support)
             stats["support_rate"] = f"{support_rate:.1f}%"
             stats["oppose_count"] = str(oppose)
             stats["oppose_rate"] = f"{100 - support_rate:.1f}%"
-
-            # Estimate other categories based on typical distributions
-            stats["know_project"] = str(int(total * 0.89))
-            stats["know_rate"] = "89.0%"
-            stats["conditional_support"] = str(int(total * 0.05))
-            stats["conditional_rate"] = "5.0%"
-            stats["neutral_count"] = "0"
-            stats["neutral_rate"] = "0%"
+        # 🔴 NO fabrication: don't estimate know_rate, conditional_support, etc.
 
         return stats
 
@@ -843,221 +898,6 @@ class ChapterAgentBase(BaseAgent):
 
         return content.strip()
 
-    def _inject_missing_tables(self, content: str) -> str:
-        """Inject SPECIFIC required tables from fallback if LLM didn't generate them.
-
-        Checks each key_table name against the content. If a required table name
-        is not found in ANY existing table header/row, injects it from fallback.
-        """
-        if not self.key_tables:
-            return content
-
-        # Extract all existing tables from content
-        existing_tables_text = []
-        lines = content.split('\n')
-        in_table = False
-        current_table_lines = []
-        for line in lines:
-            if '|' in line and line.strip().startswith('|'):
-                in_table = True
-                current_table_lines.append(line)
-            elif in_table:
-                existing_tables_text.append('\n'.join(current_table_lines))
-                current_table_lines = []
-                in_table = False
-                if '|' in line and line.strip().startswith('|'):
-                    in_table = True
-                    current_table_lines.append(line)
-        if current_table_lines:
-            existing_tables_text.append('\n'.join(current_table_lines))
-
-        all_existing_table_text = '\n'.join(existing_tables_text)
-
-        # Check which required tables are missing
-        missing_tables = []
-        for table_name in self.key_tables:
-            # Check if the table name appears anywhere in existing tables or headers
-            if table_name not in content and table_name not in all_existing_table_text:
-                missing_tables.append(table_name)
-
-        if not missing_tables:
-            return content
-
-        # Get fallback tables
-        try:
-            fallback = self._fallback_content({})
-        except Exception:
-            return content
-
-        if not fallback:
-            return content
-
-        fb_lines = fallback.split('\n')
-        # Extract tables from fallback that match missing table names
-        in_table = False
-        table_block = []
-        table_blocks = []
-        for line in fb_lines:
-            if '|' in line and line.strip().startswith('|'):
-                in_table = True
-                table_block.append(line)
-            else:
-                if in_table and table_block:
-                    table_blocks.append(table_block)
-                    table_block = []
-                in_table = False
-                # Also capture table header lines (e.g., "### 表3-1 ...")
-        if table_block:
-            table_blocks.append(table_block)
-
-        # Also capture section headers before tables
-        fb_with_headers = []
-        i = 0
-        while i < len(fb_lines):
-            line = fb_lines[i]
-            if '|' in line and line.strip().startswith('|'):
-                # Look back for header
-                header_lines = []
-                j = i - 1
-                while j >= 0 and (fb_lines[j].strip().startswith('###') or fb_lines[j].strip() == ''):
-                    if fb_lines[j].strip().startswith('###'):
-                        header_lines.insert(0, fb_lines[j])
-                    j -= 1
-                # Collect table
-                tbl = list(header_lines)
-                while i < len(fb_lines) and '|' in fb_lines[i] and fb_lines[i].strip().startswith('|'):
-                    tbl.append(fb_lines[i])
-                    i += 1
-                fb_with_headers.append(tbl)
-            else:
-                i += 1
-
-        # Inject missing tables
-        injected = []
-        for tbl_block in fb_with_headers:
-            tbl_text = '\n'.join(tbl_block)
-            for missing_name in missing_tables:
-                # Check if this fallback table block relates to the missing table
-                if missing_name in tbl_text or any(
-                    kw in tbl_text for kw in missing_name.replace('表', '').split()
-                ):
-                    injected.append(tbl_text)
-                    break
-
-        # If we couldn't match specific tables, inject ALL fallback tables
-        if not injected:
-            for tbl_block in fb_with_headers:
-                injected.append('\n'.join(tbl_block))
-
-        if injected:
-            content += '\n\n' + '\n\n'.join(injected) + '\n'
-
-        return content
-
-    def _inject_skeleton_tables(self, content: str, state: dict) -> str:
-        """Inject table skeletons from TEMPLATE_TABLE_SKELETONS if LLM didn't generate them.
-
-        This is a post-generation fix: after LLM generates chapter content,
-        check if required skeleton tables are present. If missing, inject them
-        directly as properly formatted markdown tables.
-
-        Tables with fill_type='fixed' get the template content as-is.
-        Tables with fill_type='data' get placeholder markers.
-        """
-        from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
-
-        # Chapters that need injected tables (LLM can't format them properly)
-        if self.chapter_number not in (1, 5, 7, 8, 10):
-            return content
-
-        skeletons = TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {})
-        if not skeletons:
-            return content
-
-        # 🔴 Force-replace any existing table with clean skeleton
-        for tname, tskel in skeletons.items():
-            title = tskel.get("title", "")
-            columns = tskel.get("columns", [])
-            fill_types = tskel.get("fill_types", {})
-            rule = tskel.get("rule", "")
-
-            # Remove any existing table with this name or similar
-            import re as _re_sk
-            content = _re_sk.sub(r'\|.*' + _re_sk.escape(title[:4]) + r'.*\|(\n\|[-\|]+\|)?(\n\|.*\|)*', '', content)
-            content = _re_sk.sub(r'###\s*' + _re_sk.escape(title) + r'\s*\n', '', content)
-
-            # Build clean table from filled_data
-            filled = state.get("filled_data", {})
-            rows = []
-            rows.append("| " + " | ".join(columns) + " |")
-            rows.append("| " + " | ".join(["---"] * len(columns)) + " |")
-
-            # Ch1: fill from area/location data
-            if self.chapter_number == 1:
-                villages = filled.get("villages", "三圩社区二组、三组、六组").split("、")
-                area = filled.get("area_m2", "")
-                land_use = filled.get("land_use", "")
-                for i, v in enumerate(villages, 1):
-                    rows.append(f"| {i} | — | {v} | {land_use} | {area} | — | — |")
-                rows.append(f"| 合计 | — | — | — | {area} | — | — |")
-
-            content += "\n\n### " + title + "\n\n" + "\n".join(rows) + "\n"
-            if rule:
-                content += f"\n{rule}\n"
-
-        return content
-
-
-    def _inject_calculated_scores(self, content: str, state: dict) -> str:
-        """For Ch6/Ch8: inject computed DB32/T4013-2021 scores into the chapter content.
-
-        Computes scores from project facts + survey data, then replaces any
-        LLM-generated scoring table content with data-driven values.
-        """
-        if self.chapter_number not in (6, 8):
-            return content
-
-        try:
-            from app.services.scoring_service import scoring_service
-
-            filled = state.get("filled_data", {}) or {}
-            scoring_report = scoring_service.build_scoring_report(filled, {})
-
-            if self.chapter_number == 6:
-                items = scoring_report["pre_measures"]["items"]
-                total = scoring_report["pre_measures"]["total"]
-            else:
-                items = scoring_report["post_measures"]["items"]
-                total = scoring_report["post_measures"]["total"]
-
-            risk_level = scoring_report["meta"]["risk_level"]
-
-            # Build scoring summary — facts only, no internal basis text
-            lines = [
-                f"\n\n综合得分: **{total}分** → 风险等级: **{risk_level}**\n",
-            ]
-
-            for cat in ["合法性", "合理性", "可行性", "可控性"]:
-                cat_items = [i for i in items if i["category"] == cat]
-                # Convert to achieved scores: achieved = max - deduction
-                cat_achieved = sum(i["max_score"] - i["score"] for i in cat_items)
-                lines.append(f"\n### {cat}（得分: {cat_achieved}分）\n")
-                for item in cat_items:
-                    achieved = item['max_score'] - item['score']
-                    lines.append(f"- {item['item']}: **{achieved}分** / 满分{item['max_score']}")
-
-            all_achieved = sum(i["max_score"] - i["score"] for i in items)
-            lines.append(f"\n**合计得分: {all_achieved}分**\n")
-
-            scoring_text = "\n".join(lines)
-            content += scoring_text
-
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Failed to inject scoring data: {e}")
-
-        return content
-
     def _extract_tables(self, markdown: str) -> List[Dict[str, Any]]:
         """Extract table data from markdown content."""
         import re
@@ -1177,7 +1017,7 @@ class ChapterAgentBase(BaseAgent):
             f"- 结构自由决定，不需要固定小节数，内容说到位就停\n"
             f"- 所有地名只用：淮安市洪泽区朱坝街道三圩社区二组、三组、六组\n\n"
             f"## ⛔ 禁止\n"
-            f"- 禁用词：具有重要意义、切实保障、多措并举、统筹推进、夯实基础、综上所述、有力支撑\n"
+            f"- 禁用词：{'、'.join(AI_BUZZWORDS)}\n"
             f"- 禁止「第一/第二/第三」工整排比\n"
             f"- 禁止编造数据，用户没提供的写【待补充】\n"
             f"- 禁止AI翻译腔，像真人工程师写报告\n\n"
@@ -1187,7 +1027,7 @@ class ChapterAgentBase(BaseAgent):
             f"- 结论适度模糊：「大概率」「初步判断」「需重点关注」\n"
             f"- 政策引用精简，只列本章直接相关的\n"
             f"- 实施单位：江苏众拓项目代理咨询有限公司\n"
-            f"- 表格位置用 [TABLE:表名] 标记\n"
+            f"- 表格用 markdown 语法写，有数据支撑才写，缺数据写【待补充】\n"
             f"{skeleton_rule}\n"
         )
 
@@ -1202,6 +1042,10 @@ class ChapterAgentBase(BaseAgent):
         chapter_ctx = rag_context.get("chapter_context", "")
         example_ctx = rag_context.get("example_context", "")
         local_ctx = rag_context.get("local_regulation_context", "")
+
+        # Dynamic few-shot from similar historical reports
+        from app.services.few_shot_service import get_cached_few_shot
+        dynamic_examples = get_cached_few_shot(self.chapter_number)
 
         # User data summary
         data_summary = ""
@@ -1266,7 +1110,8 @@ class ChapterAgentBase(BaseAgent):
             f"## 写作材料（按优先级排列）\n\n"
             f"### 材料1：DB32/T4013-2021规范 + 优秀范文（最重要，优先参考）\n"
             f"{example_ctx[:8000] if example_ctx else '（无）'}\n"
-            f"{template_content}\n\n"
+            f"{template_content}\n"
+            f"{dynamic_examples}\n\n"
             f"### 材料2：法规标准\n"
             f"{local_ctx[:3000] if local_ctx else ''}\n"
             f"{chapter_ctx[:2000]}\n\n"
@@ -1296,6 +1141,7 @@ class ChapterAgentBase(BaseAgent):
             f"8. ⛔ 禁止：据调查显示、经综合分析、通过系统识别、依据指令要求 等机器翻译腔\n"
             f"9. ⛔ 禁止「综上所述」「整体而言」「总体来看」等总结套话\n"
             f"10. 缺失数据用【待补充】，不要编造\n"
+            f"{_get_cached_learning_hints(self.chapter_number)}"
             f"{table_enforcement}"
         )
 

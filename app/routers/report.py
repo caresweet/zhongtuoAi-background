@@ -251,8 +251,8 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
         {
             "source_path": item.get("source_path", ""),
             "source_type": item.get("source_type", "file"),
-            "retrieval_text": item.get("retrieval_text", ""),
-        }
+            "retrieval_text": item.get("retrieval_text", "")
+    }
         for item in existing_materials
         if item.get("retrieval_text")
     ]
@@ -261,8 +261,8 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
             "source_path": item.get("source_path", ""),
             "source_name": item.get("source_name", ""),
             "source_type": item.get("source_type", "file"),
-            "status": item.get("status", "completed"),
-        }
+            "status": item.get("status", "completed")
+    }
         for item in existing_materials
     ]
 
@@ -416,9 +416,9 @@ async def start_generation(
 
     # ---- Auto-fill fixed values that never change across reports ----
     state.setdefault("filled_data", {})
-    state["filled_data"]["_fixed_实施单位"] = "江苏众拓项目代理咨询有限公司"
+    
     state["_fixed_values"] = {
-        "稳评实施单位": "江苏众拓项目代理咨询有限公司",
+        
     }
 
     # Copy state fields to session
@@ -433,8 +433,8 @@ async def start_generation(
         chapters_summary[str(num)] = {
             "number": num,
             "title": ch.get("title", ""),
-            "status": ch.get("status", "pending"),
-        }
+            "status": ch.get("status", "pending")
+    }
 
     # ---- First message — dynamic identity based on user intent ----
     _GENERIC_GEN_KEYWORDS = [
@@ -470,8 +470,8 @@ async def start_generation(
                 "display_name": "报告大标题（决策名称）",
                 "expected_type": "text",
                 "section_title": "封面与第1章",
-                "description": "请输入报告的大标题，例如：金征预告〔2026〕3号（高铁枢纽北片区开发地块项目）。系统将自动派生决策名称（标题+决策）。",
-            },
+                "description": "请输入报告的大标题，例如：金征预告〔2026〕3号（高铁枢纽北片区开发地块项目）。系统将自动派生决策名称（标题+决策）。"
+    },
         ).model_dump(),
     )
 
@@ -563,8 +563,8 @@ async def chat_with_agent(
                                 "support_rate": ["支持率", "同意率", "赞成率"],
                                 "household_count": ["户数", "农户", "涉及户"],
                                 "doc_reference": ["文号", "批文号", "公告号"],
-                                "compensation_standard": ["补偿标准", "补偿单价"],
-                            }
+                                "compensation_standard": ["补偿标准", "补偿单价"]
+    }
                             filled = session.state.setdefault("filled_data", {})
                             parsed = 0
                             for line in user_input.split("\n"):
@@ -815,8 +815,8 @@ async def chat_with_agent(
                         session.state["chapter_feedback"] = user_input
                         yield sse_thinking("📝 收到修改意见，正在重新生成章节...")
                         yield sse_phase_change("chapter_generation", {
-                            "message": f"根据反馈重新生成第{session.state.get('current_chapter', '?')}章...",
-                        })
+                            "message": f"根据反馈重新生成第{session.state.get('current_chapter', '?')}章..."
+    })
                         session.state.pop("_stream_queue", None)
                         return
                     else:
@@ -1104,8 +1104,8 @@ async def chat_with_agent(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+            "X-Accel-Buffering": "no"
+    },
     )
 
 
@@ -1141,8 +1141,8 @@ async def get_generation_status(session_id: str):
             "status": ch.get("status", "pending"),
             "char_count": len(ch.get("markdown", "")),
             "table_count": len(ch.get("tables", [])),
-            "revision_count": len(ch.get("revision_history", [])),
-        }
+            "revision_count": len(ch.get("revision_history", []))
+    }
 
     # Check subprocess progress file
     import json as _json
@@ -1204,8 +1204,8 @@ async def get_generation_status(session_id: str):
             "section_progress": list(chapters_summary.values()),
             "last_activity": session.last_activity.isoformat(),
             "report_file_path": output_path,
-            "download_url": download_url,
-        },
+            "download_url": download_url
+    },
     )
 
 
@@ -1224,14 +1224,14 @@ async def get_chapters(session_id: str):
             "markdown": ch.get("markdown", ""),
             "tables": ch.get("tables", []),
             "rag_sources": ch.get("rag_sources", []),
-            "revision_count": len(ch.get("revision_history", [])),
-        }
+            "revision_count": len(ch.get("revision_history", []))
+    }
 
     return ApiResponse(data={
         "chapters": chapters_data,
         "current_chapter": state.get("current_chapter", 1),
         "phase": state.get("phase", ""),
-        "report_title": state.get("report_title", ""),
+        "report_title": state.get("report_title", "")
     })
 
 
@@ -1399,8 +1399,8 @@ async def validate_report_format(session_id: str):
             data={
                 "validation": validation,
                 "fonts": fonts,
-                "headings": headings,
-            },
+                "headings": headings
+    },
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"校验失败: {str(e)}")
@@ -1430,8 +1430,8 @@ async def _bg_extract_pdf(session, rel_path: str, original_name: str):
             from app.services.ws_manager import ws_manager
             await ws_manager.send(session.state.get("session_id", ""), "upload_done", {
                 "file": original_name,
-                "tables": summary.get("extracted_table_count", 0),
-            })
+                "tables": summary.get("extracted_table_count", 0)
+    })
         except: pass
 
         # 🔴 Auto-index extracted text into knowledge base for RAG retrieval
@@ -1485,7 +1485,7 @@ async def upload_attachment(
     uploaded_files.append({
         "path": result["relative_path"],
         "original_name": result.get("original_name", result["relative_path"].split("/")[-1]),
-        "file_type": result.get("file_type", "image"),
+        "file_type": result.get("file_type", "image")
     })
     session.state = session.state
     report_service._save_sessions()
@@ -1522,8 +1522,8 @@ async def upload_attachment(
             "original_name": result["original_name"],
             "url": result["url"],
             "size_bytes": result["size_bytes"],
-            "file_type": file_type,
-        },
+            "file_type": file_type
+    },
     )
 
 
@@ -1613,8 +1613,8 @@ async def get_template_fields(session_id: str):
         result["progress"] = {
             "total_b_e_fields": result["needs_user_input"],
             "filled_b_e_fields": sum(1 for f in result["fields"]
-                                      if f["category"] in ("B", "E") and f["key"] in filled),
-        }
+                                      if f["category"] in ("B", "E") and f["key"] in filled)
+    }
 
         return ApiResponse(
             message="模板字段分析完成",
@@ -2237,8 +2237,8 @@ async def run_pipeline(request: dict):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+            "X-Accel-Buffering": "no"
+    },
     )
 
 
@@ -2253,8 +2253,8 @@ async def get_pipeline_status(session_id: str):
             data={
                 "session_id": session_id,
                 "phase": state.get("pipeline_phase", ""),
-                "status": state.get("pipeline_status", "running"),
-            },
+                "status": state.get("pipeline_status", "running")
+    },
         )
     except Exception:
         return ApiResponse(
@@ -2299,7 +2299,7 @@ async def list_report_styles():
             {"id": s.name, "label": s.label, "description": s.description}
             for s in STYLES.values()
         ],
-        "default": DEFAULT_STYLE,
+        "default": DEFAULT_STYLE
     })
 
 
@@ -2340,7 +2340,7 @@ async def generate_report_direct(session_id: str):
 
     return ApiResponse(code=0, message="报告生成已启动", data={
         "session_id": session_id,
-        "status": "generating",
+        "status": "generating"
     })
 
 

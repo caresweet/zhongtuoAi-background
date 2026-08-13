@@ -19,6 +19,8 @@ import re
 import time
 from typing import Dict, List, Any, Optional
 
+from app.validation.content_guardrails import AI_BUZZWORDS
+
 _log = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
@@ -132,6 +134,42 @@ async def generate_outline(
 # Chapter Prompt Builder — master writes prompt for each chapter
 # ═══════════════════════════════════════════════════════════
 
+def get_table_format_reference(chapter_num: int) -> str:
+    """从模板表格注册表提取本章表格的列结构，仅作为格式参考。
+
+    只暴露「列结构 + 表格用途」，不暴露固定内容。章节 agent 根据实际数据
+    决定写哪些表格、填什么内容——有数据才写，没数据不写。
+
+    Returns:
+        格式参考文本（markdown），无表格时返回空串。
+    """
+    try:
+        from app.services.table_registry import TABLE_REGISTRY
+    except Exception:
+        return ""
+
+    lines = []
+    for name, tdef in TABLE_REGISTRY.items():
+        if tdef.get("chapter") != chapter_num:
+            continue
+        columns = tdef.get("columns", [])
+        desc = tdef.get("description", name)
+        # 清洗列名里的换行符
+        clean_cols = [c.replace('\n', '') for c in columns]
+        col_str = " | ".join(clean_cols)
+        lines.append(f"  - 「{desc}」列结构：{col_str}")
+
+    if not lines:
+        return ""
+
+    return (
+        "## 📐 表格格式参考（仅格式参考，数量与内容由你根据数据决定）\n"
+        "以下列结构来自历史模板，供你参考表头和列安排。是否写表格、写几张、填什么内容，"
+        "完全由你根据「可用数据」决定：有数据支撑才写表格，没有数据就写文字描述 + 【待补充】。\n"
+        + "\n".join(lines) + "\n"
+    )
+
+
 def build_chapter_prompt(
     chapter_def: dict,
     filled_data: dict,
@@ -139,34 +177,57 @@ def build_chapter_prompt(
     previous_chapters: dict = None,
     feedback: str = None,
     rag_context: dict = None,
+    materials_summary: str = "",
 ) -> str:
-    """主Agent为单个章节编写专属提示词。
-
-    根据章节定义中的 key_points 和 data_needed 动态构建。
-    如果有前序章节内容，注入作为上下文。
-    如果有feedback，说明上一版的问题，要求修正。
-    如果有rag_context，注入知识库检索的规范条款和范文参考。
-    """
+    """主Agent为单个章节编写专属提示词。"""
     num = chapter_def.get("num", 0)
     title = chapter_def.get("title", f"第{num}章")
     key_points = chapter_def.get("key_points", [])
     data_needed = chapter_def.get("data_needed", [])
 
-    # Build data context
+    # 🔴 字段中文标注：让 LLM 明确知道每个字段对应报告里的哪个小节
+    _KEY_LABELS = {
+        "org_name": "责任单位（稳评责任单位）",
+        "implement_unit": "稳评实施单位",
+        "project_name": "项目名称",
+        "location": "项目位置",
+        "area_mu": "征收面积（亩）",
+        "area_m2": "征收面积（平方米）",
+        "land_use": "土地用途",
+        "compensation_standard": "补偿标准",
+        "household_count": "涉及户数",
+        "population_count": "涉及人数",
+        "total_samples": "问卷总数",
+        "support_rate": "支持率",
+        "doc_reference": "公告文号",
+    }
     data_lines = []
+    pdf_table_data = ""
     for key in data_needed:
         val = filled_data.get(key, "")
-        if val:
-            data_lines.append(f"  {key}: {val}")
+        if not val:
+            continue
+        if key == "_pdf_table_data":
+            # 🔴 PDF 提取的表格数据单独展示，不走 key: value 格式
+            pdf_table_data = str(val)
+        else:
+            label = _KEY_LABELS.get(key, key)
+            data_lines.append(f"  {label}: {val}")
 
-    prompt = f"""你是江苏众拓项目代理咨询有限公司的资深稳评工程师。
+    prompt = f"""你是社会稳定风险评估报告的资深编写专家。
 撰写报告第{num}章「{title}」。
+
+## 📋 用户提供的全部资料（必须在报告中充分使用）
+{materials_summary if materials_summary else '（用户未上传资料）'}
 
 ## 本章要点
 {chr(10).join(f'- {p}' for p in key_points)}
 
 ## 可用数据
 {chr(10).join(data_lines) if data_lines else '（从项目资料和专业知识中获取）'}
+
+## 📊 PDF 提取的表格数据（真实数据，填表时直接用这些数据，不要编造）
+{pdf_table_data if pdf_table_data else '（无提取的表格数据）'}
 
 ## 图片
 {image_guide if image_guide else '（本章无图片）'}
@@ -216,23 +277,71 @@ def build_chapter_prompt(
 
     prompt += scoring_guidance
 
+    # 🔴 表格格式参考（仅格式，内容与数量由 agent 根据数据决定）
+    table_ref = get_table_format_reference(num)
+    if table_ref:
+        prompt += "\n" + table_ref + "\n"
+
     prompt += f"""
 ## 要求
 - 🔴 本章必须达到{min_words}字以上
 - 根据DB32/T4013-2021规范和你的专业经验组织内容
 - 每个要点至少写2-3段（150-300字/段），详细深入分析
-- 🔴 自主决定结构：根据本章实际内容和可用数据，灵活决定是否需要表格、图片
-- 🔴 表格决策：如果「可用数据」中有充足的数字/对比数据 → 自创markdown表格呈现；数据不足 → 不要硬凑表格，用文字描述
-- 🔴 图片决策：检查「可用图片」列表，只在正文内容涉及该图片时插入（如讲位置时放位置图，讲公示时放公示照）；没有相关图片则不插入
-- 🔴 图片标记格式：![图X-X 描述](path) 放在相关段落后，不要堆在章节末尾
-- 所有数据必须来自「可用数据」，没有的不编造
+- 🔴 小节内容必须与标题相符（一票否决）：每个小节标题写什么，正文就写什么具体内容，禁止写"XX需要负责/XX应当具备"这种与标题无关的空话。例如：
+    * 标题「稳评责任单位」→ 正文必须写：责任单位具体名称（取「可用数据」里的"责任单位"）+ 其在该项目中的具体职责
+    * 标题「稳评实施单位」→ 正文必须写：实施单位具体名称（取「可用数据」里的"稳评实施单位"）+ 其资质和承担的具体工作
+    * 标题「征收位置」→ 正文必须写具体位置（取「可用数据」里的"项目位置"），不写泛泛的"位置合理"
+- 🔴 表格铁律（一票否决）：表格不固定，由你根据实际数据灵活设计。**有数据支撑才写表格，没有数据就写文字描述 + 【待补充：XX数据未提供】，绝不写空表格或编造数据填表**。规则：
+    * 用 markdown 表格语法（| 列1 | 列2 |）写表格，格式参考下面的「表格格式参考」
+    * 每张表格必须每个单元格都有真实数据来源，缺数据的单元格写【待补充】
+    * 禁止手写"表X-X XXX"这种孤立的表格标题（表格标题紧跟表格内容，不单独成段）
+    * 没有问卷数据 → 不写调查统计表；没有勘测数据 → 不写勘测定界表
+    * 填表数据直接取自上面「PDF 提取的表格数据」，不要抄范文里的数据{'；勘测定界数据表（表1-1）和土地分类面积表由系统从 PDF 自动渲染，正文不要重复手写这两个表' if num == 1 else ''}
+- 🔴 数据铁律（一票否决）：所有数字（份数、人数、户数、百分比、评分）只能来自「可用数据」和「用户提供的全部资料」。用户没提供的数字一律不准出现，用【待补充：XX数据未提供】代替。严禁推算、估计、假设任何数值。例如：
+    * 用户没给问卷份数 → 不能说"发放150份问卷" → 说"【待补充：问卷调查数据未提供】"
+    * 用户没给支持率 → 不能说"支持率89.5%" → 说"【待补充：群众支持率数据未提供】"
+    * 用户没给户数 → 不能说"涉及78户" → 说"【待补充：涉及户数未提供】"
+    * 用户没给年龄分布 → 不能说"50岁以上42户" → 说"【待补充：年龄分布数据未提供】"
+- 🔴 缺失处理：用户未提供的数据 → 仍然写出完整的章节结构（含标题），在内容处标注【待补充：具体缺什么数据及建议获取方式】。不能因为数据缺失就跳过整个小节或留空
+- 🔴 图片缺失：用户未上传对应类型的图片 → 在图片位置标注【待插入：图X-X 描述】，不要用其他图片替代
 - 🔴 法规引用：法规名称、文号必须来自上面的「评估依据」，知识库没提供的法规一律不写，绝不编造文号
-- 如有数据缺失 → 标注【待补充：XX数据】，不要编造
-- 禁用AI套词：具有重要意义、切实保障、多措并举、统筹推进、综上所述、有力支撑
+- 禁用AI套词：{', '.join(AI_BUZZWORDS)}
 - 写短句，像老工程师写报告
 - 涉及村组：根据实际材料中的村组名称
+{_get_learning_hints()}
+{_get_chapter_antipatterns(num)}
 """
     return prompt
+
+
+# Cached learning hints (updated every 5 minutes)
+_learning_hints_cache = {"hints": "", "updated": 0}
+
+def _get_learning_hints() -> str:
+    """Get cached learning hints for prompt injection. Updates every 5 min."""
+    import time as _time
+    now = _time.time()
+    if now - _learning_hints_cache["updated"] > 300:
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Can't run async in sync context; use latest cache
+                return _learning_hints_cache["hints"]
+        except RuntimeError:
+            pass
+    return _learning_hints_cache["hints"]
+
+
+async def refresh_learning_hints(domain: str = "stability"):
+    """Refresh the cached learning hints. Call periodically or on startup."""
+    try:
+        from app.services.learning_service import learning_service
+        hints = await learning_service.build_learning_hints(domain)
+        _learning_hints_cache["hints"] = hints
+        _learning_hints_cache["updated"] = __import__("time").time()
+    except Exception:
+        pass
 
 
 def _summarize_previous(chapters: dict) -> str:
@@ -248,58 +357,40 @@ def _summarize_previous(chapters: dict) -> str:
     return "\n".join(lines)
 
 
-# ═══════════════════════════════════════════════════════════
-# Chapter Review — check quality, provide feedback for retry
-# ═══════════════════════════════════════════════════════════
-
-def review_chapter(chapter_num: int, markdown: str, chapter_def: dict, image_guide: str) -> Optional[str]:
-    """审查章节质量，返回feedback字符串（None表示通过）。
-
-    检查项：
-    - AI套词
-    - 必需的数据引用
-    - 图片标记（如果有可用图片）
-    - 表格标记（如果章节需要）
-    - 基本字数
-    """
-    issues = []
-
-    buzzwords = ['具有重要意义', '切实保障', '多措并举', '统筹推进', '综上所述', '有力支撑', '奠定了坚实基础']
-    found = [bw for bw in buzzwords if bw in markdown]
-    if found:
-        issues.append(f"包含AI套词：{found}")
-
-    if len(markdown) < 300:
-        issues.append(f"字数过少({len(markdown)}字)")
-
-    if image_guide and "（无图片）" not in image_guide:
-        if '![' not in markdown:
-            issues.append("有可用图片但未在正文中引用")
-
-    # Ch3 must have survey tables
-    if chapter_num == 3:
-        for tbl in ['[TABLE:ch3_public_survey]', '[TABLE:ch3_dept_survey]']:
-            if tbl not in markdown:
-                issues.append(f"缺少{tbl}标记")
-
-    # 🔴 Scoring validation: no negatives, scores in reasonable range
-    if chapter_num in (6, 7, 8, 10):
-        scores = __import__('re').findall(r'(-?\d+(?:\.\d+)?)\s*分', markdown)
-        for s in scores:
-            val = float(s)
-            if val < 0:
-                issues.append(f"评分出现负数({val}分)，评分不能为负")
-            elif val > 100:
-                issues.append(f"评分超过100({val}分)，请检查分值范围")
-        if '分' not in markdown and len(markdown) > 500:
-            issues.append("评分章节缺少分数")
-
-    return "; ".join(issues) if issues else None
+_CHAPTER_ANTIPATTERNS = {
+    1: """## ⛔ 第1章常见错误（请避免）
+❌ "征收面积约500亩" → 用户数据是489.51亩，必须精确，不得四舍五入
+❌ "涉及农户若干户" → 必须写具体数字或标注【待补充】
+❌ "项目位置优越" → 去掉"优越"等主观形容词，只写事实
+❌ "资金测算约XX万元" → 用户未提供资金数据时必须标注【待补充：资金测算数据未提供】
+""",
+    3: """## ⛔ 第3章常见错误（请避免）
+❌ "支持率89.5%" → 征地项目必须100%支持率。如用户数据非100%，标注【待补充】
+❌ "反对率10.5%" → 征地项目反对率必须为0%，不得出现任何反对
+❌ "发放问卷150份" → 用户未提供问卷数时必须标注【待补充】，不得编造
+❌ 调查表数据与正文不一致 → 表格和正文的数值必须完全一致
+""",
+    6: """## ⛔ 第6章常见错误（请避免）
+❌ "合法性得分-5分" → 评分不能为负数，所有评分在0-100之间
+❌ "总分120分" → 评分不能超过100分
+❌ 编造评分项 → 评分项必须来自DB32/T4013-2021标准
+❌ 只说总分不说各维度分 → 必须列出合法性/合理性/可行性/可控性各维度得分
+""",
+    8: """## ⛔ 第8章常见错误（请避免）
+❌ 措施后得分低于措施前 → 措施后评分应比措施前高5-15分
+❌ 措施前后无变化 → 必须体现措施效果
+❌ 编造措施后评分 → 措施后评分必须在措施前基础上合理提升
+""",
+    4: """## ⛔ 第4章常见错误（请避免）
+❌ 编造法规文号 → 只能引用「评估依据」中列出的法规，知识库未提供的法规一律不写
+❌ "依据相关法律法规" → 必须引用具体法规名称和文号
+❌ 四性分析一句话带过 → 每项分析至少2-3段（150-300字/段）
+""",
+}
 
 
-# ═══════════════════════════════════════════════════════════
-# Full Pipeline
-# ═══════════════════════════════════════════════════════════
+def _get_chapter_antipatterns(chapter_num: int) -> str:
+    """Get chapter-specific anti-patterns (negative examples) for the prompt."""
+    return _CHAPTER_ANTIPATTERNS.get(chapter_num, "")
 
 
-# ── run_master_pipeline removed (replaced by LangGraph workflow in report_workflow.py) ──

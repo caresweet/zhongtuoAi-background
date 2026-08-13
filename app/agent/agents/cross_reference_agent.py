@@ -48,7 +48,7 @@ class CrossReferenceAgent(BaseAgent):
         }
 
     async def act(self, state: dict, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """执行三类一致性校验"""
+        """执行四类一致性校验"""
         chapters = plan.get("generated_chapters", {})
         all_text = "\n\n".join(chapters.values())
 
@@ -61,7 +61,10 @@ class CrossReferenceAgent(BaseAgent):
         # 3. 术语一致性
         term_issues = self._check_terminology(chapters)
 
-        all_issues = data_issues + logic_issues + term_issues
+        # 4. 🔴 NEW: 数据源一致性 — 报告数据 vs 用户填报数据
+        source_issues = self._check_data_source_consistency(chapters, state)
+
+        all_issues = data_issues + logic_issues + term_issues + source_issues
         consistency_score = max(0, 100 - len(all_issues) * 5)
 
         return {
@@ -70,6 +73,7 @@ class CrossReferenceAgent(BaseAgent):
             "data_issues": data_issues,
             "logic_issues": logic_issues,
             "term_issues": term_issues,
+            "source_issues": source_issues,
             "total_issues": len(all_issues),
         }
 
@@ -256,6 +260,125 @@ class CrossReferenceAgent(BaseAgent):
                         "severity": "info",
                         "detail": f"「{t1}」({c1}次)和「{t2}」({c2}次)混用，建议统一",
                     })
+
+        return issues
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴 NEW: 数据源一致性校验 — 报告数据 vs 用户填报数据
+    # ═══════════════════════════════════════════════════════════════
+
+    def _check_data_source_consistency(
+        self, chapters: Dict[int, str], state: dict
+    ) -> List[Dict[str, Any]]:
+        """Compare report values against user-provided filled_data.
+
+        If filled_data specifies area=489.51亩 but the report says 500亩 in a chapter,
+        flag as inconsistent. This catches the LLM making up its own numbers instead
+        of using the provided data.
+        """
+        issues = []
+        filled = state.get("filled_data", {}) or {}
+        if not filled:
+            return issues
+
+        # Map of filled_data keys → extract patterns in report text → display label
+        checks = [
+            # (filled_key, report_regex, label, tolerance_pct)
+            ("area_mu", r'(\d+\.?\d*)\s*亩', "征收面积（亩）", 1.0),
+            ("area_m2", r'(\d+\.?\d*)\s*(?:㎡|平方米)', "征收面积（㎡）", 1.0),
+            ("household_count", r'(\d+)\s*(?:户|农户)', "涉及户数", 0),
+            ("total_samples", r'(?:发放|回收|问卷|调查).*?(\d+)\s*(?:份|人)', "调查样本数", 5.0),
+            ("support_rate", r'支持率[：:]?\s*(\d+\.?\d*)\s*%', "支持率", 0),
+        ]
+
+        for field_key, pattern, label, tolerance_pct in checks:
+            user_val = filled.get(field_key)
+            if not user_val:
+                continue
+
+            # Extract user's numeric value
+            user_nums = re.findall(r'\d+\.?\d*', str(user_val))
+            if not user_nums:
+                continue
+            try:
+                user_num = float(user_nums[0])
+            except ValueError:
+                continue
+
+            # Scan each chapter for this field's value
+            for ch_num, text in chapters.items():
+                for m in re.finditer(pattern, text):
+                    try:
+                        report_num = float(m.group(1))
+                    except ValueError:
+                        continue
+
+                    # Skip if very small (likely not the main value)
+                    if field_key in ("area_mu", "area_m2") and report_num < 0.1:
+                        continue
+                    if field_key == "household_count" and report_num < 1:
+                        continue
+
+                    # Check consistency with tolerance
+                    if user_num > 0 and tolerance_pct == 0:
+                        # Exact match required
+                        if report_num != user_num:
+                            issues.append({
+                                "type": "source_inconsistency",
+                                "severity": "critical",
+                                "chapter": ch_num,
+                                "detail": (
+                                    f"第{ch_num}章{label}值({report_num})与用户填报数据"
+                                    f"({user_num})不一致，请使用用户提供的真实数据"
+                                ),
+                            })
+                    elif user_num > 0:
+                        # Percentage tolerance
+                        deviation = abs(report_num - user_num) / user_num * 100
+                        if deviation > tolerance_pct:
+                            issues.append({
+                                "type": "source_inconsistency",
+                                "severity": "critical" if deviation > 10 else "error",
+                                "chapter": ch_num,
+                                "detail": (
+                                    f"第{ch_num}章{label}值({report_num})与用户填报数据"
+                                    f"({user_num})偏差{deviation:.1f}%，"
+                                    f"请使用用户提供的真实数据"
+                                ),
+                            })
+
+        # Check compensation standard consistency
+        comp_val = filled.get("compensation_standard", "")
+        if comp_val and len(str(comp_val)) > 3:
+            # Extract numbers from compensation standard
+            comp_nums = re.findall(r'\d+\.?\d*', str(comp_val))
+            if comp_nums:
+                try:
+                    comp_ref = float(comp_nums[0])
+                except ValueError:
+                    comp_ref = None
+
+                if comp_ref and comp_ref > 0:
+                    for ch_num, text in chapters.items():
+                        # Find compensation amounts in chapter text
+                        for m in re.finditer(r'(\d+\.?\d*)\s*(?:万元/亩|元/㎡|元/亩)', text):
+                            try:
+                                report_comp = float(m.group(1))
+                            except ValueError:
+                                continue
+                            # Allow 20% variance for approximate mentions
+                            if report_comp > 0 and comp_ref > 0:
+                                deviation = abs(report_comp - comp_ref) / comp_ref * 100
+                                if deviation > 20:
+                                    issues.append({
+                                        "type": "source_inconsistency",
+                                        "severity": "error",
+                                        "chapter": ch_num,
+                                        "detail": (
+                                            f"第{ch_num}章补偿标准({report_comp})与用户填报"
+                                            f"({comp_ref})偏差{deviation:.0f}%，请核实"
+                                        ),
+                                    })
 
         return issues
 

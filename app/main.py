@@ -120,6 +120,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass  # Non-critical — ChromaDB might not be available yet
 
+    # Refresh learning hints on startup
+    try:
+        from app.services.master_orchestrator import refresh_learning_hints
+        await refresh_learning_hints("stability")
+    except Exception:
+        pass
+
     yield
     # Shutdown: cleanup temp files
     import shutil
@@ -149,7 +156,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Register routers
-from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat
+from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning
 
 app.include_router(knowledge.router)
 app.include_router(report.router)
@@ -157,6 +164,7 @@ app.include_router(history.router)
 app.include_router(dashboard.router)
 app.include_router(auth.router)
 app.include_router(knowledge_chat.router)
+app.include_router(learning.router)
 
 
 @app.get("/")
@@ -169,6 +177,17 @@ async def root():
     }
 
 
+# MIME type map — Python's mimetypes module doesn't know .docx/.xlsx etc.
+_MIME_MAP = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".pdf": "application/pdf",
+}
+
+
 @app.get("/api/v1/files/{file_path:path}")
 async def serve_file(file_path: str):
     """Serve stored files (images, generated reports, etc.)."""
@@ -176,7 +195,15 @@ async def serve_file(file_path: str):
     if not full_path.exists() or not full_path.is_file():
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(str(full_path))
+
+    suffix = full_path.suffix.lower()
+    media_type = _MIME_MAP.get(suffix, "application/octet-stream")
+    # Force download for binary formats the browser shouldn't render inline
+    return FileResponse(
+        str(full_path),
+        media_type=media_type,
+        filename=full_path.name,
+    )
 
 
 @app.get("/api/v1/health")

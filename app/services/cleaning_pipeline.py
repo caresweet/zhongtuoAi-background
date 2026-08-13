@@ -463,6 +463,200 @@ class SensitiveDataMasker(CleaningHandler):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Strict-mode handlers — "严格版清洗" 三层剥离
+# 用于自主学习系统：把范文剥成纯骨架，杜绝公司信息/项目数据/老旧政策污染
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CompanyInfoStripper(CleaningHandler):
+    """剥离公司/实施单位信息，替换为 {实施单位} 占位符（严格版）。
+
+    剥离对象：公司全称、简称、法定代表人、营业执照、统一社会信用代码、资质表述。
+    目的：范文里的别家公司信息不能污染生成报告。
+    """
+
+    name = "strip_company_info"
+    label = "公司信息剥离（严格版）"
+    default_enabled = True
+
+    # 公司名模式：XX有限公司 / XX有限责任公司 / XX咨询有限公司 等
+    _COMPANY_RE = re.compile(
+        r'[一-鿿]{2,30}(?:有限公司|有限责任公司|股份公司|股份有限公司|咨询公司|咨询有限公司|'
+        r'事务所|律师事务所|会计事务所|评估公司|项目代理咨询有限公司)'
+    )
+    # 法定代表人 / 负责人
+    _LEGAL_REP_RE = re.compile(r'(?:法定代表人|负责人|联系人)[：:]\s*[一-鿿]{2,4}')
+    # 营业执照 / 统一社会信用代码 / 资质证书
+    _LICENSE_RE = re.compile(r'(?:营业执照|统一社会信用代码|资质证书|资格证书)[：:号]?\s*[A-Za-z0-9]+')
+    # 资质描述段落（含"具备...资质""具备...证书"）
+    _QUALIFICATION_RE = re.compile(r'具备[^。]{0,40}?(?:资质|证书|资格)')
+
+    def process(self, text: str, config: dict) -> str:
+        # 1. 法定代表人/负责人 → {负责人}
+        text = self._LEGAL_REP_RE.sub('{负责人}', text)
+        # 2. 营业执照/信用代码 → 删除
+        text = self._LICENSE_RE.sub('', text)
+        # 3. 资质描述 → {资质描述}
+        text = self._QUALIFICATION_RE.sub('{资质描述}', text)
+        # 4. 公司名 → {实施单位}
+        text = self._COMPANY_RE.sub('{实施单位}', text)
+        return text
+
+    def find_issues(self, text: str) -> List[dict]:
+        issues = []
+        for i, line in enumerate(text.split('\n'), 1):
+            for name, pattern in [
+                ("company", self._COMPANY_RE),
+                ("legal_rep", self._LEGAL_REP_RE),
+                ("license", self._LICENSE_RE),
+            ]:
+                for m in pattern.finditer(line):
+                    issues.append({
+                        "type": name,
+                        "line": i,
+                        "description": f"公司/个人信息: {m.group(0)[:30]}",
+                        "severity": "warning",
+                    })
+        return issues
+
+
+class ProjectDataPlaceholderer(CleaningHandler):
+    """剥离项目特定数据，替换为占位符（严格版）。
+
+    剥离对象：村名/街道/社区、面积（亩/㎡/公顷）、文号、户数/人数、日期、百分比。
+    目的：范文里的具体项目数据（某村、某面积、某文号）不能污染生成报告，
+    只保留"结构 + 措辞"骨架。
+    """
+
+    name = "strip_project_data"
+    label = "项目数据剥离（严格版）"
+    default_enabled = True
+
+    # 地名：XX村 / XX社区 / XX街道 / XX组
+    _VILLAGE_RE = re.compile(r'[一-鿿]{2,6}(?:村|社区|街道|组|镇|乡|区|县|市)')
+    # 面积：数字 + 亩/平方米/㎡/公顷
+    _AREA_RE = re.compile(r'\d+(?:\.\d+)?\s*(?:亩|平方米|㎡|公顷|ha)')
+    # 文号：XX拟征告〔YYYY〕N号 / 政规〔YYYY〕N号 / 政发〔YYYY〕N号
+    _DOC_REF_RE = re.compile(r'[一-鿿]{0,10}(?:拟征告|征告|政规|政发|规|发)\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号')
+    # 户数/人数：数字 + 户/人
+    _COUNT_RE = re.compile(r'\d+\s*(?:户|人|份)')
+    # 日期：YYYY年M月D日 / YYYY-MM-DD
+    _DATE_RE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日|\d{4}-\d{1,2}-\d{1,2}')
+    # 百分比（支持率/反对率/知晓率等，含"%"前的数字）
+    _PCT_RE = re.compile(r'\d+(?:\.\d+)?\s*%')
+    # 金额：数字 + 万元/亿元/万元（金额单位明确，避免误伤普通数字）
+    _AMOUNT_RE = re.compile(r'\d+(?:\.\d+)?\s*(?:万元|亿元|千万元|百万元)')
+
+    def process(self, text: str, config: dict) -> str:
+        # 文号 → {文号}（优先级最高，避免被其他规则误替换）
+        text = self._DOC_REF_RE.sub('{文号}', text)
+        # 面积 → {面积}
+        text = self._AREA_RE.sub('{面积}', text)
+        # 金额 → {金额}
+        text = self._AMOUNT_RE.sub('{金额}', text)
+        # 户数/人数 → {数量}
+        text = self._COUNT_RE.sub('{数量}', text)
+        # 日期 → {日期}
+        text = self._DATE_RE.sub('{日期}', text)
+        # 百分比 → {百分比}
+        text = self._PCT_RE.sub('{百分比}', text)
+        # 地名 → {位置}（最后处理，避免覆盖已替换的占位符）
+        text = self._VILLAGE_RE.sub('{位置}', text)
+        return text
+
+    def find_issues(self, text: str) -> List[dict]:
+        issues = []
+        patterns = [
+            ("village", self._VILLAGE_RE, "地名"),
+            ("area", self._AREA_RE, "面积"),
+            ("amount", self._AMOUNT_RE, "金额"),
+            ("doc_ref", self._DOC_REF_RE, "文号"),
+            ("count", self._COUNT_RE, "数量"),
+            ("date", self._DATE_RE, "日期"),
+            ("pct", self._PCT_RE, "百分比"),
+        ]
+        for i, line in enumerate(text.split('\n'), 1):
+            for name, pattern, label in patterns:
+                for m in pattern.finditer(line):
+                    issues.append({
+                        "type": name,
+                        "line": i,
+                        "description": f"项目数据({label}): {m.group(0)[:30]}",
+                        "severity": "warning",
+                    })
+        return issues
+
+
+class StalePolicyFilter(CleaningHandler):
+    """过滤老旧政策（严格版）。
+
+    识别并移除已废止、已替代、已过期的政策段落。
+    目的：已废止的法规/过期地价不能进知识库，否则会生成错误引用。
+    """
+
+    name = "filter_stale_policy"
+    label = "老旧政策过滤（严格版）"
+    default_enabled = True
+
+    # 废止/替代/失效 关键词
+    _STALE_MARKERS = [
+        '已废止', '废止', '已失效', '失效', '已替代', '被替代',
+        '不再适用', '已停止执行', '停止施行', '作废',
+    ]
+    # 过期表述：有效期至 XXXX 年
+    _EXPIRY_RE = re.compile(r'有效期至\s*(\d{4})\s*年')
+
+    def process(self, text: str, config: dict) -> str:
+        import datetime
+        current_year = datetime.datetime.now().year
+
+        lines = text.split('\n')
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            # 1. 含废止标记 → 整行移除
+            if any(marker in stripped for marker in self._STALE_MARKERS):
+                continue
+            # 2. 有效期已过 → 整行移除
+            m = self._EXPIRY_RE.search(stripped)
+            if m:
+                try:
+                    expiry_year = int(m.group(1))
+                    if expiry_year < current_year:
+                        continue
+                except ValueError:
+                    pass
+            cleaned.append(line)
+        return '\n'.join(cleaned)
+
+    def find_issues(self, text: str) -> List[dict]:
+        import datetime
+        current_year = datetime.datetime.now().year
+        issues = []
+        for i, line in enumerate(text.split('\n'), 1):
+            stripped = line.strip()
+            if any(marker in stripped for marker in self._STALE_MARKERS):
+                issues.append({
+                    "type": "stale_policy",
+                    "line": i,
+                    "description": f"老旧政策(废止标记): {stripped[:40]}",
+                    "severity": "critical",
+                })
+            m = self._EXPIRY_RE.search(stripped)
+            if m:
+                try:
+                    if int(m.group(1)) < current_year:
+                        issues.append({
+                            "type": "expired_policy",
+                            "line": i,
+                            "description": f"过期政策({m.group(1)}年): {stripped[:40]}",
+                            "severity": "critical",
+                        })
+                except ValueError:
+                    pass
+        return issues
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Pipeline Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -478,11 +672,14 @@ class CleaningPipeline:
             WatermarkRemover(),
             OCRArtifactCleaner(),
             DocumentStructureCleaner(),
+            StalePolicyFilter(),          # 🔴 严格版：老旧政策前置过滤
             DateNormalizer(),
             PunctuationNormalizer(),
             BlankLineCompressor(),
             TableLinearizer(),
             SensitiveDataMasker(),
+            CompanyInfoStripper(),         # 🔴 严格版：公司信息剥离（后置）
+            ProjectDataPlaceholderer(),    # 🔴 严格版：项目数据剥离（最后，避免占位符被误替换）
         ]
         self._handler_map: Dict[str, CleaningHandler] = {
             h.name: h for h in self.handlers

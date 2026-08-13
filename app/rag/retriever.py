@@ -71,28 +71,31 @@ class RetrieverService:
         # Get query embedding
         query_embedding = await self.embedder.embed_text(chapter_query)
 
-        # Query global collection with chapter filter
-        global_results = self.vector_store.query_global(
+        # 🔴 物理隔离：按 domain 查对应 collection，不跨类型
+        collection_name = self.vector_store.get_domain_collection_name(domain)
+
+        # Query domain collection with chapter filter
+        global_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             chapter_number=chapter_number,
-            domain=domain,
         )
 
         # Also query for regulations/standards without chapter filter
-        broad_results = self.vector_store.query_global(
+        broad_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results // 2,
             document_type="regulation",
-            domain=domain,
         )
 
         # 🔴 Query specifically for example reports — templates to emulate style
-        example_results = self.vector_store.query_global(
+        example_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type="example_report",
-            domain=domain,
         )
 
         # Query session collection if available
@@ -138,23 +141,26 @@ class RetrieverService:
         chapter_query = self._build_chapter_query(chapter_number, project_context)
         query_embedding = await self.embedder.embed_text(chapter_query)
 
-        global_results = self.vector_store.query_global(
+        # 🔴 物理隔离：按 domain 查对应 collection，不跨类型，不用 domain 标签软过滤
+        collection_name = self.vector_store.get_domain_collection_name(domain)
+
+        global_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             chapter_number=chapter_number,
-            domain=domain,
         )
-        broad_results = self.vector_store.query_global(
+        broad_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results // 2,
             document_type="regulation",
-            domain=domain,
         )
-        example_results = self.vector_store.query_global(
+        example_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type="example_report",
-            domain=domain,
         )
         return self._merge_results(global_results, broad_results, example_results, [])
 
@@ -206,19 +212,26 @@ class RetrieverService:
         """
         query_embedding = await self.embedder.embed_text(query)
 
-        global_results = self.vector_store.query_global(
+        # 🔴 物理隔离：按 domain 查对应 collection，不跨类型
+        collection_name = self.vector_store.get_domain_collection_name(domain)
+        global_results = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type=document_type,
-            domain=domain,
         )
 
         items = []
         if global_results.get("documents") and global_results["documents"][0]:
             for i in range(len(global_results["documents"][0])):
+                meta = global_results["metadatas"][0][i] if global_results.get("metadatas") else {}
+                if not isinstance(meta, dict):
+                    meta = {}
                 items.append({
+                    "id": str(meta.get("chunk_id", "")) or f"g_{i}",
+                    "text": global_results["documents"][0][i],
                     "document": global_results["documents"][0][i],
-                    "metadata": global_results["metadatas"][0][i] if global_results.get("metadatas") else {},
+                    "metadata": meta,
                     "distance": global_results["distances"][0][i],
                 })
 
@@ -232,9 +245,14 @@ class RetrieverService:
             )
             if session_result.get("documents") and session_result["documents"][0]:
                 for i in range(len(session_result["documents"][0])):
+                    meta = session_result["metadatas"][0][i] if session_result.get("metadatas") else {}
+                    if not isinstance(meta, dict):
+                        meta = {}
                     items.append({
+                        "id": str(meta.get("chunk_id", "")) or f"s_{i}",
+                        "text": session_result["documents"][0][i],
                         "document": session_result["documents"][0][i],
-                        "metadata": session_result["metadatas"][0][i] if session_result.get("metadatas") else {},
+                        "metadata": meta,
                         "distance": session_result["distances"][0][i],
                     })
 
@@ -245,6 +263,7 @@ class RetrieverService:
         self,
         region: str,
         n_results: int = 5,
+        domain: Optional[str] = "stability",
     ) -> Dict[str, Any]:
         """Find local evaluation standards and example reports for a region.
 
@@ -254,6 +273,7 @@ class RetrieverService:
         Args:
             region: Region name, e.g. "南京市", "淮安市洪泽区", "南通".
             n_results: Results per category.
+            domain: report domain（物理隔离：只在对应 collection 检索）。
 
         Returns:
             Dict with:
@@ -266,8 +286,12 @@ class RetrieverService:
         query = f"{region} 社会稳定风险评估 地方标准 评估规范 征地 报告模板"
         query_embedding = await self.embedder.embed_text(query)
 
+        # 🔴 物理隔离：按 domain 查对应 collection
+        collection_name = self.vector_store.get_domain_collection_name(domain)
+
         # Retrieve standards
-        standards_raw = self.vector_store.query_global(
+        standards_raw = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type="standard",
@@ -275,7 +299,8 @@ class RetrieverService:
         standards = self._extract_documents(standards_raw)
 
         # Retrieve local regulations
-        local_raw = self.vector_store.query_global(
+        local_raw = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type="local_regulation",
@@ -283,7 +308,8 @@ class RetrieverService:
         local_regs = self._extract_documents(local_raw)
 
         # Retrieve example reports
-        example_raw = self.vector_store.query_global(
+        example_raw = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
             document_type="example_report",
@@ -291,7 +317,8 @@ class RetrieverService:
         examples = self._extract_documents(example_raw)
 
         # Also try broader search without document_type (for partial matches)
-        broad_raw = self.vector_store.query_global(
+        broad_raw = self.vector_store.query_by_collection(
+            collection_name=collection_name,
             query_embedding=query_embedding,
             n_results=n_results,
         )
@@ -410,6 +437,12 @@ class RetrieverService:
             metadata = item.get("metadata", {})
             doc_type = metadata.get("document_type", "")
             doc_text = item.get("document", "")
+
+            # 🔴 Smart reclassification: check filename for example/writing-guide indicators
+            src_file = str(metadata.get("source_file", "")).lower()
+            if any(kw in src_file for kw in ['example', '案例', '范文', 'template', '模板',
+                                               'writing_guide', '写作', 'case_study']):
+                doc_type = "example_report"
 
             source = {
                 "title": metadata.get("section_title", metadata.get("source_file", "")),

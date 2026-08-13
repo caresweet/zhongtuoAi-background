@@ -87,8 +87,9 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             else:
                 continue
 
-        # Skip PDF page renders and table screenshots
-        if name.startswith('pdf_') or '勘测定界' in name or 'pdf_page' in name.lower():
+        if name.startswith('pdf_') and ('_full' in name or '_page' in name):
+            continue  # 整页渲染（OCR用），不是报告图片材料
+        if '勘测定界' in name:
             continue
 
         # Extract folder context from path
@@ -108,6 +109,14 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             cat = ai_cat
         else:
             cat = file_cat
+
+        # 🔴 PDF-embedded images from known doc types → override category
+        if name.startswith('pdf_座谈会') and '_img' in name:
+            cat = "survey"  # Meeting sign-in sheets, survey forms
+        elif name.startswith('pdf_洪拟征告') and '_img' in name:
+            cat = "announcement"  # Announcement embedded images
+        elif name.startswith('pdf_0-勘测') and '_img' in name:
+            cat = "map"  # Survey report embedded images
 
         display_name = _clean_display_name(name, cat)
 
@@ -243,6 +252,9 @@ def _clean_display_name(name: str, category: str = "") -> str:
         'other': '资料图片'
     }
     nl = name.lower()
+    # 🔴 PDF-extracted images → always use category label (filenames are meaningless)
+    if nl.startswith('pdf_'):
+        return CAT_LABELS.get(category, '资料图片')
     # 🔴 WeChat/generic images → use category name
     if any(kw in nl for kw in ['微信图片', 'img_', 'dsc_', 'photo_', 'image_',
                                  'mmexport', 'qq图片', 'screenshot', '截图',

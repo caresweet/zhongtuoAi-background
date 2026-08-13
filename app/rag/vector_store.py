@@ -62,6 +62,61 @@ class VectorStoreService:
             "Bidding documents: announcements, evaluation reports, award notices, templates"
         )
 
+    # ── Domain 物理隔离 ──
+    # 每种报告类型独立 collection，数据物理隔离、绝不混用。
+    # 标签过滤只负责同类型内部的地区/年份过滤，类型隔离靠 collection。
+
+    DOMAIN_COLLECTIONS = {
+        "stability": "knowledge_base",      # 向后兼容：稳评沿用老 collection 名
+        "bidding": "bidding_knowledge",     # 招标已有独立 collection
+    }
+
+    @classmethod
+    def get_domain_collection_name(cls, domain_id: Optional[str]) -> str:
+        """domain_id → collection 名。
+
+        - stability → knowledge_base（老数据不变）
+        - bidding → bidding_knowledge
+        - 新类型 → kb_{domain_id}（自动物理隔离）
+        """
+        if not domain_id:
+            return cls.GLOBAL_COLLECTION
+        return cls.DOMAIN_COLLECTIONS.get(domain_id, f"kb_{domain_id}")
+
+    def get_domain_collection(self, domain_id: Optional[str]) -> chromadb.Collection:
+        """Get or create a domain-specific collection（物理隔离）。"""
+        name = self.get_domain_collection_name(domain_id)
+        return self.get_or_create_collection(name, f"Domain {domain_id or 'default'} knowledge base")
+
+    def query_by_collection(
+        self,
+        collection_name: str,
+        query_embedding: List[float],
+        n_results: int = 5,
+        document_type: Optional[str] = None,
+        chapter_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Query a specific collection（物理隔离）。
+
+        不再用 domain 标签过滤——collection 本身已是 domain 隔离，
+        只保留 document_type / chapter_number 同类型内部过滤。
+        """
+        collection = self.get_or_create_collection(collection_name)
+
+        where = None
+        conditions = []
+        if document_type:
+            conditions.append({"document_type": document_type})
+        if chapter_number is not None:
+            conditions.append({"chapter_number": chapter_number})
+
+        if len(conditions) == 1:
+            where = conditions[0]
+        elif len(conditions) > 1:
+            where = {"$and": conditions}
+
+        return self.query(collection, query_embedding, n_results, where)
+
     def create_session_collection(self, session_id: str) -> chromadb.Collection:
         """Create a session-scoped collection for project materials."""
         collection_name = f"{self.SESSION_PREFIX}{session_id}"
@@ -93,8 +148,13 @@ class VectorStoreService:
             return False
 
     def list_collections(self) -> List[str]:
-        """List all collection names."""
-        return self._client.list_collections()
+        """List all collection names（返回字符串名，非 Collection 对象）。"""
+        try:
+            return [getattr(c, 'name', str(c)) for c in self._client.list_collections()]
+        except Exception:
+            # 兜底：某些 ChromaDB 版本返回字符串列表
+            raw = self._client.list_collections()
+            return [c if isinstance(c, str) else getattr(c, 'name', str(c)) for c in raw]
 
     def delete_collection(self, name: str) -> bool:
         """Delete a collection by name."""
@@ -150,17 +210,24 @@ class VectorStoreService:
         self,
         chunks: List[Dict[str, Any]],
         doc_id_prefix: str,
+        domain: Optional[str] = None,
     ) -> int:
-        """Add document chunks to the global collection.
+        """Add document chunks to a domain-specific collection（物理隔离）。
 
         Args:
             chunks: List of chunk dicts with 'text' and 'metadata' keys.
             doc_id_prefix: Prefix for chunk IDs (e.g., "reg_1").
+            domain: report domain id (stability/bidding/...). None = 老 global
+                collection（向后兼容）。
 
         Returns:
             Number of chunks added.
         """
-        collection = self.get_or_create_global_collection()
+        # 🔴 按 domain 物理隔离：stability→knowledge_base，bidding→bidding_knowledge，新类型→kb_{domain}
+        if domain:
+            collection = self.get_domain_collection(domain)
+        else:
+            collection = self.get_or_create_global_collection()
 
         ids = [f"{doc_id_prefix}_chunk_{i}" for i in range(len(chunks))]
         documents = [c["text"] for c in chunks]

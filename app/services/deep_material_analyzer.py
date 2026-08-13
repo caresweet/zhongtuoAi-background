@@ -44,35 +44,58 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
 
     try:
         import base64
+        # 🔴 修复相对路径：uploaded files 存的是 "images/xxx.jpg"（相对 storage 目录），
+        # 但 open() 需要完整路径。先尝试直接打开，失败则解析到 storage 目录。
+        if not os.path.isabs(image_path) and not os.path.exists(image_path):
+            from app.config import settings
+            candidates = [
+                settings.STORAGE_DIR / image_path,
+                settings.STORAGE_DIR / "images" / os.path.basename(image_path),
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    image_path = str(cand)
+                    break
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
 
         prompt = (
-            "请分析这张图片：\n"
-            "1. 图片类型（单选）：调查问卷/公告公示/专家评审/地图红线/现场照片/其他\n"
-            "2. 图片中是否有文字？如有，请提取所有可见文字\n"
-            "3. 如果图片中有表格数据（人数、百分比、面积等），请以JSON格式输出\n"
-            "请用JSON格式回复：{\"category\": \"...\", \"has_text\": true/false, \"text\": \"...\", \"data\": {...}}"
+            "你是社会稳定风险评估的问卷识别助手。请识别这张图片，并【只输出 JSON，不要输出任何解释文字】。\n"
+            "JSON 格式如下：\n"
+            '{"category": "调查问卷", "has_text": true, "text": "图中所有可见文字", '
+            '"questions": [{"question": "问题文字", "options": ["选项1","选项2"], "selected": "这份问卷勾选的选项"}]}\n'
+            "\n要求：\n"
+            "- category 取值：调查问卷/公告公示/专家评审/地图红线/现场照片/其他\n"
+            "- 如果图片是群众填写的问卷，逐题识别：question=问题，options=该题所有选项，selected=填写者勾选/打勾的那个选项（没勾选则 selected 为空字符串）\n"
+            "- 如果没有文字，has_text=false，text 为空\n"
+            "- 严格输出 JSON，不要 markdown 代码块，不要解释"
         )
 
+        # 🔴 用 chat_with_image（多模态视觉方法），而不是 chat_with_reasoning（文本模型）。
+        # chat_with_reasoning 不支持图片输入，导致视觉 OCR 返回空结果。
         response = await asyncio.wait_for(
-            llm_service.chat_with_reasoning(
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                        {"type": "text", "text": prompt},
-                    ]}
-                ],
-                max_tokens=1000, temperature=0.1,
+            llm_service.chat_with_image(
+                text=prompt,
+                image_base64=img_b64,
+                media_type="image/png",
+                max_tokens=1500,
             ),
             timeout=60.0,
         )
 
-        content = response.get("content", "")
-        # Try to parse JSON from response
-        json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
+        content = response if isinstance(response, str) else response.get("content", "")
+        # Try to parse JSON from response（去掉可能的 markdown 代码块）
+        content_clean = re.sub(r'```(?:json)?', '', content).strip()
+        # 🔴 用 start/end 提取完整 JSON（支持嵌套，正则 \{...\} 无法匹配嵌套）
+        start = content_clean.find('{')
+        end = content_clean.rfind('}')
+        parsed = None
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(content_clean[start:end + 1])
+            except json.JSONDecodeError:
+                parsed = None
+        if parsed:
             result["category"] = parsed.get("category", "other")
             result["has_text"] = parsed.get("has_text", False)
             result["extracted_text"] = parsed.get("text", "")
@@ -81,6 +104,21 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
             if isinstance(data, dict):
                 for k, v in data.items():
                     result[k] = v
+            # 🔴 问卷勾选识别结果
+            questions = parsed.get("questions", [])
+            if isinstance(questions, list):
+                result["questions"] = questions
+        else:
+            # 🔴 fallback：视觉模型返回了自然语言，把整段作为提取文本
+            result["has_text"] = bool(content and content.strip())
+            result["extracted_text"] = content.strip()[:2000]
+            # 从自然语言推断类别
+            if any(kw in content for kw in ['问卷', '调查', '勾选', '支持', '反对']):
+                result["category"] = "survey"
+            elif any(kw in content for kw in ['公告', '公示', '征收']):
+                result["category"] = "announcement"
+            elif any(kw in content for kw in ['评审', '意见', '专家']):
+                result["category"] = "review"
 
     except asyncio.TimeoutError:
         logger.warning(f"Vision classification timeout for {image_path}")
@@ -97,6 +135,28 @@ def classify_image_by_filename(filepath: str) -> Optional[str]:
         for kw in info["kw"]:
             if kw in fname:
                 return cat
+    return None
+
+
+def _map_dept_question(question: str) -> Optional[str]:
+    """把部门调查题目（贵单位开头）映射到 dept_data_maps 的 key。
+
+    Returns dept_* key，匹配不到返回 None。
+    """
+    if '了解程度' in question:
+        return 'dept_decision_know'
+    if '宣传' in question or '公示' in question or '满意' in question:
+        return 'dept_publicity_satisfy'
+    if '补偿安置政策' in question or '政策了解' in question:
+        return 'dept_policy_know'
+    if '关心' in question or '主要事项' in question:
+        return 'dept_main_concern'
+    if '风险等级' in question:
+        return 'dept_risk_opinion'
+    if '信心' in question:
+        return 'dept_stability_confidence'
+    if '基本态度' in question or '态度' in question:
+        return 'dept_basic_attitude'
     return None
 
 
@@ -136,6 +196,28 @@ async def analyze_all_materials(
         if img not in all_files:
             all_files.append(img)
 
+    # 🔴 主动扫描 storage/images 里的 PDF 提取图片（座谈会问卷扫描页等）。
+    # 解决时序问题：PDF 图片在后台异步提取，deep analysis 可能跑在提取完成之前，
+    # 导致 _extracted_images 为空。这里直接扫描磁盘补上。
+    try:
+        from app.config import settings
+        images_dir = settings.STORAGE_DIR / "images"
+        if images_dir.exists():
+            for f in images_dir.iterdir():
+                fn = f.name
+                # 只扫描 PDF 嵌入图（_img），跳过整页渲染（_page/_full，用于 OCR 不是问卷材料）
+                if not fn.startswith('pdf_'):
+                    continue
+                if '_page' in fn or '_full' in fn:
+                    continue
+                if f.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
+                    continue
+                fp = str(f)
+                if fp not in all_files:
+                    all_files.append(fp)
+    except Exception as e:
+        logger.warning(f"Scan storage/images for PDF images failed: {e}")
+
     if not all_files:
         return result
 
@@ -145,21 +227,51 @@ async def analyze_all_materials(
 
     logger.info(f"Deep analysis: {len(images)} images, {len(pdfs)} PDFs")
 
-    # 1. Classify images — only OCR scanned documents, skip scenery/notice photos
+    # 1. 图片筛选分类：文字文档全量 OCR，场景照片直接分类备用
+    # 文字文档（扫描件/表单/证书）：需要 OCR 提取勾选、数据
     TEXT_DOC_KEYWORDS = ['扫描', '签字', '问卷', '调查表', '意见', '评审', '签到',
-                         'pdf_page', 'pdf_', '评估', '备案', '执照', '证书']
+                         'pdf_page', 'pdf_', '评估', '备案', '执照', '证书', '预公告', '公告']
+    # 场景照片（人物/公示栏/现场）：直接分类，不调用 vision，节省 API
+    SCENE_KEYWORDS = ['公示栏', '现场', '照片', '微信图片', '开会', '村民', '走访', '会议', '人物', '合影']
+
     classified = {cat: [] for cat in IMAGE_CATEGORIES}
     classified["other"] = []
 
+    # 🔴 问卷勾选统计：question -> {option -> count}
+    survey_tallies = {}
+    # 🔴 部门调查统计：dept_map_key -> {option -> count}
+    dept_tallies = {}
+
+    # 分离文字文档（需 vision OCR）和场景照片（直接分类）
+    text_doc_images = []
     for img_path in images:
         fname = os.path.basename(img_path).lower()
         fdir = os.path.dirname(img_path).lower() if os.path.dirname(img_path) else ""
+        is_scene = any(kw in fname or kw in fdir for kw in SCENE_KEYWORDS)
+        is_text_doc = any(kw in fname or kw in fdir for kw in TEXT_DOC_KEYWORDS)
+        if is_text_doc and not is_scene and llm_service:
+            text_doc_images.append(img_path)
+        else:
+            # 🔴 场景照片/公示栏 → 直接按文件名/文件夹分类，塞入备用
+            cat = classify_image_by_filename(img_path) or "other"
+            classified[cat].append(img_path)
 
-        # 🔴 Only OCR images that likely contain text (scanned docs, forms, certificates)
-        needs_ocr = any(kw in fname or kw in fdir for kw in TEXT_DOC_KEYWORDS)
+    # 🔴 文字文档并发 vision OCR（限并发数，避免 API 限流）
+    if text_doc_images and llm_service:
+        sem = asyncio.Semaphore(6)
 
-        if needs_ocr and llm_service and len(classified.get("map",[])) + len(classified.get("survey",[])) + len(classified.get("review",[])) < max_vision_images:
-            vision_result = await classify_image_with_vision(img_path, llm_service)
+        async def _ocr_one(img_path):
+            async with sem:
+                try:
+                    vr = await classify_image_with_vision(img_path, llm_service)
+                except Exception as e:
+                    logger.warning(f"Vision OCR error for {img_path}: {e}")
+                    vr = {}
+                return img_path, vr
+
+        vision_results = await asyncio.gather(*[_ocr_one(p) for p in text_doc_images])
+
+        for img_path, vision_result in vision_results:
             cat = vision_result.get("category", "other")
             if cat in classified:
                 classified[cat].append(img_path)
@@ -169,12 +281,59 @@ async def analyze_all_materials(
                 text = vision_result.get("extracted_text", "")
                 if text:
                     result["extracted_pdf_text"] += f"\n[{os.path.basename(img_path)}]\n{text}\n"
-        else:
-            # 🔴 Photos — just classify by filename/folder, no expensive vision API call
-            cat = classify_image_by_filename(img_path) or "other"
-            classified[cat].append(img_path)
+            # 🔴 收集问卷勾选结果（questions: [{question, options, selected}]）
+            questions = vision_result.get("questions", [])
+            if isinstance(questions, list):
+                for q in questions:
+                    if not isinstance(q, dict):
+                        continue
+                    question = q.get("question", "")
+                    selected = q.get("selected", "")
+                    # 🔴 类型保护：question/selected 可能是 list 或其他类型
+                    if not isinstance(question, str):
+                        continue
+                    if isinstance(selected, list):
+                        selected = selected[0] if selected else ""
+                    if not isinstance(selected, str):
+                        selected = str(selected) if selected else ""
+                    question = question.strip()
+                    selected = selected.strip()
+                    # 🔴 归一化：全角标点统一为半角，避免「36~55」和「36～55」被拆成两个选项
+                    for full, half in [('～', '~'), ('（', '('), ('）', ')'), ('，', ','), ('：', ':')]:
+                        selected = selected.replace(full, half)
+                    if not (question and selected):
+                        continue
+                    # 🔴 区分部门调查（"贵单位"/"部门"开头）和群众问卷
+                    if '贵单位' in question or question.startswith('部门'):
+                        map_key = _map_dept_question(question)
+                        if map_key:
+                            dept_tallies.setdefault(map_key, {})
+                            dept_tallies[map_key][selected] = dept_tallies[map_key].get(selected, 0) + 1
+                    else:
+                        survey_tallies.setdefault(question, {})
+                        survey_tallies[question][selected] = survey_tallies[question].get(selected, 0) + 1
 
     result["classified_images"] = {k: v for k, v in classified.items() if v}
+
+    # 🔴 聚合问卷勾选统计，得出每题各选项的人数和百分比
+    if survey_tallies:
+        total_sheets = max(
+            (sum(option_counts.values()) for option_counts in survey_tallies.values()),
+            default=0
+        )
+        result["extracted_survey_data"]["questionnaire_tallies"] = survey_tallies
+        result["extracted_survey_data"]["questionnaire_total_sheets"] = total_sheets
+
+    # 🔴 聚合部门调查统计（贵单位开头的题目），存到 dept_* 字段
+    if dept_tallies:
+        dept_total = max(
+            (sum(option_counts.values()) for option_counts in dept_tallies.values()),
+            default=0
+        )
+        result["extracted_survey_data"]["dept_survey_count"] = dept_total
+        # 把 dept_tallies 的每个 map_key 存为独立字段（供 _fill_table_data 使用）
+        for map_key, option_counts in dept_tallies.items():
+            result["filled_data_updates"][map_key] = option_counts
 
     # 2. Extract PDF text
     pdf_text = ""
@@ -204,6 +363,22 @@ async def analyze_all_materials(
         for k, v in survey_data.items():
             if v:
                 result["filled_data_updates"][k] = str(v)
+
+    # 🔴 问卷勾选统计：以结构化形式传给 agent（dict 不转字符串）
+    tallies = result["extracted_survey_data"].get("questionnaire_tallies", {})
+    if tallies:
+        result["filled_data_updates"]["questionnaire_tallies"] = tallies
+        total = result["extracted_survey_data"].get("questionnaire_total_sheets", 0)
+        result["filled_data_updates"]["survey_total_count"] = total
+        # 生成易读的统计摘要，供 agent 直接引用
+        summary_lines = []
+        for question, option_counts in tallies.items():
+            opt_parts = []
+            for opt, cnt in option_counts.items():
+                pct = round(cnt / total * 100, 1) if total else 0
+                opt_parts.append(f"{opt} {cnt}人({pct}%)")
+            summary_lines.append(f"「{question}」：{'、'.join(opt_parts)}")
+        result["filled_data_updates"]["questionnaire_summary"] = "；".join(summary_lines)
 
     return result
 
@@ -270,25 +445,19 @@ def apply_analysis_to_state(state: dict, analysis_result: Dict[str, Any]) -> Non
     filled = state.setdefault("filled_data", {})
     for k, v in updates.items():
         if v and (k not in filled or not filled[k]):
-            filled[k] = str(v)
+            if isinstance(v, dict):
+                filled[k] = v  # 🔴 dict 保留结构（如 questionnaire_tallies），不转字符串
+            else:
+                filled[k] = str(v)
 
     # 3. PDF text for RAG
     pdf_text = analysis_result.get("extracted_pdf_text", "")
     if pdf_text:
         state.setdefault("_pdf_texts", {})["deep_analysis"] = pdf_text
 
-    # 4. Compute survey defaults from extracted data if missing
-    total = int(filled.get("total_samples") or filled.get("household_count") or 0)
-    if total > 0:
-        support = int(filled.get("support_count") or total * 0.61)
-        oppose = int(filled.get("oppose_count") or total * 0.10)
-        filled.setdefault("total_samples", str(total))
-        filled.setdefault("survey_total_count", str(total))
-        filled.setdefault("support_count", str(support))
-        filled.setdefault("oppose_count", str(oppose))
-        filled.setdefault("conditional_support_count", str(total - support - oppose))
-        if total > 0:
-            filled.setdefault("support_rate", f"{support/total*100:.1f}")
+    # 4. 🔴 只用真实提取的问卷总数，不编造支持率/反对率
+    if filled.get("survey_total_count"):
+        filled.setdefault("total_samples", str(filled["survey_total_count"]))
 
     logger.info(f"Deep analysis applied: {len(classified)} image categories, "
                 f"{len(updates)} data fields extracted")

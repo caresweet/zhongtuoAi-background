@@ -16,6 +16,8 @@ import re
 from typing import Dict, List, Any, Optional
 
 from .base_agent import BaseAgent
+from app.validation.content_guardrails import AI_BUZZWORD_PATTERNS
+from app.agent.chapter_definitions import CHAPTER_FORMAT_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -34,78 +36,14 @@ PROHIBITED_PATTERNS = [
     (r'(?:好的[，,]|当然可以[，,]|没问题[，,])', "对话式开场白"),
 ]
 
-# ⛔ AI高频套词检测（去AI化核心规则）
-AI_BUZZWORD_PATTERNS = [
-    (r'具有重要意义', "AI套词-具有重要意义"),
-    (r'切实保障', "AI套词-切实保障"),
-    (r'多措并举', "AI套词-多措并举"),
-    (r'统筹推进', "AI套词-统筹推进"),
-    (r'夯实基础', "AI套词-夯实基础"),
-    (r'综上所述', "AI套词-综上所述"),
-    (r'有力支撑', "AI套词-有力支撑"),
-    (r'奠定了坚实基础', "AI套词-奠定了坚实基础"),
-    (r'提供了有力保障', "AI套词-提供了有力保障"),
-    (r'注入了强劲动力', "AI套词-注入了强劲动力"),
-    (r'全方位[、，]多层次[、，]宽领域', "AI套词-三字排比"),
-    (r'多维度[、，]全方位[、，]深层次', "AI套词-三字排比"),
-    (r'系统[、，]全面[、，]深入', "AI套词-三字排比"),
-    (r'第一[，,、].*第二[，,、].*第三', "AI套词-工整排比"),
-    (r'一是[，,、].*二是[，,、].*三是', "AI套词-工整排比"),
-    (r'通过系统识别', "AI套词-机器翻译腔"),
-    (r'依据指令要求', "AI套词-机器翻译腔"),
-    (r'经综合分析', "AI套词-机器翻译腔"),
-    (r'据调查显示', "AI套词-机器翻译腔"),
-]
+# ⛔ AI高频套词检测 — 从 content_guardrails 导入统一列表
+# ⛔ 章节格式规则 — 从 chapter_definitions 导入统一列表
+# (AI_BUZZWORD_PATTERNS, CHAPTER_FORMAT_RULES imported above)
 
 # 必须出现的固定表述
 REQUIRED_PHRASES_GLOBAL = [
     "江苏众拓项目代理咨询有限公司",  # 实施单位
 ]
-
-# 每章特定的格式要求
-CHAPTER_FORMAT_RULES: Dict[int, Dict[str, Any]] = {
-    1: {
-        "must_contain": ["决策名称", "责任单位"],
-        "must_have_table": True,
-        "table_min_rows": 2,
-    },
-    2: {
-        "must_contain": ["评估过程", "评估方法", "评估依据"],
-        "must_have_table": True,
-    },
-    3: {
-        "must_contain": ["调查", "公众", "意见"],
-        "must_have_table": True,
-    },
-    4: {
-        "must_contain": ["合法性分析", "合理性分析", "可行性分析", "可控性分析"],
-        "must_have_table": False,
-    },
-    5: {
-        "must_contain": ["风险", "识别"],
-        "must_have_table": True,
-    },
-    6: {
-        "must_contain": ["风险等级", "得分", "分"],
-        "must_have_table": True,
-    },
-    7: {
-        "must_contain": ["防范", "化解", "措施"],
-        "must_have_table": True,
-    },
-    8: {
-        "must_contain": ["措施后", "得分"],
-        "must_have_table": True,
-    },
-    9: {
-        "must_contain": ["评估结论", "风险等级", "建议"],
-        "must_have_table": False,
-    },
-    10: {
-        "must_contain": ["应急预案", "编制目的"],
-        "must_have_table": False,
-    },
-}
 
 
 class FormatComplianceAgent(BaseAgent):

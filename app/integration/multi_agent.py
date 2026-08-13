@@ -54,7 +54,7 @@ def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = LLM_MAX_TOK
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
-        "temperature": 0.3,
+        "temperature": 0.3
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, method="POST")
@@ -92,7 +92,7 @@ def get_chapter_constraints(chapter_number: int) -> Dict:
         "sections": [],
         "required_tables": [],
         "min_words": 300,
-        "max_words": 2000,
+        "max_words": 2000
     })
 
 
@@ -103,7 +103,7 @@ def get_chapter_constraints(chapter_number: int) -> Dict:
 def build_system_prompt(agent_type: str) -> str:
     """构建增强版系统提示词，包含知识库结构约束"""
 
-    base_identity = "你是江苏众拓项目代理咨询有限公司的社会稳定风险评估报告撰写专家。"
+    base_identity = "你是{company_name}的社会稳定风险评估报告撰写专家。"
 
     if agent_type == "ch1_2":
         spec1 = get_chapter_constraints(1)
@@ -261,8 +261,8 @@ def generate_ai_content(agent_type: str, data: Dict) -> str:
 CHAPTER_TO_PARAGRAPH_MAP = {
     "ch1_2": [182, 184, 187, 189, 191, 200, 263, 264],
     "ch3_5": [293, 295, 297, 319, 321, 323, 326, 328, 330, 333, 335, 337, 339, 353, 355, 357, 359],
-    "ch6_10": [393, 395, 397, 399, 401, 420, 422, 424, 427, 442],
-}
+    "ch6_10": [393, 395, 397, 399, 401, 420, 422, 424, 427, 442]
+    }
 
 
 def split_ai_content_to_paragraphs(content: str, agent_type: str) -> Dict[int, str]:
@@ -383,7 +383,7 @@ def run_coordinator(data_path: str, output_path: str) -> Dict:
     agent_names = {
         "ch1_2": "Ch1-2 Writer（基本概况+评估过程）",
         "ch3_5": "Ch3-5 Writer（风险调查+综合+识别）",
-        "ch6_10": "Ch6-10 Writer（研判+防范+结论+预案）",
+        "ch6_10": "Ch6-10 Writer（研判+防范+结论+预案）"
     }
 
     print(f"\n[Coordinator] 启动 {len(agents)} 个Writer Agent并行生成...")
@@ -459,8 +459,8 @@ def run_coordinator(data_path: str, output_path: str) -> Dict:
             agent: {
                 "content_length": len(content),
                 "paragraphs_mapped": len(split_ai_content_to_paragraphs(content, agent)),
-                "compliance_score": compliance_results.get(agent, {}).get("score", -1),
-            }
+                "compliance_score": compliance_results.get(agent, {}).get("score", -1)
+    }
             for agent, content in agent_results.items()
             if not content.startswith("[生成失败")
         }
@@ -472,12 +472,12 @@ def run_coordinator(data_path: str, output_path: str) -> Dict:
             "model": LLM_MODEL,
             "template_version": "金湖稳评报告模板 v2026",
             "multi_agent_version": "v3.0",
-            "thinking_log": thinking_log,
-        },
+            "thinking_log": thinking_log
+    },
         "basic_info": data.get("basic_info", {}),
         "survey_data": data.get("survey_data", {}),
         "ai_content": {str(k): v for k, v in all_paragraphs.items()},
-        "ai_raw_content": agent_results,
+        "ai_raw_content": agent_results
     }
 
     with open(output_path, "w", encoding="utf-8") as f:

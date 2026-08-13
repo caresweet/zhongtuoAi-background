@@ -38,6 +38,52 @@ FONT_DIGIT = 'Times New Roman'     # 数字字体
 LINE_SPACING_PT = 28            # 行间距28磅
 
 
+def _match_tally(tallies: dict, label: str, option: str):
+    """把 LLM 写的调查题目（label）映射到问卷真实勾选统计（tallies）里的题目。
+
+    Returns 该选项的勾选数，匹配不到返回 None。
+    """
+    if not isinstance(tallies, dict) or not label or not option:
+        return None
+
+    # 关键词映射：LLM 题目 → 问卷真实题目的特征词
+    keyword_map = [
+        (['知晓', '了解'], ['了解']),
+        (['支持', '态度'], ['支持', '态度']),
+        (['年龄'], ['年龄']),
+        (['职业'], ['职业']),
+        (['身份', '您是', '本地', '租住'], ['您是']),
+        (['诉求', '解决', '调解', '诉讼'], ['解决诉求', '方式解决']),
+        (['反对'], ['反对']),
+    ]
+
+    matched_question = None
+    for llm_kws, real_kws in keyword_map:
+        if any(k in label for k in llm_kws):
+            for q in tallies.keys():
+                if any(k in q for k in real_kws):
+                    matched_question = q
+                    break
+            if matched_question:
+                break
+
+    if not matched_question:
+        return None
+
+    opts = tallies.get(matched_question, {})
+    if not isinstance(opts, dict):
+        return None
+
+    # 精确匹配选项
+    if option in opts:
+        return opts[option]
+    # 模糊匹配选项（如"基本满意" vs "满意"）
+    for opt_key, cnt in opts.items():
+        if option in opt_key or opt_key in option:
+            return cnt
+    return None
+
+
 class ReportAssembler:
     """Assembles generated chapter markdown into a properly formatted DOCX report."""
 
@@ -56,6 +102,7 @@ class ReportAssembler:
 
     def assemble(self, state: dict) -> str:
         """Build the final report DOCX from session state."""
+        self._inserted_images = set()  # 🔴 Reset per call — avoid cross-report dedup
         import traceback as _tb
         session_id = state.get("session_id", "report")
         chapters = state.get("chapters", {})
@@ -87,13 +134,14 @@ class ReportAssembler:
         for item in (state.get("_uploaded_files", []) or []):
             if isinstance(item, str): uploaded_paths.append(item)
             elif isinstance(item, dict): uploaded_paths.append(item.get("path", ""))
-        # Also collect from _classified_images and storage scan
+        # 🔴 Include PDF-extracted images (embedded in PDFs, saved to storage/images/)
         if hasattr(self, 'images_dir') and self.images_dir.exists():
             for f in self.images_dir.iterdir():
-                if f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.bmp'):
-                    fp = str(f)
-                    if fp not in uploaded_paths:
-                        uploaded_paths.append(fp)
+                if not f.name.startswith('pdf_'): continue
+                if '_full' in f.name: continue  # Skip full-page renders
+                fp = str(f)
+                if fp not in uploaded_paths:
+                    uploaded_paths.append(fp)
         img_catalog = build_image_catalog(uploaded_paths,
                                           ai_classifications=state.get("_classified_images"))
         self._chapter_image_map = img_catalog.get("by_chapter", {})
@@ -129,15 +177,17 @@ class ReportAssembler:
         self._setup_page(doc)
 
         # ── Cover Page ──
-        self._add_cover_page(doc, doc_ref, project_name, org_name, location)
+        implement_unit = filled.get("implement_unit", "") or "江苏众拓项目代理咨询有限公司"
+        self._add_cover_page(doc, doc_ref, project_name, org_name, location, implement_unit)
         doc.add_page_break()
 
-        # ── 公司资质（第二页）──
-        self._add_company_qualifications(doc, filled)
-        doc.add_page_break()
+        # ── 公司资质（第二页，无图片则跳过）──
+        qual_has_content = self._add_company_qualifications(doc, filled, domain=state.get("_domain", "stability"))
+        if qual_has_content:
+            doc.add_page_break()
 
         # ── 公司简介（第三页）──
-        self._add_company_intro(doc)
+        self._add_company_intro(doc, domain=filled.get("_domain", state.get("_domain", "stability")))
 
         # 🔴 Collect extracted PDF tables
         extracted_tables = self._get_extracted_tables(state)
@@ -177,16 +227,6 @@ class ReportAssembler:
         ts = datetime.now().strftime('%m%d_%H%M')
         name, ext = filename.rsplit('.', 1) if '.' in filename else (filename, 'docx')
         filename = f"{name}_{ts}.{ext}"
-        # Debug: count drawings before save
-        import re as _re_dbg, io as _io_dbg
-        buf = _io_dbg.BytesIO()
-        doc.save(buf)
-        xml_check = buf.getvalue().decode('utf-8', errors='ignore')
-        dwg_count = len(_re_dbg.findall(r'<w:drawing>', xml_check))
-        blip_count = len(_re_dbg.findall(r'r:embed="rId\d+"', xml_check))
-        print(f"[ASSEMBLE_DEBUG] Before save: {len(doc.paragraphs)} paras, "
-              f"drawings={dwg_count}, blips={blip_count}", flush=True, file=__import__('sys').stderr)
-
         outpath = self.output_dir / filename
         doc.save(str(outpath))
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
@@ -262,225 +302,57 @@ class ReportAssembler:
                             elif '合计' in str(cells):
                                 self._set_cell(row.cells[score_col], str(sum(use_map.values())))
 
-            # Fix detailed survey tables: 调查内容 | 选项 | 人次/个数 | 比例（%）/比例
-            if h0 == '调查内容' and ('选项' in str(cells0)):
+            # Fix detailed survey tables: 调查内容 | 选项 | 人数 | 比例
+            # 🔴 只处理群众调查表（人数列），部门调查表（个数列）单独处理
+            if h0 == '调查内容' and '选项' in str(cells0) and '人数' in str(cells0):
+                # 🔴 优先从 questionnaire_tallies（问卷勾选统计）查真实数据
+                tallies = filled.get("questionnaire_tallies", {})
+                total = int(filled.get("survey_total_count", 0) or 0)
                 for row in tbl.rows[1:]:
                     rtext = [c.text.strip() for c in row.cells]
-                    label = ' '.join(rtext[:2])
-                    if any(p in str(rtext) for p in ['【填入', '【待补充', '【待统计', 'XX']):
-                        if '知晓度' in label and '不知道' in label:
-                            self._set_cell(row.cells[2], str(survey_total - know_n))
-                            self._set_cell(row.cells[3], f'{100 - know_rate:.0f}%')
-                        elif '知晓度' in label and '知道' in label:
-                            self._set_cell(row.cells[2], str(know_n))
-                            self._set_cell(row.cells[3], f'{know_rate:.0f}%')
-                        elif '支持度' in label and '支持' in label and '条件' not in label and '反对' not in label:
-                            self._set_cell(row.cells[2], str(support_n))
-                            self._set_cell(row.cells[3], f'{support_rate:.1f}%')
-                        elif '支持度' in label and '条件' in label:
+                    label = rtext[0] if len(rtext) > 0 else ""
+                    option = rtext[1] if len(rtext) > 1 else ""
+
+                    # 🔴 模糊匹配：把 LLM 写的题目（如"项目支持度"）映射到问卷真实题目（如"对该决策是否支持"）
+                    count = None
+                    if isinstance(tallies, dict) and label and option:
+                        count = _match_tally(tallies, label, option)
+
+                    if count is not None and total > 0:
+                        self._set_cell(row.cells[2], str(count))
+                        self._set_cell(row.cells[3], f"{round(count/total*100, 1)}%")
+                    elif any(p in str(rtext) for p in ['【填入', '【待补充', '【待统计', 'XX']):
+                        # 🔴 没有真实数据 → 填【待补充】，绝不编造 150/100%
+                        self._set_cell(row.cells[2], '【待补充】')
+                        self._set_cell(row.cells[3], '【待补充】')
+
+            # Fix 部门意见调查分析表（个数列）：用 dept_* 字段填充真实部门数据
+            if h0 == '调查内容' and '个数' in str(cells0):
+                dept_count = int(filled.get("dept_survey_count", 0) or 0)
+                if dept_count <= 0:
+                    # 🔴 没有部门调查数据 → 覆盖 LLM 编造的数量，填【待补充】
+                    for row in tbl.rows[1:]:
+                        self._set_cell(row.cells[2], '【待补充】')
+                        self._set_cell(row.cells[3], '【待补充】')
+                else:
+                    # 🔴 有部门数据 → 用 dept_* 字段的真实勾选数据填充
+                    from app.services.deep_material_analyzer import _map_dept_question
+                    for row in tbl.rows[1:]:
+                        cells_text = [c.text.strip() for c in row.cells]
+                        label = cells_text[0] if len(cells_text) > 0 else ""
+                        option = cells_text[1] if len(cells_text) > 1 else ""
+                        map_key = _map_dept_question(label)
+                        if not map_key:
+                            continue
+                        extracted = filled.get(map_key, {})
+                        if isinstance(extracted, dict) and option in extracted:
+                            count = int(extracted[option])
+                            self._set_cell(row.cells[2], str(count))
+                            self._set_cell(row.cells[3], f"{round(count/dept_count*100, 1)}")
+                        else:
+                            # 该选项无勾选 → 0
                             self._set_cell(row.cells[2], '0')
                             self._set_cell(row.cells[3], '0.0%')
-                        elif '支持度' in label and '反对' in label:
-                            self._set_cell(row.cells[2], str(oppose_n))
-                            self._set_cell(row.cells[3], f'{100 - support_rate:.1f}%')
-                        else:
-                            # Remaining rows — fill with reasonable defaults
-                            if '【填入' in str(rtext) or '【待' in str(rtext) or 'XX' in str(rtext):
-                                self._set_cell(row.cells[2], str(survey_total))
-                                self._set_cell(row.cells[3], f'{support_rate:.1f}%')
-
-            # Fix 部门意见调查分析表: if all cells are placeholder, mark as 未开展
-            if h0 == '调查内容' and '个数' in str(cells0):
-                all_ph = all(
-                    any(p in c.text for p in ['【填入', '【待', 'XX'])
-                    for row in tbl.rows[1:] for c in row.cells if c.text.strip()
-                )
-                if all_ph:
-                    for row in tbl.rows[1:]:
-                        self._set_cell(row.cells[2], '—')
-                        self._set_cell(row.cells[3], '—')
-
-            # 🔴 Fix department survey tables — fill with dept_survey_count data
-            dept_count = int(filled.get("dept_survey_count", 0) or 0)
-            if dept_count > 0 and any("贵单位" in c.text or "部门" in c.text for row in tbl.rows for c in row.cells):
-                # This is a department survey table — fill data columns with computed values
-                dept_data_maps = {
-                    "dept_decision_know":      {"了解": "1", "了解一些": "1", "不了解": "0"},
-                    "dept_publicity_satisfy":  {"很满意": "0", "满意": "1", "基本满意": "1", "不满意": "0"},
-                    "dept_policy_know":        {"了解": "1", "了解一些": "1", "不了解": "0"},
-                    "dept_main_concern":       {"征地用途": "1", "征地范围": "0", "补偿费用": "1", "土地换社保": "0", "其他": "0"},
-                    "dept_risk_opinion":       {"高风险": "0", "中风险": "1", "低风险": "1"},
-                    "dept_stability_confidence":{"有信心": "1", "在上级党委政府的支持下比较有信心": "1", "不确定": "0", "无信心": "0"},
-                    "dept_basic_attitude":     {"支持": "2", "无所谓": "0", "反对": "0"},
-                }
-                # Try extracted data first, fall back to default distribution
-                for row in tbl.rows[1:]:
-                    cells_text = [c.text.strip() for c in row.cells]
-                    option = cells_text[1] if len(cells_text) > 1 else ""
-                    # Check if data columns are empty/zero/placeholder
-                    val_col = cells_text[2] if len(cells_text) > 2 else ""
-                    pct_col = cells_text[3] if len(cells_text) > 3 else ""
-                    need_fill = val_col in ("", "0", "—") or pct_col in ("", "0", "—")
-                    if need_fill and option:
-                        # Try to find from extracted data
-                        found = False
-                        for map_key, dist_map in dept_data_maps.items():
-                            if option in dist_map:
-                                # Check if we have extracted data for this
-                                extracted = filled.get(map_key, {})
-                                if isinstance(extracted, dict) and option in extracted:
-                                    count = int(extracted[option])
-                                    self._set_cell(row.cells[2], str(count))
-                                    self._set_cell(row.cells[3], f"{round(count/dept_count*100, 1)}")
-                                    found = True
-                                elif not isinstance(extracted, dict) or not extracted:
-                                    # Use default distribution
-                                    count = int(dist_map[option])
-                                    self._set_cell(row.cells[2], str(count))
-                                    self._set_cell(row.cells[3], f"{round(count/dept_count*100, 1)}")
-                                    found = True
-                                break
-
-    def _inject_missing_tables(self, doc, filled, chapters):
-        """Inject missing tables at end of document with chapter labels."""
-        support_rate = float(str(filled.get('support_rate', 96)).replace('%',''))
-        total = int(filled.get('household_count', 120))
-        support_n = int(total * support_rate / 100)
-        oppose_n = total - support_n
-        know_n = int(total * 0.89)
-
-        existing_headers = set()
-        for t in doc.tables:
-            if t.rows:
-                h = tuple(c.text.strip()[:15] for c in t.rows[0].cells)
-                existing_headers.add(h)
-
-        injected = False
-
-        # 公众意见调查分析表 (Ch3)
-        if ('调查内容', '选项', '人数', '比例') not in existing_headers:
-            self._add_table_title(doc, '表3-1 公众意见调查分析表')
-            cond_n = int(total * 0.1) if total > 0 else 0
-            self._add_docx_table(doc, ['调查内容', '选项', '人数', '比例'], [
-                ['项目知晓度', '知道', str(know_n), f'{know_rate:.0f}%'],
-                ['项目知晓度', '不知道', str(total - know_n), f'{100-know_rate:.0f}%'],
-                ['项目支持度', '支持', str(support_n), f'{support_rate:.1f}%'],
-                ['项目支持度', '有条件支持', str(cond_n), f'{10:.0f}%'],
-                ['项目支持度', '反对', str(oppose_n), f'{100-support_rate:.1f}%'],
-                ['补偿标准满意度', '满意', str(int(total*0.6)), f'{60:.0f}%'],
-                ['补偿标准满意度', '基本满意', str(int(total*0.3)), f'{30:.0f}%'],
-                ['补偿标准满意度', '不满意', str(int(total*0.1)), f'{10:.0f}%'],
-            ])
-            injected = True
-
-        # 部门意见调查分析表 (Ch3) — fallback with default dept survey data
-        dept_n = int(filled.get("dept_survey_count", 0) or 2)
-        if ('调查内容', '选项', '个数', '比例') not in existing_headers:
-            self._add_table_title(doc, '表3-2 部门意见调查分析表')
-            self._add_docx_table(doc, ['调查内容', '选项', '个数', '比例'], [
-                ['对决策的了解程度', '了解', str(dept_n), '100.0'],
-                ['对决策的了解程度', '基本了解', '0', '0.0'],
-                ['对决策的了解程度', '不了解', '0', '0.0'],
-                ['对决策的态度', '支持', str(dept_n), '100.0'],
-                ['对决策的态度', '有条件支持', '0', '0.0'],
-                ['对决策的态度', '反对', '0', '0.0'],
-            ])
-            injected = True
-
-        # 风险因素初始风险等级表 (Ch5)
-        if ('序号', '风险类型', '风险因素描述', '风险等级') not in existing_headers:
-            self._add_table_title(doc, '表5-1 风险因素识别与初始等级表')
-            self._add_docx_table(doc, ['序号', '风险类型', '风险因素描述', '风险等级'], [
-                ['1', '征收程序方面的风险', '是否按照新的土地征收程序开展工作', '较小'],
-                ['2', '土地征收补偿方案风险', '期望值过高，不满补偿方案', '一般'],
-                ['3', '征收决策实施风险', '征收信息缺少透明度', '一般'],
-                ['4', '征地社保名额确定引发的风险', '社保名额分配未明确的情况下，引发群众不满', '一般'],
-                ['5', '征收决策资金风险', '资金不足导致补偿款发放不及时', '一般'],
-                ['6', '环境影响方面的风险', '对周边水系和农田灌溉产生影响', '较小'],
-            ])
-            injected = True
-
-        if injected:
-            p = doc.add_paragraph()
-            p.text = '注：以上表格为系统根据项目数据自动补全。'
-
-    def _add_table_title(self, doc, title):
-        """Add a centered table title paragraph."""
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(title)
-        r.font.name = FONT_H3; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_H3)
-        r.font.size = Pt(12); r.bold = True
-        p.paragraph_format.space_before = Pt(12)
-        p.paragraph_format.space_after = Pt(6)
-
-    def _add_docx_table(self, doc, headers, rows):
-        """Add a DOCX table with merged cells for grouped rows."""
-        from docx.shared import Pt, Inches
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        # Trim empty trailing columns and rows
-        while headers and headers[-1] == '':
-            headers = headers[:-1]
-        rows = [[c for c in r[:len(headers)]] for r in rows]
-        for r in rows:
-            while len(r) < len(headers):
-                r.append('')
-        tbl = doc.add_table(rows=len(rows)+1, cols=len(headers), style='Table Grid')
-        tbl.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        tbl.autofit = True
-        # Set uniform column widths based on page width
-        from docx.shared import Cm
-        page_width = Cm(16)  # A4 usable width
-        col_width = page_width / max(len(headers), 1)
-        for ci, h in enumerate(headers):
-            self._set_cell(tbl.rows[0].cells[ci], h, bold=True)
-        for ri in range(len(rows) + 1):
-            for ci in range(len(headers)):
-                try:
-                    tbl.cell(ri, ci).width = col_width
-                except: pass
-
-        for ri, row in enumerate(rows):
-            for ci, val in enumerate(row):
-                if ci < len(headers):
-                    self._set_cell(tbl.rows[ri+1].cells[ci], val)
-
-        # Merge col 0: consecutive rows with SAME text → merge into one
-        # python-docx merge concatenates paragraphs — remove duplicates after merge
-        merge_start = None
-        current_text = None
-        merge_groups = []  # (start_ri, end_ri) for merge groups
-        for ri, row in enumerate(rows):
-            cell_text = row[0] if row[0] and row[0] != "0" else ""
-            if cell_text and cell_text == current_text:
-                continue  # same group
-            # End previous merge group
-            if merge_start is not None and merge_start < ri - 1:
-                merge_groups.append((merge_start, ri))
-            # Start new group
-            if cell_text:
-                merge_start = ri
-                current_text = cell_text
-            else:
-                merge_start = None
-                current_text = None
-        # Last group
-        if merge_start is not None and merge_start < len(rows) - 1:
-            merge_groups.append((merge_start, len(rows)))
-
-        # Apply merges (from bottom to top to avoid index issues)
-        for start_ri, end_ri in reversed(merge_groups):
-            try:
-                tbl.cell(start_ri + 1, 0).merge(tbl.cell(end_ri, 0))
-                # After merge, remove all paragraphs except the first from merged cell
-                tc = tbl.cell(start_ri + 1, 0)._tc
-                all_paras = tc.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')
-                for p in all_paras[1:]:  # Keep first paragraph, remove rest
-                    tc.remove(p)
-            except Exception:
-                pass
-
-        doc.add_paragraph()
 
     @staticmethod
     def _dedup_table_titles(doc):
@@ -934,7 +806,7 @@ class ReportAssembler:
                     modified = True
 
             # Then remove filler phrases (with timeout guard)
-            new_t = _safe_re_sub(filler_pattern, '详见报告相关章节。', t)
+            new_t = _safe_re_sub(filler_pattern, '【待补充】', t)
             if new_t != t:
                 t = new_t
                 modified = True
@@ -1129,7 +1001,7 @@ class ReportAssembler:
                         elif any(kw in col_hdr for kw in ['备注', '说明', '注']):
                             self._set_cell(cell, '—')  # No remarks needed
                         else:
-                            self._set_cell(cell, '详见报告相关章节')
+                            self._set_cell(cell, '【待补充】')
 
         # Remove duplicate table titles (keep only first occurrence)
         seen_titles = set()
@@ -1175,7 +1047,7 @@ class ReportAssembler:
     # Cover Page
     # ═══════════════════════════════════════════════════════════════
 
-    def _add_cover_page(self, doc, doc_ref, project_name, org_name, location=""):
+    def _add_cover_page(self, doc, doc_ref, project_name, org_name, location="", implement_unit=""):
         for _ in range(6):
             doc.add_paragraph()
 
@@ -1204,7 +1076,7 @@ class ReportAssembler:
 
         for text in [
             f'责任单位：{org_name}' if org_name else '',
-            '稳评实施单位：江苏众拓项目代理咨询有限公司',
+            f'稳评实施单位：{implement_unit}' if implement_unit else '',
             f'编制日期：{datetime.now().year}年{datetime.now().month}月',
         ]:
             if not text:
@@ -1243,9 +1115,6 @@ class ReportAssembler:
             markdown = str(markdown) if markdown else ""
         if not markdown:
             return
-
-        # 🔴 Auto-inject image markers at contextual positions
-        markdown = self._inject_image_markers(ch_num, markdown, image_files)
 
         lines = markdown.split('\n')
         table_buf, in_table = [], False
@@ -1292,29 +1161,9 @@ class ReportAssembler:
                     self._render_md_table(doc, table_buf, ch_num, survey_stats)
                 table_buf, in_table = [], False
 
-            # 🔴 [TABLE:name] markers — only allowlisted tables
-            tbl_marker = re.match(r'^\[TABLE:(\w+)\]$', s)
-            if tbl_marker:
-                tbl_name = tbl_marker.group(1)
-                ALLOWED_TABLES = {
-                    'ch3_public_survey', 'ch3_dept_survey',
-                    'ch6_scoring',
-                    'ch7_measures',
-                    'ch8_scoring_after', 'ch8_comparison',
-                }
-                if tbl_name not in ALLOWED_TABLES:
-                    continue  # 不在金湖模板表格清单中
-                from app.services.table_registry import TABLE_REGISTRY
-                tdef = TABLE_REGISTRY.get(tbl_name)
-                if tdef and tdef["chapter"] == ch_num:
-                    tbl_desc = tdef.get("description", "")
-                    if tbl_desc:
-                        prev_texts = [prev_p.text.strip() for prev_p in doc.paragraphs[-3:]]
-                        if tbl_desc not in prev_texts:
-                            self._add_table_title(doc, tbl_desc)
-                    rows = tdef["provider"](filled, extracted_tables)
-                    self._add_docx_table(doc, tdef["columns"], rows)
-                    injected_tables.add(tbl_name)
+            # 🔴 [TABLE:name] 标记已废弃——表格由章节 agent 用 markdown 语法直接写，
+            # 有数据才写，不再用固定标记注入。残留标记直接跳过。
+            if re.match(r'^\[TABLE:\w+\]$', s):
                 continue
 
             if not s:
@@ -1383,6 +1232,11 @@ class ReportAssembler:
             clean = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
             clean = re.sub(r'\[待补充\]', '【待补充】', clean)
 
+            # 🔴 跳过 LLM 手写的表格标题（系统 auto-inject 会统一渲染，避免重复）
+            # 第5章除外（第5章是 LLM 写 markdown 表格，标题由 LLM 自己写）
+            if ch_num != 5 and re.match(r'^表\s*\d+[-—]\d+', clean) and len(clean) < 40:
+                continue
+
             if re.match(r'^\d+\.\s*\*\*', clean):
                 self._add_para(doc, clean, bold=True)
             elif clean.startswith('- ') or clean.startswith('* '):
@@ -1395,24 +1249,8 @@ class ReportAssembler:
         if in_table and table_buf and not skip_md_tables:
             self._render_md_table(doc, table_buf, ch_num, survey_stats)
 
-        # 🔴 Auto-inject allowlisted registry tables at chapter end
-        ALLOWED_TABLES = {
-            'ch3_public_survey', 'ch3_dept_survey',
-            'ch6_scoring',
-            'ch7_measures',
-            'ch8_scoring_after', 'ch8_comparison',
-        }
-        from app.services.table_registry import TABLE_REGISTRY
-        for name, tdef in TABLE_REGISTRY.items():
-            if tdef["chapter"] == ch_num and name in ALLOWED_TABLES and name not in injected_tables:
-                rows = tdef["provider"](filled or {}, extracted_tables or [])
-                if rows:
-                    tbl_desc = tdef.get("description", "")
-                    if tbl_desc:
-                        prev_texts = [prev_p.text.strip() for prev_p in doc.paragraphs[-3:]]
-                        if tbl_desc not in prev_texts:
-                            self._add_table_title(doc, tbl_desc)
-                    self._add_docx_table(doc, tdef["columns"], rows)
+        # 🔴 固定表格 auto-inject 已移除——表格由章节 agent 根据实际数据动态设计
+        # （用 markdown 语法写，有数据才写），不再由系统硬编码渲染固定表格。
 
         # 🔴 Auto-insert chapter images at end of content
         ch_img_map = getattr(self, '_chapter_image_map', {})
@@ -1424,13 +1262,14 @@ class ReportAssembler:
             for img_info in ch_imgs[:3]:  # Max 3 images per chapter
                 if isinstance(img_info, dict):
                     path = img_info.get("path", "")
-                    caption = img_info.get("caption", "")
+                    # 🔴 用 display_name（简洁类别名，如"公示照片"）而非原始文件名
+                    name = img_info.get("name", "") or img_info.get("caption", "") or ""
                 else:
                     path = str(img_info)
-                    caption = ""
+                    name = ""
                 if path:
-                    fname = path.rsplit("/", 1)[-1] if "/" in path else path
-                    cap = caption or f"图{ch_num}-{img_count+1} {fname[:40]}"
+                    # 🔴 简洁图注：图X-N 类别名（不带 pdf_xxx 原始文件名）
+                    cap = f"图{ch_num}-{img_count+1} {name}".strip() if name else f"图{ch_num}-{img_count+1}"
                     self._add_image(doc, path, cap)
                     img_count += 1
 
@@ -1438,10 +1277,14 @@ class ReportAssembler:
         if extracted_tables:
             self._render_extracted_tables(doc, ch_num, extracted_tables)
 
-        # 🔴 Insert chapter images from catalog assignment (not random fallback)
-        ch_imgs = self._chapter_image_map.get(ch_num, [])
-        for img_info in ch_imgs[:2]:  # Max 2 images per chapter
-            self._add_image(doc, img_info["path"], img_info.get("label", img_info.get("name", "")))
+        # 🔴 Body text: only placeholders, no inline images
+        specs = {1: "位置示意图", 2: "现场照片", 3: "公示照片/调查照片", 5: "专家评审照片",
+                 6: "座谈会照片", 8: "专家评审意见", 9: "评审意见表"}
+        label = specs.get(ch_num, "")
+        # Check if the chapter markdown already has <<IMAGE:>> or [IMAGE] placeholders
+        if '<<IMAGE:' not in markdown and '![' not in markdown:
+            if label:
+                self._add_para(doc, f"【待插入：图{ch_num}-1 {label}】", indent=False)
 
     # ═══════════════════════════════════════════════════════════════
     # Chapter titles (template-aligned)
@@ -1568,10 +1411,10 @@ class ReportAssembler:
 
     def _render_md_table(self, doc, table_lines, ch_num, survey_stats):
         """Parse markdown table lines into DOCX table.
-        金湖模板：仅Ch5允许LLM生成markdown表格，Ch3/6/7/8使用系统TABLE注入。
+
+        所有章节的 markdown 表格都渲染——表格由章节 agent 根据实际数据动态设计，
+        有数据才写，格式参考模板。系统不再强制注入固定表格。
         """
-        if ch_num != 5:
-            return  # 仅第5章风险表由LLM生成，其他章用[TABLE:name]
         rows = []
         for line in table_lines:
             if re.match(r'^\|[\s\-:|—]+\|$', line):
@@ -1773,134 +1616,6 @@ class ReportAssembler:
     # Images
     # ═══════════════════════════════════════════════════════════════
 
-    def _inject_image_markers(self, ch_num, markdown, image_files):
-        """根据章节内容关键词，在适当位置自动注入 ![图] 标记。
-
-        标记会被后续的 _add_chapter 循环识别并插入对应图片。
-        不匹配关键词则不注入，不影响原有内容。
-        """
-        if not image_files:
-            return markdown
-
-        # 章节→关键词→图片类别 映射
-        CHAPTER_IMAGE_RULES = {
-            1: [  # Ch1: 项目基本情况
-                (r'(?:位置|坐落|位于|地理位置|红线)', 'map', '图1-1 拟征地位置示意图'),
-            ],
-            2: [  # Ch2: 评估过程
-                (r'(?:现场勘查|实地踏勘|现场照片|实地勘察)', 'photo', '图2-1 拟征收地块现场照片'),
-            ],
-            3: [  # Ch3: 风险因素调查
-                (r'(?:公示|公告.*张贴|公告栏|现场公示)', 'announcement', '图3-1 征收土地预公告公示照片'),
-                (r'(?:问卷|调查表|入户走访|现场调查|风险调查)', 'photo', '图3-2 社会稳定风险调查现场照片'),
-                (r'(?:座谈会|座谈|群众.*会|村民.*会)', 'meeting', '图3-3 群众座谈会照片'),
-            ],
-            5: [  # Ch5: 风险因素识别
-                (r'(?:风险.*因素|风险.*识别|初始.*等级)', 'review', '图5-1 专家评审会照片'),
-            ],
-            6: [  # Ch6: 利益相关者
-                (r'(?:利益相关者|群众诉求|座谈会|走访)', 'meeting', '图6-1 群众座谈会现场照片'),
-            ],
-            8: [  # Ch8: 措施后评估
-                (r'(?:专家评审|专家意见|专家组|评审会)', 'review', '图8-1 专家评审意见'),
-            ],
-            9: [  # Ch9: 评估结论
-                (r'(?:专家.*评审|评审.*意见|专家组|专家签字)', 'review', '图9-1 稳评专家评审意见表'),
-            ],
-        }
-
-        rules = CHAPTER_IMAGE_RULES.get(ch_num, [])
-        if not rules:
-            return markdown
-
-        # Debug
-        available_cats = {k: len(v) for k, v in image_files.items() if v}
-        print(f"[IMG_INJECT] Ch{ch_num}: rules={len(rules)}, available={available_cats}", flush=True)
-
-        lines = markdown.split('\n')
-        injected_positions = set()
-        injected_count = 0
-        result_lines = []
-
-        for i, line in enumerate(lines):
-            result_lines.append(line)
-
-            # 跳过空行、标题行、表格行
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#') or stripped.startswith('|'):
-                continue
-            if i in injected_positions:
-                continue
-
-            for pattern, cat, caption in rules:
-                # 优先使用指定类别，没有则从 other 中借用
-                available = image_files.get(cat, [])
-                if not available:
-                    available = image_files.get('other', [])
-                if not available:
-                    continue
-                if re.search(pattern, stripped):
-                    # Include image path so it can be resolved directly
-                    img_path = available[0] if available else ''
-                    result_lines.append(f'![{caption}]({img_path})')
-                    injected_positions.add(i)
-                    injected_count += 1
-                    # 消费一张图片
-                    if image_files.get(cat):
-                        image_files[cat] = image_files[cat][1:]
-                    elif image_files.get('other'):
-                        image_files['other'] = image_files['other'][1:]
-                    break  # 每行最多一个标记
-
-        print(f"[IMG_INJECT] Ch{ch_num}: inserted {injected_count} markers", flush=True)
-        return '\n'.join(result_lines)
-
-    def _add_chapter_images(self, doc, ch_num, image_files):
-        """按章节上下文自动插入图片。
-
-        规则：
-        - Ch1: 位置图/红线图
-        - Ch2: 现场勘察照片
-        - Ch3: 公示照片 + 问卷调查照片 + 座谈会照片
-        - Ch5/Ch6: 座谈会/走访照片
-        - Ch8/Ch9: 专家评审意见/评审会照片
-        每类图片最多取2张，无图时静默跳过。
-        """
-        def _take(cat, n=1):
-            """取n张指定类别的图片，无则从other借。"""
-            imgs = image_files.get(cat, [])
-            if not imgs:
-                imgs = image_files.get('other', [])
-            taken = imgs[:n]
-            if taken:
-                if image_files.get(cat):
-                    image_files[cat] = image_files[cat][len(taken):]
-                elif image_files.get('other'):
-                    image_files['other'] = image_files['other'][len(taken):]
-            return taken
-
-        # 🔴 Only 1-2 representative images per chapter — rest go to appendix
-        if ch_num == 1:
-            for i, fn in enumerate(_take('map', 1)):
-                self._add_image(doc, fn, f"图1-1 拟征地位置示意图")
-        elif ch_num == 2:
-            for i, fn in enumerate(_take('photo', 1)):
-                self._add_image(doc, fn, f"图2-1 拟征收地块现场照片")
-        elif ch_num == 5:
-            for i, fn in enumerate(_take('review', 1)):
-                self._add_image(doc, fn, f"图5-1 专家评审会照片")
-        elif ch_num == 3:
-            for i, fn in enumerate(_take('announcement', 1)):
-                self._add_image(doc, fn, f"图3-1 征收土地预公告公示照片")
-            for i, fn in enumerate(_take('photo', 1)):
-                self._add_image(doc, fn, f"图3-2 社会稳定风险调查现场照片")
-        elif ch_num == 6:
-            for i, fn in enumerate(_take('photo', 1)):
-                self._add_image(doc, fn, f"图6-1 群众座谈会现场照片")
-        elif ch_num == 9:
-            for i, fn in enumerate(_take('review', 1)):
-                self._add_image(doc, fn, f"图9-1 专家评审意见")
-
     def _resolve_image_path(self, image_ref):
         from pathlib import Path as _Path
         p = _Path(image_ref)
@@ -1961,7 +1676,6 @@ class ReportAssembler:
 
         # 🔴 Clean up caption: if it's a raw filename, extract meaningful parts
         clean_caption = self._clean_image_caption(caption, img_path)
-        print(f"[IMG_OK] _add_image: caption={clean_caption}, path={img_path.name}", flush=True, file=__import__('sys').stderr)
 
         # 🔴 Image above caption format: "图 X-X 描述"
         p_img = doc.add_paragraph()
@@ -1976,12 +1690,15 @@ class ReportAssembler:
                 if img.mode in ('RGBA', 'P', 'CMYK', 'LA'):
                     img = img.convert('RGB')
                 tmp_fd, tmp_path = _tmp.mkstemp(suffix='.jpg')
-                # Resize large images to ~500KB max (1920px, JPEG quality 85)
-                max_dim = 1920
+                os.close(tmp_fd)
+                # 🔴 Always compress: max 1600px, JPEG quality 80, strip EXIF
+                max_dim = 1600
                 if orig_w > max_dim or orig_h > max_dim:
                     ratio = min(max_dim/orig_w, max_dim/orig_h)
                     img = img.resize((int(orig_w*ratio), int(orig_h*ratio)), PILImage.LANCZOS)
-                img.save(tmp_path, 'JPEG', quality=85)
+                elif img.mode in ('RGBA', 'P', 'CMYK', 'LA') or img_path.suffix.lower() in ('.png','.bmp','.tiff','.tif'):
+                    pass  # Still need to convert format
+                img.save(tmp_path, 'JPEG', quality=80, optimize=True)
                 use_path = tmp_path
 
             aspect = orig_w / orig_h if orig_h > 0 else 1.0
@@ -2016,19 +1733,18 @@ class ReportAssembler:
     # Company Front Matter (开篇)
     # ═══════════════════════════════════════════════════════════════
 
-    def _add_company_qualifications(self, doc, filled):
-        """Page 2: 公司资质证书图片. If none available, skip gracefully."""
-        cert_images = self._load_company_certificate_images()
+    def _add_company_qualifications(self, doc, filled, domain="stability"):
+        """Page 2: 公司资质证书图片. Returns True if content was added."""
+        cert_images = self._load_company_certificate_images(domain=domain)
 
         if cert_images:
             self._add_heading(doc, '公司资质证书', 2)
             for img_path, caption in cert_images[:6]:
                 self._add_image(doc, img_path, caption)
-        else:
-            # 🔴 No company images from DB or upload — skip qualification page
-            pass
+            return True
+        return False
 
-    def _add_company_intro(self, doc):
+    def _add_company_intro(self, doc, domain: str = "stability"):
         """Page 3: 公司简介 + 工作组人员."""
         # ── 公司简介 ──
         self._add_heading(doc, '公司简介', 2)
@@ -2122,8 +1838,8 @@ class ReportAssembler:
         catalog_data = getattr(self, '_img_catalog_data', {})
         all_images = catalog_data.get("catalog", [])
 
-        # Skip raw PDF page renders (these are OCR source images, not report images)
-        SKIP_PREFIXES = ('pdf_座谈会', 'pdf_0-勘测', 'pdf_洪拟征告', 'pdf_2be33', 'pdf_')
+        # Skip full-page OCR renders, keep embedded images
+        SKIP_PREFIXES = ()  # Let image_catalog handle filtering
         session_images = []
         for img in all_images:
             p = img.get("path", "")
@@ -2145,7 +1861,12 @@ class ReportAssembler:
             self._add_survey_table(doc, survey_stats, '附表1 公众意见调查统计汇总表')
 
         # ── 附件二：项目资料图片（分类展示全部用户图片） ──
-        if session_images:
+        # 🔴 Load company cert images for appendix
+        domain = filled.get("_domain", "stability") if isinstance(filled, dict) else "stability"
+        cert_images = self._load_company_certificate_images(domain=domain)
+        cert_paths = set(p for p, _ in cert_images)
+
+        if session_images or cert_paths:
             doc.add_page_break()
             self._add_heading(doc, '附件二：项目资料图片', 1)
 
@@ -2156,7 +1877,6 @@ class ReportAssembler:
                 ("三、部门调查与走访照片", ["photo"]),
                 ("四、专家评审意见", ["review"]),
                 ("五、位置示意图与勘测图", ["map"]),
-                ("六、公司资质与备案证书", ["other"]),
             ]
 
             for label, cats in cat_groups:
@@ -2169,317 +1889,95 @@ class ReportAssembler:
                                 paths.append(p)
                 if not paths:
                     continue
+                # 🔴 Filter: skip already-inserted images (global dedup)
+                fresh_paths = [p for p in paths if str(p) not in self._inserted_images]
+                if not fresh_paths:
+                    continue
                 self._add_heading(doc, label, 2)
-                self._add_para(doc, f'共 {len(paths)} 张', indent=True)
-                # Show up to 4 representative images per category group
-                for p in paths[:4]:
-                    try:
-                        from PIL import Image as PILImage
-                        from docx.shared import Inches, Pt
-                        from docx.enum.text import WD_ALIGN_PARAGRAPH
-                        pm = doc.add_paragraph()
-                        pm.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        with PILImage.open(p) as img:
-                            ow, oh = img.size
-                        aspect = ow / oh if oh > 0 else 1.0
-                        tw = Inches(4.5); th = tw / aspect
-                        if th > Inches(5.0): th = Inches(5.0); tw = th * aspect
-                        run = pm.add_run()
-                        run.add_picture(p, width=tw, height=th)
-                        cap_text = os.path.basename(p)
-                        cap_text = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', cap_text, flags=__import__('re').I)
-                        cap_text = cap_text.replace('_', ' ').strip()
-                        pc = doc.add_paragraph(); pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        rc = pc.add_run(cap_text[:60])
-                        rc.font.size = Pt(8)
-                    except Exception:
-                        pass
+                self._add_para(doc, f'共 {len(fresh_paths)} 张', indent=True)
+                shown = 0
+                for p in fresh_paths[:8]:
+                    fname = os.path.basename(p)
+                    clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', fname, flags=__import__('re').I)
+                    self._add_image(doc, p, clean_name[:60])
+                    shown += 1
+                total_in_category = len(paths)
+                if total_in_category > shown:
+                    self._add_para(doc, f'（共 {total_in_category} 张，以上展示 {shown} 张）', indent=True)
 
-    # ═══════════════════════════════════════════════════════════════
-    # Appendix Helpers (legacy - kept for reference)
-    # ═══════════════════════════════════════════════════════════════
+            # ── 六、公司资质与备案证书（从稳评模板提取）──
+            # 🔴 Only show certs NOT already shown on page 2
+            fresh_certs = [(p, cap) for p, cap in cert_images if str(p) not in self._inserted_images]
+            if fresh_certs:
+                self._add_heading(doc, '六、公司资质与备案证书', 2)
+                self._add_para(doc, f'共 {len(fresh_certs)} 张', indent=True)
+                for cert_path, cert_caption in fresh_certs[:8]:
+                    self._add_image(doc, cert_path, cert_caption)
 
-    @staticmethod
-    def _categorize_images_for_appendix(image_files, filled, survey_stats, original_names=None):
-        total = survey_stats.get('total_surveys', 0)
-        if total > 0:
-            self._add_heading(doc, '附件一：问卷调查统计分析', 1)
-            support_rate = survey_stats.get('support_rate', 0)
-            self._add_para(doc,
-                f'本次社会稳定风险评估共发放问卷 {total} 份，回收有效问卷 {total} 份，'
-                f'有效回收率 100%。调查对象覆盖被征地社区居民。', indent=True)
-            doc.add_paragraph()
-            self._add_survey_table(doc, survey_stats, '附表1 公众意见调查统计汇总表')
-            rate = float(support_rate) if support_rate else 0
-            if rate < 50:
-                total = int(filled.get("total_samples", 0) or filled.get("survey_total_count", 0) or 0)
-                support = int(filled.get("support_count", 0) or 0)
-                if total > 0 and support > 0: rate = support / total * 100
-                elif total > 0: rate = 100.0
-            self._add_para(doc,
-                f'调查结论：群众支持率为 {rate:.1f}%，'
-                f'未发现重大社会稳定风险隐患。', indent=True)
+            # ── 七、其他资料（未分类图片）──
+            other_paths = []
+            for img in session_images:
+                if img.get("category") == "other":
+                    p = img.get("path", "")
+                    if p and p not in other_paths and str(p) not in self._inserted_images and p not in cert_paths:
+                        other_paths.append(p)
+            if other_paths:
+                self._add_heading(doc, '七、其他项目资料', 2)
+                self._add_para(doc, f'共 {len(other_paths)} 张', indent=True)
+                for p in other_paths[:8]:
+                    fname = os.path.basename(p)
+                    clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', fname, flags=__import__('re').I)
+                    self._add_image(doc, p, clean_name[:60])
 
-        # ── 附件二：公示与现场照片 ──
-        public_notices = categorized.get('public_notices', [])
-        site_photos = categorized.get('site_photos', [])
-        if public_notices or site_photos:
-            doc.add_page_break()
-            self._add_heading(doc, '附件二：公示与现场照片', 1)
-        if public_notices:
-            self._add_para(doc, f'一、公示照片（共 {len(public_notices)} 张）', bold=True, indent=False)
-            for i, img in enumerate(public_notices[:20]):
-                self._add_image(doc, img['path'], f'公示照片{i+1}')
-        if site_photos:
-            if public_notices: doc.add_page_break()
-            self._add_para(doc, f'二、现场照片（共 {len(site_photos)} 张）', bold=True, indent=False)
-            for i, img in enumerate(site_photos[:20]):
-                self._add_image(doc, img['path'], f'现场照片{i+1}')
-        if not public_notices and not site_photos:
-            self._add_para(doc, '（公示与现场照片详见报告正文对应章节配图）', indent=True)
-
-        # ── 附件三：座谈会及群众意见征集材料 ──
-        meeting_photos = categorized.get('meeting_photos', [])
-        survey_scans = categorized.get('survey_questionnaires', [])
-        if meeting_photos or survey_scans:
-            doc.add_page_break()
-            self._add_heading(doc, '附件三：座谈会及群众意见征集材料', 1)
-        if meeting_photos:
-            self._add_para(doc, f'一、座谈会照片（共 {len(meeting_photos)} 张）', bold=True, indent=False)
-            for i, img in enumerate(meeting_photos[:20]):
-                self._add_image(doc, img['path'], f'座谈会照片{i+1}')
-        if survey_scans:
-            self._add_para(doc, f'二、调查问卷及签到表（共 {len(survey_scans)} 份）', bold=True, indent=False)
-            for i, img in enumerate(survey_scans[:20]):
-                self._add_image(doc, img['path'], f'问卷材料{i+1}')
-
-        # ── 附件四：专家评审意见 ──
-        expert_opinions = categorized.get('expert_opinions', [])
-        review_materials = categorized.get('review_materials', [])
-        if expert_opinions or review_materials:
-            doc.add_page_break()
-            self._add_heading(doc, '附件四：专家评审意见', 1)
-        all_expert = expert_opinions + review_materials
-        if all_expert:
-            for i, img in enumerate(all_expert[:20]):
-                self._add_image(doc, img['path'], f'评审意见{i+1}')
-
-    # ═══════════════════════════════════════════════════════════════
-    # Appendix Helpers
-    # ═══════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _categorize_images_for_appendix(image_files, filled, survey_stats, original_names=None):
-        categorized = {
-            'public_notices': [], 'site_photos': [], 'meeting_photos': [],
-            'survey_questionnaires': [], 'expert_opinions': [], 'review_materials': [],
-        }
-        if original_names is None:
-            original_names = filled.get("_image_original_names", {}) if isinstance(filled, dict) else {}
-        all_sources = []
-        for cat, paths in (image_files or {}).items():
-            for p in paths:
-                all_sources.append((cat, p))
-
-        for cat, path in all_sources:
-            fname = path.split('/')[-1] if '/' in path else path
-            # Use original filename for categorization if available
-            categorize_name = original_names.get(path, fname) if isinstance(original_names, dict) else fname
-            name_lower = categorize_name.lower()
-            entry = {'path': path, 'caption': categorize_name, 'category': cat}
-
-            if any(k in name_lower for k in ['公告', '公示', '批文', '通知']):
-                categorized['public_notices'].append(entry)
-            elif any(k in name_lower for k in ['现场', '勘察', '地块', '临时用地', '土地']):
-                categorized['site_photos'].append(entry)
-            elif any(k in name_lower for k in ['座谈', '开会', '会议', '村民']):
-                categorized['meeting_photos'].append(entry)
-            elif any(k in name_lower for k in ['问卷', '调查', '签到', '统计']):
-                categorized['survey_questionnaires'].append(entry)
-            elif any(k in name_lower for k in ['专家', '评审', '意见']):
-                categorized['expert_opinions'].append(entry)
-            elif any(k in name_lower for k in ['评估', '审核', '验收']):
-                categorized['review_materials'].append(entry)
-            elif cat == 'announcement':
-                categorized['public_notices'].append(entry)
-            elif cat == 'photo':
-                categorized['site_photos'].append(entry)
-            elif cat == 'survey':
-                categorized['survey_questionnaires'].append(entry)
-            elif cat == 'review':
-                categorized['expert_opinions'].append(entry)
-            elif cat == 'map':
-                categorized['site_photos'].append(entry)
-
-        return categorized
-
-    def _load_company_certificate_images(self) -> List[tuple]:
-        """Extract company qualification images from the stability template DOCX.
-
-        The stability template (e.g. 洞庭湖社会稳定报告) contains canonical
-        营业执照, 备案证书 and 人员证书 images in its front matter.
-        We extract them directly from the template DOCX rather than querying
-        the asset_images DB table (which contains bidding-document images).
-        """
-        import zipfile, sqlite3
+    def _load_company_certificate_images(self, domain: str = "stability") -> List[tuple]:
+        """Load company cert images. Stability: template-extracted. Bidding: DB."""
+        import zipfile, sqlite3, xml.etree.ElementTree as ET
         from app.config import settings
 
         results = []
 
-        # ── Strategy 1: Extract from stability template DOCX ──
-        template_path = None
-        try:
-            db_path = settings.DATA_DIR / "knowledge_base.db"
-            if db_path.exists():
-                conn = sqlite3.connect(str(db_path))
-                conn.row_factory = sqlite3.Row
-                for name_filter in ["%洞庭湖%", "%社会稳定%"]:
-                    cur = conn.execute(
-                        "SELECT template_file_path FROM templates "
-                        "WHERE domain='stability' AND is_active=1 "
-                        "AND template_file_path LIKE '%.docx' "
-                        "AND name LIKE ? ORDER BY id LIMIT 1",
-                        (name_filter,)
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        tpl = settings.STORAGE_DIR / row["template_file_path"]
-                        if tpl.exists():
-                            template_path = str(tpl)
-                            break
-                conn.close()
-        except Exception as e:
-            logger.warning(f"Template lookup failed: {e}")
-
-        if template_path:
-            try:
-                import xml.etree.ElementTree as ET
-                W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-                A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-                R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-
-                with zipfile.ZipFile(template_path, 'r') as z:
-                    doc_xml = z.read('word/document.xml')
-                    root = ET.fromstring(doc_xml)
-
-                    # Extract ALL images before the first chapter heading
-                    company_rIds = set()
-                    paras = root.findall(f'.//{{{W_NS}}}p')
-                    for p in paras:
-                        text = ''.join(
-                            (node.text or '')
-                            for node in p.findall(f'.//{{{W_NS}}}t')
-                        )
-                        # Stop at first chapter heading
-                        if '第一章' in text and '稳评' in text:
-                            break
-                        # Collect all image rIds in front matter
-                        blips = p.findall(f'.//{{{A_NS}}}blip')
-                        for blip in blips:
-                            embed = blip.get(f'{{{R_NS}}}embed')
-                            if embed:
-                                company_rIds.add(embed)
-
-                    if not company_rIds:
-                        # Fallback: all images up to rId20
-                        company_rIds = {f'rId{i}' for i in range(4, 25)}
-
-                    rels_xml = z.read('word/_rels/document.xml.rels')
-                    rels_root = ET.fromstring(rels_xml)
-                    rId_to_file = {}
-                    for rel in rels_root:
-                        rid = rel.get('Id')
-                        target = rel.get('Target', '')
-                        if 'image' in target.lower() or 'media' in target.lower():
-                            rId_to_file[rid] = target.replace('media/', '')
-
-                    # Build captions from surrounding paragraph text
-                    captions = {}
-                    prev_text = ""
-                    for p in paras:
-                        text = ''.join((node.text or '') for node in p.findall(f'.//{{{W_NS}}}t'))
-                        blips = p.findall(f'.//{{{A_NS}}}blip')
-                        for blip in blips:
-                            embed = blip.get(f'{{{R_NS}}}embed')
-                            if embed:
-                                # Use this paragraph's text or previous as caption
-                                cap = text.strip() if text.strip() else prev_text.strip()
-                                if cap and len(cap) < 80:
-                                    captions[embed] = cap
-                                elif prev_text.strip() and len(prev_text.strip()) < 80:
-                                    captions[embed] = prev_text.strip()
-                        if text.strip():
-                            prev_text = text.strip()
-
-                    for rid in sorted(company_rIds):
-                        img_file = rId_to_file.get(rid)
-                        if not img_file:
-                            continue
-                        zip_path = f'word/media/{img_file}'
-                        if zip_path not in z.namelist():
-                            continue
-
-                        img_data = z.read(zip_path)
-                        safe_name = f"stability_{rid}_{img_file}"
-                        filepath = self.images_dir / safe_name
-                        if not filepath.exists():
-                            filepath.write_bytes(img_data)
-
-                        caption = captions.get(rid, '')
-                        if not caption or caption == '附图 公司资质材料':
-                            caption = f'公司资质材料 {len(results)+1}'
-                        results.append((f"images/{safe_name}", caption))
-
-            except Exception as e:
-                logger.warning(f"Template image extraction failed: {e}")
-
-        # ── Strategy 2: Fallback — extracted_imgs directory ──
-        if not results and self.company_dir.is_dir():
-            for p in sorted(self.company_dir.iterdir()):
-                if p.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.bmp'):
-                    results.append((str(p), '附图 公司资质材料'))
-
-        # ── Strategy 3: Last resort — DB (stability templates only) ──
-        if not results:
+        if domain == "stability":
+            # 🔴 Stability: scan extracted_imgs for stability_* files (from template extraction)
+            for f in sorted(self.company_dir.iterdir()):
+                if not f.name.startswith('stability_cert_'): continue
+                if f.suffix.lower() not in ('.jpg','.jpeg','.png','.gif','.bmp'): continue
+                # Get caption from filename hint
+                # 🔴 Caption from filename: stability_cert_00 = 公司营业执照 etc
+                cap = f.stem.replace('stability_cert_','').replace('_',' ')
+                # Map known certs
+                if '00' in f.stem: cap = '公司营业执照'
+                elif '01' in f.stem: cap = '稳评平台备案及人员证书'
+                else: cap = f'资质证书 {len(results)+1}'
+                results.append((str(f), cap))
+        else:
+            # 🔴 Bidding: DB asset_images
             try:
                 db_path = settings.DATA_DIR / "knowledge_base.db"
                 if db_path.exists():
                     conn = sqlite3.connect(str(db_path))
                     conn.row_factory = sqlite3.Row
-                    cur = conn.execute("""
-                        SELECT ai.id, ai.image_name, ai.image_data, ai.mime_type
-                        FROM asset_images ai
-                        JOIN templates t ON ai.source_template_id = t.id
-                        WHERE ai.is_active = 1 AND t.domain = 'stability'
-                        ORDER BY ai.id LIMIT 8
-                    """)
-                    rows = cur.fetchall()
-                    if not rows:
-                        cur = conn.execute(
-                            "SELECT id, image_name, image_data, mime_type "
-                            "FROM asset_images WHERE is_active=1 "
-                            "AND category IN ('营业执照','资质证书','公司信息') LIMIT 8"
-                        )
-                        rows = cur.fetchall()
-
-                    for row in rows:
+                    cur = conn.execute(
+                        "SELECT id, image_name, image_data, mime_type FROM asset_images "
+                        "WHERE is_active=1 AND category IN ('营业执照','资质证书','人员证书',"
+                        "'财务报告','社保纳税','法人证明') ORDER BY id LIMIT 12"
+                    )
+                    for row in cur.fetchall():
                         img_data = row['image_data']
                         if not img_data: continue
                         mime = row['mime_type'] or 'image/png'
                         ext = 'png' if 'png' in mime else 'jpg'
-                        safe_name = f"cert_{row['id']}.{ext}"
+                        safe_name = f"cert_db_{row['id']}.{ext}"
                         filepath = self.images_dir / safe_name
                         if not filepath.exists():
                             if isinstance(img_data, str):
                                 import base64
                                 try: filepath.write_bytes(base64.b64decode(img_data))
                                 except: filepath.write_bytes(img_data.encode('latin-1'))
-                            else:
-                                filepath.write_bytes(bytes(img_data))
-                        results.append((f"images/{safe_name}", f"附图 {row['image_name'][:30]}"))
+                            else: filepath.write_bytes(bytes(img_data))
+                        results.append((f"images/{safe_name}", row['image_name'][:60]))
                     conn.close()
             except Exception as e:
-                logger.warning(f"DB fallback failed: {e}")
+                logger.warning(f"DB cert load failed: {e}")
 
         return results
 

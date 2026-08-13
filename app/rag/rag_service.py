@@ -94,7 +94,7 @@ class RAGService:
                                     "id": f"doc_{row['id']}_chunk{ci}",
                                     "text": chunk,
                                     "document_id": row["id"],
-                                    "metadata": f'{{"title": "{row["title"] or ""}"}}',
+                                    "metadata": {"title": row["title"] or ""},
                                 })
                     if docs:
                         hybrid_retriever.build_index(docs)
@@ -130,23 +130,23 @@ class RAGService:
         for boilerplate context.
         """
         cache = self.cache
-        # 🔴 Cache key now includes n_results so different result counts get different cache entries
-        key = cache.make_key(domain or "any", chapter_number, f"chapter::{chapter_number}::n{n_results}")
+        # 🔴 Cache key includes n_results + project hash for context-aware caching
+        proj_hash = hash(project_context[:200]) if project_context else 0
+        key = cache.make_key(domain or "any", chapter_number, f"ch{chapter_number}::n{n_results}::p{proj_hash}")
 
         general_items = cache.get(key)
         if general_items is None:
+            # 🔴 纯向量检索（query_by_collection 按 domain 物理隔离）。
+            # 不用 retrieve_hybrid——其 BM25 索引跨 domain，会破坏物理隔离。
             general_items = await self.retriever.retrieve_general_for_chapter(
-                chapter_number=chapter_number,
-                project_context=project_context,
-                n_results=n_results,
-                domain=domain,
+                chapter_number=chapter_number, project_context=project_context,
+                n_results=n_results, domain=domain,
             )
             cache.put(key, general_items, domain=domain or "any", chapter=chapter_number)
 
-        # Session (project) material is never cached — fetch fresh every time.
+        # Session (project) material — 永远 live 检索（session collection 天然隔离）
         session_items = await self.retriever.retrieve_session_items(
-            session_id=session_id,
-            chapter_number=chapter_number,
+            session_id=session_id, chapter_number=chapter_number,
             project_context=project_context,
         )
 

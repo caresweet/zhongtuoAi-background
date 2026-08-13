@@ -37,52 +37,52 @@ class ReviewTableAgent(BaseAgent):
             "extract_keys": [
                 "决策名称", "责任单位", "实施单位", "项目位置",
                 "征收面积", "土地用途", "资金测算",
-            ],
-        },
+            ]
+    },
         {
             "name": "公众参与及意见调查情况",
             "source_chapters": [3],
             "extract_keys": [
                 "调查方式", "调查人数", "支持人数", "反对人数",
                 "支持率", "主要诉求",
-            ],
-        },
+            ]
+    },
         {
             "name": "风险因素识别情况",
             "source_chapters": [5],
             "extract_keys": [
                 "风险因素", "风险等级", "发生概率", "影响程度",
-            ],
-        },
+            ]
+    },
         {
             "name": "措施前风险等级评估",
             "source_chapters": [6],
             "extract_keys": [
                 "合法性得分", "合理性得分", "可行性得分", "可控性得分",
                 "措施前总分", "措施前风险等级",
-            ],
-        },
+            ]
+    },
         {
             "name": "风险防范化解措施",
             "source_chapters": [7],
             "extract_keys": [
                 "措施名称", "责任主体", "完成时限",
-            ],
-        },
+            ]
+    },
         {
             "name": "措施后风险等级评估",
             "source_chapters": [8],
             "extract_keys": [
                 "措施后总分", "得分变化", "措施后风险等级",
-            ],
-        },
+            ]
+    },
         {
             "name": "评估结论与建议",
             "source_chapters": [9],
             "extract_keys": [
                 "综合结论", "风险等级", "工作建议",
-            ],
-        },
+            ]
+    },
     ]
 
     async def think(self, state: dict) -> Dict[str, Any]:
@@ -109,8 +109,8 @@ class ReviewTableAgent(BaseAgent):
             "summary": f"从已确认章节提取数据生成评审表（{confirmed_count}/10章）",
             "steps": steps,
             "actions": [{"type": "extract_and_synthesize"}],
-            "confirmed_count": confirmed_count,
-        }
+            "confirmed_count": confirmed_count
+    }
 
     async def act(self, state: dict, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Extract data from chapters and synthesize the review table."""
@@ -183,8 +183,8 @@ class ReviewTableAgent(BaseAgent):
             "markdown": review_md,
             "extracted_data": extracted,
             "review_table_path": review_table_path,
-            "sections_count": len(extracted),
-        }
+            "sections_count": len(extracted)
+    }
 
     async def validate(self, result: Dict[str, Any]) -> List[str]:
         """Validate the review table."""
@@ -211,8 +211,8 @@ class ReviewTableAgent(BaseAgent):
         # Also store in generated_sections for assembly
         state.setdefault("generated_sections", {})["review_table"] = {
             "title": "评审表",
-            "markdown": result.get("markdown", ""),
-        }
+            "markdown": result.get("markdown", "")
+    }
 
         return state
 
@@ -269,8 +269,8 @@ class ReviewTableAgent(BaseAgent):
             "调查人数": ["样本数", "参与人数", "受访人数"],
             "支持人数": ["赞成人数", "同意人数"],
             "支持率": ["赞成率", "同意率", "满意度"],
-            "风险等级": ["综合风险等级", "评估等级"],
-        }
+            "风险等级": ["综合风险等级", "评估等级"]
+    }
         for alias in aliases.get(key, []):
             result = self._extract_value(markdown, alias)
             if result:
@@ -284,8 +284,8 @@ class ReviewTableAgent(BaseAgent):
                          r'(\d+\.?\d*)\s*亩'],
                 "人数": [r'(\d+)\s*(?:人|户|份)'],
                 "得分": [r'(\d{1,2})\s*分'],
-                "率": [r'(\d{2,3}\.?\d*)\s*%'],
-            }
+                "率": [r'(\d{2,3}\.?\d*)\s*%']
+    }
             for kw_part, pats in num_patterns.items():
                 if kw_part in key:
                     for pat in pats:
@@ -374,7 +374,7 @@ class ReviewTableAgent(BaseAgent):
 
         # Footer
         parts.append("---\n")
-        parts.append("**编制单位**：江苏众拓项目代理咨询有限公司\n")
+        parts.append("**编制单位**：{company_name}\n")
         parts.append("**编制日期**：2026年4月\n")
 
         return "\n".join(parts)
@@ -384,8 +384,8 @@ class ReviewTableAgent(BaseAgent):
         if self._stream_queue:
             await self._stream_queue.put({
                 "event": "review_table_start",
-                "data": {"message": "正在从已确认的10章内容中提取数据生成评审表..."},
-            })
+                "data": {"message": "正在从已确认的10章内容中提取数据生成评审表..."}
+    })
 
     async def _emit_review_table(
         self, markdown: str, docx_path: str = None
@@ -397,9 +397,9 @@ class ReviewTableAgent(BaseAgent):
                 "data": {
                     "role": "agent",
                     "content": markdown,
-                    "message_type": "review_table",
-                },
-            })
+                    "message_type": "review_table"
+    }
+    })
 
     async def _emit_review_table_complete(self, docx_path: str = None) -> None:
         """Emit review_table_complete event."""
@@ -414,5 +414,5 @@ class ReviewTableAgent(BaseAgent):
 
             await self._stream_queue.put({
                 "event": "review_table_complete",
-                "data": data,
-            })
+                "data": data
+    })

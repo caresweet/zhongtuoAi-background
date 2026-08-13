@@ -28,6 +28,7 @@ async def init_knowledge_db():
         await conn.run_sync(_migrate_add_domain_columns)
         await conn.run_sync(_migrate_add_extraction_columns)
         await conn.run_sync(_migrate_add_cleaning_columns)
+        await conn.run_sync(_migrate_add_chat_tables)
 
 
 def _migrate_add_domain_columns(conn):
@@ -93,3 +94,90 @@ def _migrate_add_cleaning_columns(conn):
     for column_name, ddl in additions.items():
         if column_name not in cols:
             conn.execute(text(ddl))
+
+
+def _migrate_add_chat_tables(conn):
+    """Idempotent migration: create tables for knowledge chat (learned_corrections + conversation_memory).
+
+    These tables are used by knowledge_chat.py via raw SQL. Since they have no ORM models,
+    Base.metadata.create_all() won't create them — we must create them here.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+
+    # ── learned_corrections: stores user corrections for self-learning ──
+    if not inspector.has_table("learned_corrections"):
+        conn.execute(text("""
+            CREATE TABLE learned_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_query TEXT,
+                original_answer TEXT,
+                user_correction TEXT,
+                corrected_knowledge TEXT,
+                topic_keywords VARCHAR(500),
+                domain VARCHAR(50) NOT NULL DEFAULT 'stability',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_lc_domain ON learned_corrections(domain)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_lc_active ON learned_corrections(is_active)"
+        ))
+
+    # ── conversation_memory: stores multi-turn chat history for context ──
+    if not inspector.has_table("conversation_memory"):
+        conn.execute(text("""
+            CREATE TABLE conversation_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id VARCHAR(100) NOT NULL,
+                role VARCHAR(20) NOT NULL,
+                content TEXT,
+                message_type VARCHAR(20) DEFAULT 'chat',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_cm_session ON conversation_memory(session_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_cm_created ON conversation_memory(created_at)"
+        ))
+
+    # ── generation_feedback: stores quality audit results for continuous learning ──
+    if not inspector.has_table("generation_feedback"):
+        conn.execute(text("""
+            CREATE TABLE generation_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                report_title TEXT,
+                domain TEXT DEFAULT 'stability',
+                overall_score REAL DEFAULT 0,
+                data_score REAL DEFAULT 0,
+                format_score REAL DEFAULT 0,
+                total_issues INTEGER DEFAULT 0,
+                fabricated_count INTEGER DEFAULT 0,
+                validity_count INTEGER DEFAULT 0,
+                regulation_count INTEGER DEFAULT 0,
+                blocking_count INTEGER DEFAULT 0,
+                rewrite_count INTEGER DEFAULT 0,
+                rewrite_chapters TEXT,
+                passed BOOLEAN DEFAULT 0,
+                output_path TEXT,
+                full_text TEXT,
+                feedback_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_gf_session ON generation_feedback(session_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_gf_domain ON generation_feedback(domain)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_gf_created ON generation_feedback(created_at)"
+        ))

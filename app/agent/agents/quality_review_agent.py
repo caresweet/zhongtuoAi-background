@@ -16,6 +16,14 @@ import logging
 from typing import Dict, List, Any, Tuple, Optional, Set
 
 from .base_agent import BaseAgent
+from app.validation.content_guardrails import (
+    find_data_validity_issues,
+    find_fabricated_data,
+    validate_numeric_ranges,
+    find_hallucinated_regulations,
+    check_required_materials,
+    AI_BUZZWORDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +262,90 @@ class QualityReviewAgent(BaseAgent):
             chapter_issues.setdefault(ch_num, []).extend(tbl_issues)
 
         # ═══════════════════════════════════════════════════════════
+        # Step 2.5: 🔴 Enhanced data validity checks (per-chapter)
+        # ═══════════════════════════════════════════════════════════
+        data_validity_issues: List[Dict] = []
+        fabricated_issues: List[Dict] = []
+        range_issues: List[Dict] = []
+        regulation_issues: List[Dict] = []
+
+        filled_data = state.get("filled_data", {}) or {}
+        pdf_raw_text = state.get("_pdf_raw_text", "") or ""
+        # Build full pdf_texts from dict if available
+        if not pdf_raw_text:
+            pdf_texts = state.get("_pdf_texts", {}) or {}
+            if isinstance(pdf_texts, dict):
+                pdf_raw_text = " ".join(str(v)[:5000] for v in pdf_texts.values() if v)
+
+        for ch_num in range(1, 11):
+            ch_data = chapters.get(ch_num, {})
+            if not isinstance(ch_data, dict):
+                continue
+            markdown = ch_data.get("markdown", "")
+            if not markdown:
+                continue
+
+            # 2.5a: Data validity (negatives, opposition, precision, years)
+            for issue in find_data_validity_issues(markdown):
+                data_validity_issues.append({
+                    "chapter": ch_num,
+                    "type": "data_validity",
+                    "severity": "critical",
+                    "message": f"第{ch_num}章：{issue['description']} → {issue.get('match', '')}",
+                    "suggestion": "regenerate",
+                })
+                chapter_issues.setdefault(ch_num, []).append(data_validity_issues[-1])
+
+            # 2.5b: Fabricated data detection
+            if filled_data:
+                for issue in find_fabricated_data(markdown, filled_data, pdf_raw_text):
+                    fabricated_issues.append({
+                        "chapter": ch_num,
+                        "type": "fabricated_data",
+                        "severity": "critical",
+                        "message": issue["message"],
+                        "suggestion": "regenerate",
+                    })
+                    chapter_issues.setdefault(ch_num, []).append(fabricated_issues[-1])
+
+            # 2.5c: Numeric range validation
+            for issue in validate_numeric_ranges(markdown):
+                sev = issue.get("severity", "warning")
+                range_issues.append({
+                    "chapter": ch_num,
+                    "type": "invalid_range",
+                    "severity": sev,
+                    "message": f"第{ch_num}章：{issue['message']}",
+                    "suggestion": "regenerate" if sev in ("critical", "error") else "auto_fix",
+                })
+                chapter_issues.setdefault(ch_num, []).append(range_issues[-1])
+
+            # 2.5d: Hallucinated regulation citations
+            for issue in find_hallucinated_regulations(markdown):
+                regulation_issues.append({
+                    "chapter": ch_num,
+                    "type": "hallucinated_regulation",
+                    "severity": "critical",
+                    "message": f"第{ch_num}章：{issue['message']}",
+                    "suggestion": "regenerate",
+                })
+                chapter_issues.setdefault(ch_num, []).append(regulation_issues[-1])
+
+        # ═══════════════════════════════════════════════════════════
+        # Step 2.6: 🔴 Required materials verification
+        # ═══════════════════════════════════════════════════════════
+        material_issues: List[Dict] = []
+        fixed_assets = state.get("_fixed_company_assets")
+        for issue in check_required_materials(fixed_assets):
+            material_issues.append({
+                "chapter": 0,  # Global issue, not chapter-specific
+                "type": "missing_materials",
+                "severity": issue.get("severity", "warning"),
+                "message": issue["message"],
+                "suggestion": "manual_fix",
+            })
+
+        # ═══════════════════════════════════════════════════════════
         # Step 3: Cross-chapter consistency checks
         # ═══════════════════════════════════════════════════════════
         consistency_issues = self._run_all_consistency_checks(state, merged_data)
@@ -285,6 +377,8 @@ class QualityReviewAgent(BaseAgent):
         all_sources = [
             chapter_issues, format_issues, consistency_issues,
             table_issues, collab_issues, llm_issues,
+            data_validity_issues, fabricated_issues, range_issues,
+            regulation_issues, material_issues,
         ]
 
         for source in all_sources:
@@ -1101,6 +1195,10 @@ class QualityReviewAgent(BaseAgent):
                     if wd != correct_doc.group(0):
                         new_md = new_md.replace(wd, correct_doc.group(0))
                         fixed = True
+
+        # 🔴 Data validity / fabrication / range issues → do NOT auto-fix.
+        # These require full chapter regeneration with specific feedback.
+        # The issue's suggestion="regenerate" ensures the chapter gets re-generated.
 
         if fixed:
             ch_data["markdown"] = new_md

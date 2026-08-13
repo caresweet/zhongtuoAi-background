@@ -19,14 +19,14 @@ def build_bidding_config() -> DomainConfig:
             "report_type": rtype,
             "title": title,
             "chapter_count": len(chapters),
-            "chapters": chapters,
-        }
+            "chapters": chapters
+    }
 
     data_categories = {
         "项目基础信息": ["项目名称", "项目编号", "预算金额", "招标人", "代理机构"],
         "资格要求": ["资质要求", "业绩要求", "信誉要求"],
         "评分标准": ["评标办法", "评分项", "权重"],
-        "时间节点": ["公告时间", "开标时间", "评标时间", "公示期"],
+        "时间节点": ["公告时间", "开标时间", "评标时间", "公示期"]
     }
 
     return DomainConfig(
@@ -35,7 +35,7 @@ def build_bidding_config() -> DomainConfig:
         identity_prompt=BIDDING_SYSTEM_PROMPT,
         rag_domain="bidding",
         pipeline="chapter_by_chapter",
-        company_name="江苏众拓测绘有限公司",
+        company_name="",
         classify_keywords=[
             "招标", "投标", "评标", "中标", "标书", "采购", "竞争性", "bid", "tender",
         ],
@@ -45,6 +45,6 @@ def build_bidding_config() -> DomainConfig:
         guardrails=[
             "禁止引用社会稳定风险评估规范（DB32/T4013）",
             "禁止在文档中标注数据来源",
-            "招标代理机构固定为江苏众拓项目代理咨询有限公司",
+            "",
         ],
     )

@@ -310,12 +310,42 @@ def build_chapter_prompt(
 - 涉及村组：根据实际材料中的村组名称
 {_get_learning_hints()}
 {_get_chapter_antipatterns(num)}
+{_get_expert_skill_hints(num)}
 """
     return prompt
 
 
 # Cached learning hints (updated every 5 minutes)
 _learning_hints_cache = {"hints": "", "updated": 0}
+
+
+def _get_expert_skill_hints(chapter_num: int) -> str:
+    """加载专家蒸馏的审核 skill 文本，注入生成 prompt（同步，sqlite3 直接查）。"""
+    try:
+        import sqlite3
+        from app.config import settings
+        db_path = settings.DATA_DIR / "knowledge_base.db"
+        if not db_path.exists():
+            return ""
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT chapter_num, rule_desc, correction FROM review_skills "
+            "WHERE is_active=1 AND skill_type='text' AND (chapter_num=0 OR chapter_num=?) "
+            "ORDER BY id LIMIT 10",
+            (chapter_num,)
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return ""
+        lines = ["\n## ⚠️ 历史专家反馈（生成时必须避免）"]
+        for r in rows:
+            ch = f"第{r['chapter_num']}章 " if r["chapter_num"] else ""
+            lines.append(f"- {ch}{r['rule_desc']}：{r['correction']}")
+        return "\n".join(lines) + "\n"
+    except Exception:
+        return ""
+
 
 def _get_learning_hints() -> str:
     """Get cached learning hints for prompt injection. Updates every 5 min."""

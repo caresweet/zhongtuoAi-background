@@ -117,6 +117,31 @@ class QualityReviewAgent(BaseAgent):
     # Max regeneration loops per chapter
     MAX_REGENERATION_LOOPS = 3
 
+    # 🔴 口语化/AI味 自动替换规则（检测到 → 替换成规范公文表达）
+    STYLE_REPLACEMENTS = [
+        (r'总的来说[，,]?\s*', ''),                 # 删除口语总结
+        (r'综上所述[，,]?', '综合以上分析'),
+        (r'我们可以看出[，,]?', '从调查情况看'),
+        (r'显而易见[，,]?', ''),
+        (r'毋庸置疑[，,]?', ''),
+        (r'值得一提的是[，,]?', ''),
+        (r'不得不提[，,]?', ''),
+        (r'非常(重要|关键|必要)', r'\1'),
+        (r'(?:很大的|极大地|显著地)', ''),
+        (r'大家(?:都|一致)?', '群众'),
+        (r'老百姓', '被征收人'),
+        (r'[，,]\s*然后', '，随后'),
+        (r'[，,]\s*而且', '，并且'),
+        (r'等等[。，]', '等。'),
+    ]
+
+    # 🔴 年份错误替换（报告年度统一为 2026）
+    YEAR_REPLACEMENTS = [
+        (r'2024年', '2026年'),
+        (r'2025年', '2026年'),
+        (r'2027年', '2026年'),
+    ]
+
     async def think(self, state: dict) -> Dict[str, Any]:
         """Analyze all chapters and produce a comprehensive audit plan."""
         chapters = state.get("chapters", {})
@@ -246,13 +271,19 @@ class QualityReviewAgent(BaseAgent):
             for pattern, desc in self.COLLOQUIAL_PATTERNS + self.DATA_ERROR_PATTERNS:
                 matches = re.findall(pattern, markdown)
                 if matches:
+                    # 🔴 可自动修复：口语化词 + 年份错误；数据错误(0亩/0人)不可瞎改
+                    is_data_error = any(d in desc for d in ['面积异常', '人数异常', '户数异常', '支持率/反对率异常', '补偿标准异常'])
+                    if is_data_error:
+                        severity, suggestion = "critical", "regenerate"
+                    else:
+                        severity, suggestion = "error", "auto_fix"
                     issue = {
                         "chapter": ch_num,
                         "type": "style_or_data_issue",
-                        "severity": "critical" if pattern in [p for p, _ in self.DATA_ERROR_PATTERNS] else "error",
+                        "severity": severity,
                         "message": f"第{ch_num}章发现：{desc}",
                         "matches": matches[:3],
-                        "suggestion": "regenerate",
+                        "suggestion": suggestion,
                     }
                     format_issues.append(issue)
                     chapter_issues.setdefault(ch_num, []).append(issue)
@@ -344,6 +375,13 @@ class QualityReviewAgent(BaseAgent):
                 "message": issue["message"],
                 "suggestion": "manual_fix",
             })
+
+        # ═══════════════════════════════════════════════════════════
+        # Step 2.7: 🔴 Expert-distilled skill checks
+        # ═══════════════════════════════════════════════════════════
+        skill_issues = await self._check_expert_skills(state)
+        for si in skill_issues:
+            chapter_issues.setdefault(si.get("chapter", 0), []).append(si)
 
         # ═══════════════════════════════════════════════════════════
         # Step 3: Cross-chapter consistency checks
@@ -646,6 +684,10 @@ class QualityReviewAgent(BaseAgent):
         issues.extend(self._check_org_consistency(state))
         issues.extend(self._check_project_name_consistency(state, merged_data))
         issues.extend(self._check_chapter_cross_references(state))
+        # 🔴 多agent协同：调查数据一致性 + 支持率合规 + 评分合规
+        issues.extend(self._check_survey_consistency(state))
+        issues.extend(self._check_support_rate_compliance(state))
+        issues.extend(self._check_score_compliance(state))
         return issues
 
     def _check_area_consistency(self, state: dict, merged: Dict) -> List[Dict]:
@@ -719,6 +761,119 @@ class QualityReviewAgent(BaseAgent):
                     "suggestion": "regenerate",
                 })
 
+        return issues
+
+    def _check_survey_consistency(self, state: dict) -> List[Dict]:
+        """多agent协同：检查调查人数、支持率在全文一致（不能第3章说54份、第6章说100份）。"""
+        issues = []
+        chapters = state.get("chapters", {})
+
+        total_counts = set()
+        support_rates = set()
+
+        for ch_num, ch_data in chapters.items():
+            if not isinstance(ch_data, dict):
+                continue
+            md = ch_data.get("markdown", "")
+            # 问卷总数：共/发放/回收/收回 N 份/户
+            for m in re.findall(r'(?:共|发放|回收|收回)\s*(\d+)\s*(?:份|户|人)(?:\s*问卷|\s*调查)?', md):
+                total_counts.add(int(m))
+            # 支持率：支持率 X% 或 X% ... 支持
+            for m in re.findall(r'支持率\s*[：:为]?\s*(\d+(?:\.\d+)?)\s*%', md):
+                support_rates.add(float(m))
+            for m in re.findall(r'(\d+(?:\.\d+)?)\s*%\s*(?:的)?\s*(?:群众|村民|被征收人)?\s*(?:表示|持)?支持', md):
+                support_rates.add(float(m))
+
+        if len(total_counts) > 1:
+            issues.append({
+                "chapter": 0, "type": "survey_count_inconsistency", "severity": "critical",
+                "message": f"调查人数不一致：全文出现 {sorted(total_counts)} 等不同问卷总数",
+                "suggestion": "regenerate",
+            })
+        if len(support_rates) > 1:
+            issues.append({
+                "chapter": 0, "type": "support_rate_inconsistency", "severity": "critical",
+                "message": f"支持率不一致：全文出现 {sorted(support_rates)} 等不同支持率",
+                "suggestion": "regenerate",
+            })
+        return issues
+
+    def _check_support_rate_compliance(self, state: dict) -> List[Dict]:
+        """征地项目合规：支持率应100%、反对率应0%。"""
+        issues = []
+        chapters = state.get("chapters", {})
+
+        for ch_num, ch_data in chapters.items():
+            if not isinstance(ch_data, dict):
+                continue
+            md = ch_data.get("markdown", "")
+            for m in re.findall(r'反对率\s*[：:为]?\s*(\d+(?:\.\d+)?)\s*%', md):
+                rate = float(m)
+                if rate > 0:
+                    issues.append({
+                        "chapter": ch_num, "type": "oppose_rate_nonzero", "severity": "critical",
+                        "message": f"第{ch_num}章反对率{rate}%不为0%（征地项目合规要求反对率0%）",
+                        "suggestion": "regenerate",
+                    })
+        return issues
+
+    def _check_score_compliance(self, state: dict) -> List[Dict]:
+        """评分合规：0-100 范围内，不得出现负数或超100分。"""
+        issues = []
+        chapters = state.get("chapters", {})
+
+        for ch_num, ch_data in chapters.items():
+            if not isinstance(ch_data, dict):
+                continue
+            md = ch_data.get("markdown", "")
+            for m in re.findall(r'(-?\d+(?:\.\d+)?)\s*分', md):
+                score = float(m)
+                if score < 0 or score > 100:
+                    issues.append({
+                        "chapter": ch_num, "type": "score_out_of_range", "severity": "critical",
+                        "message": f"第{ch_num}章评分{score}分超出0-100范围",
+                        "suggestion": "regenerate",
+                    })
+                    break
+        return issues
+
+    async def _check_expert_skills(self, state: dict) -> List[Dict]:
+        """加载专家蒸馏的审核 skill，检查章节是否违反规则。"""
+        issues = []
+        chapters = state.get("chapters", {})
+        domain = state.get("_domain", "stability")
+        try:
+            from app.services import skill_service
+            skills = await skill_service.get_active_skills(domain)
+        except Exception:
+            return issues
+
+        for rule in skills.get("rules", []):
+            pattern = rule.get("pattern", "")
+            desc = rule.get("desc", "")
+            severity = rule.get("severity", "warning")
+            chapter = rule.get("chapter", 0)
+            correction = rule.get("correction", "")
+            if not pattern:
+                continue
+            for ch_num, ch_data in chapters.items():
+                if not isinstance(ch_data, dict):
+                    continue
+                if chapter and ch_num != chapter:
+                    continue
+                md = ch_data.get("markdown", "")
+                try:
+                    if re.search(pattern, md):
+                        issues.append({
+                            "chapter": ch_num,
+                            "type": "expert_skill_violation",
+                            "severity": severity,
+                            "message": f"第{ch_num}章违反专家规则：{desc}",
+                            "correction": correction,
+                            "suggestion": "auto_fix" if correction else "regenerate",
+                        })
+                except re.error:
+                    continue
         return issues
 
     def _check_org_consistency(self, state: dict) -> List[Dict]:
@@ -1195,6 +1350,16 @@ class QualityReviewAgent(BaseAgent):
                     if wd != correct_doc.group(0):
                         new_md = new_md.replace(wd, correct_doc.group(0))
                         fixed = True
+
+        elif issue_type == "style_or_data_issue":
+            # 🔴 口语化/AI味 + 年份错误自动修复
+            # 口语化词替换成规范公文表达
+            for pattern, replacement in self.STYLE_REPLACEMENTS:
+                new_md = re.sub(pattern, replacement, new_md)
+            # 年份错误统一为 2026
+            for pattern, replacement in self.YEAR_REPLACEMENTS:
+                new_md = re.sub(pattern, replacement, new_md)
+            fixed = new_md != markdown
 
         # 🔴 Data validity / fabrication / range issues → do NOT auto-fix.
         # These require full chapter regeneration with specific feedback.

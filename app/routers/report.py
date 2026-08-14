@@ -40,6 +40,40 @@ router = APIRouter(prefix="/api/v1/reports", tags=["报告生成"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 上传资料引导配置（意图分析入口用）
+# ═══════════════════════════════════════════════════════════════════════════════
+REPORT_MATERIAL_GUIDE = {
+    "stability": {
+        "title": "社会稳定风险评估报告",
+        "description": "用于土地征收、重大决策等事项的社会稳定风险评估",
+        "required": [
+            {"name": "征收土地预公告", "format": "PDF（盖章版）", "note": "含项目名称、位置、面积、用途、文号"},
+            {"name": "勘测定界报告", "format": "PDF", "note": "含地块面积、界址点、地类面积"},
+            {"name": "群众调查问卷/座谈会记录", "format": "PDF 或图片", "note": "含支持率、反对率、群众诉求"},
+            {"name": "专家评审意见", "format": "图片", "note": "专家签字评审表、签到表"},
+        ],
+        "optional": [
+            {"name": "公示照片", "format": "图片", "note": "公告栏张贴照片"},
+            {"name": "现场照片", "format": "图片", "note": "地块现状、现场勘查照片"},
+            {"name": "补偿标准文件", "format": "PDF", "note": "征地区片综合地价标准"},
+        ],
+    },
+    "bidding": {
+        "title": "投标文件",
+        "description": "用于招投标项目的技术文件编制",
+        "required": [
+            {"name": "招标文件", "format": "PDF", "note": "含技术要求、评分标准、资质要求"},
+            {"name": "公司资质证书", "format": "图片/PDF", "note": "营业执照、资质证书、人员证书"},
+            {"name": "项目背景资料", "format": "PDF", "note": "项目需求、技术方案"},
+        ],
+        "optional": [
+            {"name": "业绩证明材料", "format": "PDF/图片", "note": "类似项目业绩"},
+        ],
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Session Management (compatible with existing report_service)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -309,6 +343,106 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
 # ═══════════════════════════════════════════════════════════════════════════════
 # Generation Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/analyze-intent", response_model=ApiResponse)
+async def analyze_intent(request: dict):
+    """意图分析入口：分析用户要生成什么报告，返回上传资料引导。
+
+    用户输入需求（如"生成征地稳评报告"），系统判断领域（stability/bidding），
+    返回该领域需要上传的资料清单 + 格式要求。
+    """
+    user_input = str(request.get("user_input", "") or "").strip()
+    if not user_input:
+        return ApiResponse(message="请输入需求描述", data={"needs_input": True})
+
+    from app.agent.agents.intent_clarification_agent import IntentClarificationAgent
+    agent = IntentClarificationAgent()
+    try:
+        intent = await agent.analyze_intent({}, user_input)
+    except Exception:
+        intent = {"primary_intent": "unknown", "confidence": 0}
+
+    # 判断领域
+    primary = intent.get("primary_intent", "")
+    if primary == "bidding_generation" or any(kw in user_input for kw in ["招标", "投标", "评标", "中标"]):
+        domain = "bidding"
+    else:
+        domain = "stability"
+
+    guide = REPORT_MATERIAL_GUIDE.get(domain, {})
+    return ApiResponse(
+        message="意图分析完成",
+        data={
+            "user_input": user_input,
+            "intent": intent,
+            "domain": domain,
+            "guide": guide,
+        },
+    )
+
+
+@router.post("/reviews/expert-feedback", response_model=ApiResponse)
+async def submit_expert_feedback(request: dict):
+    """专家提交对报告的评估反馈（优化点/不足）。
+
+    request: {domain, report_title, feedback: [{chapter_num, issue_type, issue_desc, suggestion, severity}]}
+    """
+    from app.services import skill_service
+    domain = str(request.get("domain", "stability") or "stability")
+    report_title = str(request.get("report_title", "") or "")
+    session_id = str(request.get("session_id", "") or "")
+    report_file_path = str(request.get("report_file_path", "") or "")
+    feedback_list = request.get("feedback", []) or []
+
+    recorded = 0
+    for fb in feedback_list:
+        if not isinstance(fb, dict) or not fb.get("issue_desc"):
+            continue
+        rid = await skill_service.record_expert_feedback(
+            report_title=report_title,
+            session_id=session_id,
+            report_file_path=report_file_path,
+            domain=domain,
+            chapter_num=int(fb.get("chapter_num", 0) or 0),
+            issue_type=str(fb.get("issue_type", "") or ""),
+            issue_desc=str(fb.get("issue_desc", "") or ""),
+            suggestion=str(fb.get("suggestion", "") or ""),
+            severity=str(fb.get("severity", "warning") or "warning"),
+        )
+        if rid:
+            recorded += 1
+
+    # 🔴 后台自动蒸馏（专家无需关心蒸馏过程和结果）
+    if recorded > 0:
+        try:
+            import asyncio
+            _distill_tasks = getattr(submit_expert_feedback, "_distill_tasks", set())
+            task = asyncio.create_task(skill_service.distill_skills(domain))
+            _distill_tasks.add(task)
+            task.add_done_callback(_distill_tasks.discard)
+            submit_expert_feedback._distill_tasks = _distill_tasks
+        except Exception:
+            pass  # 蒸馏失败不影响专家提交
+
+    return ApiResponse(message=f"已记录 {recorded} 条专家反馈", data={"recorded": recorded})
+
+
+@router.post("/reviews/distill", response_model=ApiResponse)
+async def distill_review_skills(request: dict):
+    """把累积的专家反馈蒸馏成审核 skill（LLM 自动蒸馏）。"""
+    from app.services import skill_service
+    domain = str(request.get("domain", "stability") or "stability")
+    result = await skill_service.distill_skills(domain)
+    return ApiResponse(message="蒸馏完成", data=result)
+
+
+@router.get("/reviews/skills", response_model=ApiResponse)
+async def get_review_skills(domain: str = "stability"):
+    """获取当前的审核 skill（供审核 agent 和生成使用）。"""
+    from app.services import skill_service
+    skills = await skill_service.get_active_skills(domain)
+    return ApiResponse(message="审核 skill", data=skills)
 
 
 @router.post("/generate/start", response_model=ApiResponse)

@@ -156,7 +156,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Register routers
-from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning
+from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning, bidding_screening
 
 app.include_router(knowledge.router)
 app.include_router(report.router)
@@ -165,6 +165,7 @@ app.include_router(dashboard.router)
 app.include_router(auth.router)
 app.include_router(knowledge_chat.router)
 app.include_router(learning.router)
+app.include_router(bidding_screening.router)
 
 
 @app.get("/")

@@ -181,3 +181,52 @@ def _migrate_add_chat_tables(conn):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_gf_created ON generation_feedback(created_at)"
         ))
+
+    # ── expert_reviews: 专家评估反馈（人工专家对报告的优化点/不足）──
+    if not inspector.has_table("expert_reviews"):
+        conn.execute(text("""
+            CREATE TABLE expert_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_title TEXT,
+                session_id TEXT,
+                report_file_path TEXT,
+                domain TEXT DEFAULT 'stability',
+                chapter_num INTEGER DEFAULT 0,
+                issue_type TEXT,
+                issue_desc TEXT,
+                suggestion TEXT,
+                severity TEXT DEFAULT 'warning',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+    else:
+        # 补 session_id / report_file_path 字段（关联具体报告，方便识别）
+        cols = {c["name"] for c in inspector.get_columns("expert_reviews")}
+        if "session_id" not in cols:
+            conn.execute(text("ALTER TABLE expert_reviews ADD COLUMN session_id TEXT"))
+        if "report_file_path" not in cols:
+            conn.execute(text("ALTER TABLE expert_reviews ADD COLUMN report_file_path TEXT"))
+
+    # ── review_skills: 蒸馏出的审核 skill（规则 + 文本）──
+    if not inspector.has_table("review_skills"):
+        conn.execute(text("""
+            CREATE TABLE review_skills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT DEFAULT 'stability',
+                chapter_num INTEGER DEFAULT 0,
+                skill_type TEXT DEFAULT 'text',
+                rule_pattern TEXT,
+                rule_desc TEXT,
+                severity TEXT DEFAULT 'warning',
+                correction TEXT,
+                source_review_ids TEXT,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_rs_domain ON review_skills(domain)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_rs_active ON review_skills(is_active)"
+        ))

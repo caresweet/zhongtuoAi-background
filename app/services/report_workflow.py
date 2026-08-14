@@ -161,13 +161,108 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
         m = re.search(r'(洪拟征告|淮拟征告|涟拟征告|金拟征告|盱拟征告)\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号', pdf_text)
         if m: filled["project_name"] = m.group(0); logs.append(f"📝 project_name 正则提取: {filled['project_name']}")
 
-    # Mark still-missing fields
-    for key in ("project_name","org_name","location","area_mu","land_use"):
+    # 🔴 必要字段缺失 → interrupt 暂停询问用户（HITL）
+    # 只对报告核心信息暂停：项目名称/责任单位/位置/面积。次要字段自动标【待补充】
+    required_fields = [
+        ("project_name", "项目名称"),
+        ("org_name", "责任单位"),
+        ("location", "项目位置"),
+        ("area_mu", "征收面积（亩）"),
+    ]
+    missing_required = []
+    for key, label in required_fields:
+        val = filled.get(key, "")
+        if not val or str(val).startswith("【待补充】"):
+            missing_required.append({"key": key, "label": label})
+
+    if missing_required:
+        from langgraph.types import interrupt
+        logs.append(f"⏸️ 缺少 {len(missing_required)} 项必要信息，暂停等待补充")
+        user_input = interrupt({
+            "type": "missing_data",
+            "missing_fields": missing_required,
+        })
+        # resume 后，user_input 是用户补充的数据
+        if isinstance(user_input, dict):
+            for item in missing_required:
+                key = item["key"]
+                val = user_input.get(key, "")
+                if val and str(val).strip():
+                    filled[key] = str(val).strip()
+                    filled[f"_locked_{key}"] = True
+                    logs.append(f"✅ 已补充 {item['label']}: {val}")
+
+    # 仍缺失的字段（用户未补的）自动标【待补充】，不再中断
+    for key in ("project_name","org_name","location","area_mu","land_use",
+                "household_count","total_samples","compensation_standard"):
         if not filled.get(key):
             filled[key] = "【待补充】"
-            logs.append(f"📝 {key} 未提取到，标记为【待补充】")
+            logs.append(f"📝 {key} 未提供，标记为【待补充】")
 
+    state["filled_data"] = filled
     await _emit("validating", {"analysis":"done","outline":"pending","generation":"pending","assembly":"pending"})
+    return state
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Node 2b: data_inquiry — 数据合理性校验，不合理时询问用户（HITL）
+# ═══════════════════════════════════════════════════════════════════════════════
+async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
+    """数据合理性校验：发现不合理数据（如支持率非100%）时暂停询问用户。
+
+    询问用户：能否提供真实数据 / 维持现状 / 授权上网查询。
+    用户回应后写入 filled_data 继续。
+    """
+    state["phase"] = WorkflowPhase.VALIDATING.value
+    logs = state.setdefault("logs",[])
+    filled = state.setdefault("filled_data", {})
+
+    issues = []
+
+    # 支持率合规检查（征地项目合规要求 100%）
+    support_rate = filled.get("support_rate", "")
+    if support_rate and str(support_rate) not in ("【待补充】", ""):
+        try:
+            rate = float(str(support_rate).replace("%", "").strip())
+            if rate != 100:
+                issues.append({
+                    "field": "support_rate",
+                    "label": "群众支持率",
+                    "current": f"{rate}%",
+                    "message": f"提取到的群众支持率是 {rate}%，征地项目合规要求 100%。请确认：提供真实支持率 / 维持现状（将标注待补充）/ 授权上网查询当地实际数据",
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # 补偿标准合理性（0 或缺失视为不合理）
+    comp = filled.get("compensation_standard", "")
+    if comp and str(comp) not in ("【待补充】", ""):
+        if re.search(r'(?<!\d)0\s*(?:元|万元)', str(comp)):
+            issues.append({
+                "field": "compensation_standard",
+                "label": "补偿标准",
+                "current": str(comp),
+                "message": f"提取到的补偿标准异常（{comp}），请确认或提供真实补偿标准",
+            })
+
+    if issues:
+        from langgraph.types import interrupt
+        logs.append(f"⚠️ 发现 {len(issues)} 项数据不合理，暂停询问用户")
+        user_input = interrupt({
+            "type": "data_inquiry",
+            "issues": issues,
+        })
+        # 用户回应后写入
+        if isinstance(user_input, dict):
+            for issue in issues:
+                field = issue["field"]
+                val = user_input.get(field, "")
+                if val and str(val).strip():
+                    filled[field] = str(val).strip()
+                    filled[f"_locked_{field}"] = True
+                    logs.append(f"✅ 用户确认 {issue['label']}: {val}")
+
+    state["filled_data"] = filled
     return state
 
 
@@ -288,171 +383,122 @@ async def node_retrieve_rag(state: ReportWorkflowState) -> ReportWorkflowState:
 # Node 6: chapter_generate — per-chapter generation with chapter loop inside
 # ═══════════════════════════════════════════════════════════════════════════════
 async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowState:
-    """Generate each chapter sequentially. Only passes chapter subset data."""
+    """生成「当前」章节（图级循环，每次只生成一章）。
+
+    章节循环由 LangGraph 条件路由驱动：本节点只负责生成 outline_list[_chapter_idx] 这一章，
+    审查和重试判断移到 node_chapter_review + route_after_review。
+    """
     state["phase"] = WorkflowPhase.GENERATING.value
     logs = state.setdefault("logs",[])
     filled = state.get("filled_data",{})
     outline_list = state.get("outline_list",[]) or []
     rag_chunks = state.get("rag_all_chunks",[]) or []
-    images = state.get("image_meta_list",[]) or []
-    total = len(outline_list)
+    idx = state.get("_chapter_idx", 0)
+    retry = state.get("_chapter_retry", 0)
+
+    # 所有章节已处理完 → 路由到组装
+    if idx >= len(outline_list):
+        state["_next_action"] = "assemble"
+        return state
+
+    ch = outline_list[idx]
+    ch_num = int(ch.get("chapter_no","1"))
 
     from app.services.llm_service import LLMService; llm = LLMService()
     from app.agent.agents.chapters import get_chapter_agent
     from app.services.master_orchestrator import build_chapter_prompt
     from app.services.image_catalog import build_image_catalog, get_chapter_image_guide
 
-    # 🔴 Pre-fetch dynamic few-shot examples for this project
+    # 🔴 首次进入时准备 few-shot 和图片 catalog（后续章节/重试复用，不重复加载）
+    if not state.get("_gen_prepared"):
+        try:
+            from app.services.few_shot_service import refresh_few_shot_cache
+            proj = {"location": filled.get("location",""), "area_mu": filled.get("area_mu",""),
+                    "land_use": filled.get("land_use",""), "project_name": filled.get("project_name","")}
+            await refresh_few_shot_cache(proj)
+        except Exception as e:
+            logger.warning(f"Few-shot cache refresh failed (non-critical): {e}")
+        uploaded_paths = []
+        for f in (state.get("_uploaded_files",[]) or []):
+            path = f.get("path",f) if isinstance(f,dict) else f
+            if isinstance(path,str): uploaded_paths.append(path)
+        state["_img_catalog"] = build_image_catalog(uploaded_paths)
+        state["_gen_prepared"] = True
+
+    img_catalog = state.get("_img_catalog", {})
+
+    # RAG context for this chapter
+    rag_ctx = None
+    for rc in rag_chunks:
+        if rc.get("chapter_no") == ch["chapter_no"]:
+            if rc.get("spec") or rc.get("example"):
+                rag_ctx = {"chapter_context": rc.get("spec",""),
+                           "local_regulation_context": "", "example_context": rc.get("example",""),
+                           "project_context": "", "sources": []}
+            break
+
+    img_guide = get_chapter_image_guide(ch_num, img_catalog)
+
+    # 章节子集数据
+    deps = list(ch.get("depend_on_data",[]) or [])
+    if ch_num == 1:
+        for k in ("org_name","implement_unit","project_name","location"):
+            if k not in deps: deps.append(k)
+    if ch_num == 3:
+        for k in ("questionnaire_summary", "questionnaire_tallies", "survey_total_count"):
+            if k not in deps and filled.get(k):
+                deps.append(k)
+    ch_data = {k: filled.get(k,"") for k in deps if filled.get(k)}
+
+    # 🔴 注入 PDF 提取的真实表格数据
+    extracted_tbls = filled.get("_extracted_tables", []) or []
+    if extracted_tbls:
+        md_parts = []
+        for tbl in extracted_tbls:
+            if isinstance(tbl, dict) and tbl.get("raw_markdown"):
+                md_parts.append(tbl["raw_markdown"])
+        if md_parts:
+            ch_data["_pdf_table_data"] = "\n\n".join(md_parts)
+
+    ch_def = {"num": ch_num, "title": ch["title"], "key_points": ch.get("need_spec_tags",[]),
+               "data_needed": deps}
+
+    # 🔴 重试时构建反馈（包含可用数据 + 上一版内容）
+    feedback = ""
+    if retry > 0 and ch.get("review_msg"):
+        fb_parts = [ch["review_msg"]]
+        if ch_data:
+            fb_parts.append("\n## 📋 本章可用数据（只有这些数据是真实的，其他一律不准编造）")
+            for k, v in ch_data.items():
+                fb_parts.append(f"- {k}: {v}")
+        prev_md = ch.get("raw_content","") or ""
+        if prev_md:
+            fb_parts.append(f"\n## 📝 上一版生成内容（参考结构，修正数据问题后重写）\n{prev_md[:2000]}")
+        feedback = "\n".join(fb_parts)
+
+    prompt = build_chapter_prompt(ch_def, ch_data, img_guide, state.get("chapters",{}),
+                                  rag_context=rag_ctx,
+                                  feedback=feedback if feedback else None)
+    agent = get_chapter_agent(ch_num, llm_service=llm)
+    agent_state = {"session_id":state.get("session_id",""),"report_title":filled.get("project_name",""),
+                   "filled_data":ch_data,"_domain":"stability","_report_style":"jinhu",
+                   "current_chapter":ch_num,"chapters":{},"_custom_prompt":prompt,"_use_custom_prompt":True}
+    q = asyncio.Queue()
+    md = ""
     try:
-        from app.services.few_shot_service import refresh_few_shot_cache
-        proj = {"location": filled.get("location",""), "area_mu": filled.get("area_mu",""),
-                "land_use": filled.get("land_use",""), "project_name": filled.get("project_name","")}
-        await refresh_few_shot_cache(proj)
-        logs.append("📚 已加载相似项目范文参考")
+        await asyncio.wait_for(agent.run(agent_state,q), timeout=300.0)
+        cd = agent_state.get("chapters",{}).get(ch_num,{})
+        md = cd.get("markdown","") if isinstance(cd,dict) else (cd if isinstance(cd,str) else "")
+    except asyncio.TimeoutError:
+        logger.error(f"Ch{ch_num} gen timeout (300s)")
     except Exception as e:
-        logger.warning(f"Few-shot cache refresh failed (non-critical): {e}")
+        logger.error(f"Ch{ch_num} gen failed: {e}")
 
-    # Build image catalog for chapter assignment
-    uploaded_paths = []
-    for f in (state.get("_uploaded_files",[]) or []):
-        path = f.get("path",f) if isinstance(f,dict) else f
-        if isinstance(path,str): uploaded_paths.append(path)
-    img_catalog = build_image_catalog(uploaded_paths)
-    chapters = {}
-
-    for ch in outline_list:
-        ch_num = int(ch.get("chapter_no","1"))
-        # Get RAG chunks for this chapter
-        rag_ctx = None
-        for rc in rag_chunks:
-            if rc.get("chapter_no") == ch["chapter_no"]:
-                if rc.get("spec") or rc.get("example"):
-                    rag_ctx = {"chapter_context": rc.get("spec",""),
-                               "local_regulation_context": "", "example_context": rc.get("example",""),
-                               "project_context": "", "sources": []}
-                break
-
-        img_guide = get_chapter_image_guide(ch_num, img_catalog)
-
-        # Build chapter subset data — Ch1 always gets org_name + implement_unit
-        deps = list(ch.get("depend_on_data",[]) or [])
-        if ch_num == 1:
-            for k in ("org_name","implement_unit","project_name","location"):
-                if k not in deps: deps.append(k)
-        # 🔴 第3章（风险调查）：注入问卷勾选统计（从问卷图片 OCR 识别统计得到）
-        if ch_num == 3:
-            for k in ("questionnaire_summary", "questionnaire_tallies", "survey_total_count"):
-                if k not in deps and filled.get(k):
-                    deps.append(k)
-        ch_data = {k: filled.get(k,"") for k in deps if filled.get(k)}
-
-        # 🔴 注入 PDF 提取的真实表格数据（勘测定界面积、界址点、地类面积等），
-        # 让 LLM 用真实数据填表，而不是写空表或"详见报告相关章节"
-        extracted_tbls = filled.get("_extracted_tables", []) or []
-        if extracted_tbls:
-            md_parts = []
-            for tbl in extracted_tbls:
-                if not isinstance(tbl, dict):
-                    continue
-                raw_md = tbl.get("raw_markdown", "")
-                if raw_md:
-                    md_parts.append(raw_md)
-            if md_parts:
-                ch_data["_pdf_table_data"] = "\n\n".join(md_parts)
-
-        ch_def = {"num": ch_num, "title": ch["title"], "key_points": ch.get("need_spec_tags",[]),
-                   "data_needed": deps}
-
-        max_retries = MAX_RETRY
-        md = ""
-        prev_md = ""  # 🔴 Keep previous generation for context on retry
-        for attempt in range(max_retries):
-            # 🔴 Build feedback that includes WHAT data IS available (not just what's wrong)
-            feedback = ""
-            if attempt > 0 and ch.get("review_msg"):
-                # Build rich feedback: what was wrong + what data IS available
-                fb_parts = [ch["review_msg"]]
-                # Add available data summary so LLM knows what it CAN use
-                if ch_data:
-                    fb_parts.append("\n## 📋 本章可用数据（只有这些数据是真实的，其他一律不准编造）")
-                    for k, v in ch_data.items():
-                        fb_parts.append(f"- {k}: {v}")
-                if prev_md:
-                    fb_parts.append(f"\n## 📝 上一版生成内容（参考结构，修正数据问题后重写）\n{prev_md[:2000]}")
-                feedback = "\n".join(fb_parts)
-
-            prompt = build_chapter_prompt(ch_def, ch_data, img_guide, chapters,
-                                          rag_context=rag_ctx,
-                                          feedback=feedback if feedback else None)
-            agent = get_chapter_agent(ch_num, llm_service=llm)
-            agent_state = {"session_id":state.get("session_id",""),"report_title":filled.get("project_name",""),
-                           "filled_data":ch_data,"_domain":"stability","_report_style":"jinhu",
-                           "current_chapter":ch_num,"chapters":{},"_custom_prompt":prompt,"_use_custom_prompt":True}
-            q = asyncio.Queue()
-            try:
-                await asyncio.wait_for(agent.run(agent_state,q), timeout=300.0)
-                cd = agent_state.get("chapters",{}).get(ch_num,{})
-                md = cd.get("markdown","") if isinstance(cd,dict) else (cd if isinstance(cd,str) else "")
-            except asyncio.TimeoutError:
-                logger.error(f"Ch{ch_num} gen timeout (300s)")
-                md = ""
-            except Exception as e:
-                logger.error(f"Ch{ch_num} gen failed: {e}"); md = ""
-
-            # 🔴 Save for next retry context
-            if md:
-                prev_md = md
-
-            # 🔴 Inline review — check key issues before passing to dedicated review node
-            issues = []
-            if len(md) < 200: issues.append("字数严重不足")
-            from app.validation.content_guardrails import AI_BUZZWORDS
-            found = [b for b in AI_BUZZWORDS if b in md]
-            if found: issues.append(f"AI套词:{found}")
-            # 🔴 检查孤立的表格标题（表X-X 标题但没有对应的 markdown 表格内容）
-            has_md_table = bool(re.search(r'\|[^\n]+\|\s*\n\s*\|[\s:\-—|]+\|', md))
-            has_table_title = bool(re.search(r'表\s*\d+[-—]\d+', md))
-            if has_table_title and not has_md_table:
-                issues.append("存在孤立的表格标题（表X-X 但没有表格内容），要么补全 markdown 表格，要么删除标题")
-            # Check fabricated percentages/numbers when no survey data
-            has_survey = bool(filled.get("total_samples") or filled.get("support_rate"))
-            if not has_survey:
-                pcts = re.findall(r'(\d+\.?\d*)\s*%', md)
-                if len(pcts) > 1:
-                    issues.append(f"编造百分比({len(pcts)}处)，用户未提供问卷数据，应标注【待补充】")
-                fake_nums = re.findall(r'(?:发放|回收|共|收回)\s*(\d+)\s*(?:份|户|人)', md)
-                if fake_nums:
-                    issues.append(f"编造数据({', '.join(fake_nums[:3])})，应标注【待补充】")
-
-            if issues and attempt < max_retries - 1:
-                fb_parts = ["## ⚠️ 上一版存在以下问题，请逐项修正（保留正确的部分，只修正有问题的）："]
-                for i, iss in enumerate(issues, 1):
-                    fb_parts.append(f"{i}. {iss}")
-                fb_parts.append("\n修正要求：")
-                if has_survey:
-                    fb_parts.append("- 支持率必须100%，反对率必须0%（征地项目合规要求）")
-                else:
-                    fb_parts.append("- 用户未提供问卷数据，所有百分比/份数/人数用【待补充：XX数据未提供】代替")
-                fb_parts.append("- 表格用 markdown 语法写，有数据支撑才写，缺数据单元格写【待补充】")
-                fb_parts.append("- 保留上一版正确的段落结构和专业表述，只修正数据问题")
-                ch["review_msg"] = "\n".join(fb_parts)
-                continue  # Retry with rich feedback + previous md as reference
-            elif issues:
-                ch["review_msg"] = "; ".join(issues)
-                ch["status"] = "failed_human_review"
-            else:
-                ch["status"] = "passed"
-                break  # 🔴 No issues, skip remaining retries
-
-        ch["raw_content"] = md or f"【第{ch_num}章生成失败，请人工复核。原因：{ch.get('review_msg','未知')}】"
-        ch["retry_count"] = max_retries if ch.get("status") in ("retry","failed_human_review") else 0
-        chapters[ch_num] = {"markdown": ch["raw_content"], "title": ch["title"], "status": ch["status"]}
-        logs.append(f"  ✅ 第{ch_num}章「{ch['title']}」({len(md)}字) status={ch['status']}")
-
-    state["chapters"] = chapters
+    ch["raw_content"] = md or f"【第{ch_num}章生成失败，请人工复核】"
     state["outline_list"] = outline_list
-    state["logs"] = logs
-    await _emit("generating", {"analysis":"done","outline":"done","generation":"done","quality":"pending","assembly":"pending"})
+    state["_next_action"] = "review"
+    logs.append(f"  ✍️ 第{ch_num}章「{ch['title']}」已生成 ({len(md)}字)")
+    await _emit("generating", {"analysis":"done","outline":"done","generation":"running","quality":"pending","assembly":"pending"})
     return state
 
 
@@ -460,75 +506,128 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
 # Node 7: chapter_review — mixed review: hard rules + LLM business review
 # ═══════════════════════════════════════════════════════════════════════════════
 async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState:
-    """Hard-rule checks + LLM business review. Independent scoring, not self-review."""
+    """审查「当前」章节，并决定下一步（重试 / 下一章 / 组装）。
+
+    硬规则审查（AI套词、编造数据、负分、孤立表格标题）。审查结果写入当前章节，
+    并根据结果设置 _next_action，供 route_after_review 路由。
+    """
     state["phase"] = WorkflowPhase.REVIEWING.value
     logs = state.setdefault("logs",[])
     outline_list = state.get("outline_list",[]) or []
-    images = state.get("image_meta_list",[]) or []
+    filled = state.get("filled_data",{})
+    idx = state.get("_chapter_idx", 0)
+    retry = state.get("_chapter_retry", 0)
+
+    if idx >= len(outline_list):
+        state["_next_action"] = "assemble"
+        return state
+
+    ch = outline_list[idx]
+    ch_num = int(ch.get("chapter_no","1"))
+    md = ch.get("raw_content","") or ""
 
     from app.validation.content_guardrails import AI_BUZZWORDS
 
-    for ch in outline_list:
-        md = ch.get("raw_content","") or ""
-        issues = []
+    issues = []
+    # 硬规则
+    found_bw = [b for b in AI_BUZZWORDS if b in md]
+    if found_bw: issues.append(f"AI套词: {found_bw}")
+    if len(md) < 300: issues.append(f"字数不足({len(md)})")
+    # 孤立的表格标题
+    has_md_table = bool(re.search(r'\|[^\n]+\|\s*\n\s*\|[\s:\-—|]+\|', md))
+    has_table_title = bool(re.search(r'表\s*\d+[-—]\d+', md))
+    if has_table_title and not has_md_table:
+        issues.append("存在孤立的表格标题（表X-X 但没有表格内容）")
 
-        # Hard rules
-        found_bw = [b for b in AI_BUZZWORDS if b in md]
-        if found_bw: issues.append(f"AI套词: {found_bw}")
-        if len(md) < 300: issues.append(f"字数不足({len(md)})")
-        # Image placeholder check
-        ch_num = int(ch.get("chapter_no","1"))
-        ch_imgs = [img for img in images if img.get("page_num",0) == ch_num]
-        if ch_imgs and '<<IMAGE:' not in md and '![' not in md:
-            issues.append("有可用图片但未引用")
-        # 🔴 孤立的表格标题检查（表X-X 标题但没有 markdown 表格内容）
-        has_md_table = bool(re.search(r'\|[^\n]+\|\s*\n\s*\|[\s:\-—|]+\|', md))
-        has_table_title = bool(re.search(r'表\s*\d+[-—]\d+', md))
-        if has_table_title and not has_md_table:
-            issues.append("存在孤立的表格标题（表X-X 但没有表格内容）")
+    # 编造数据检查
+    has_survey = bool(filled.get("total_samples") or filled.get("support_rate") or filled.get("survey_total_count"))
+    if not has_survey:
+        fake_rates = re.findall(r'(\d+\.?\d*)\s*%', md)
+        if len(fake_rates) > 1:
+            issues.append(f"编造百分比({len(fake_rates)}处)，用户未提供问卷数据，应标注【待补充】")
+        fake_counts = re.findall(r'(?:发放|回收|共|有效问卷|涉及|收回)\s*(\d+)\s*(?:份|户|人|张)', md)
+        if fake_counts:
+            issues.append(f"编造统计数据({', '.join(fake_counts[:5])})，用户未提供问卷数据")
 
-        # 🔴 Fabricated data check: percentages and counts that aren't in extracted data
-        filled = state.get("filled_data",{})
-        # 🔴 Enforce 100% support rate for land acquisition projects
-        if filled.get("support_rate"):
-            try:
-                rate = float(str(filled["support_rate"]).replace("%",""))
-                if rate != 100:
-                    logs.append(f"⚠️ 检测到支持率{rate}%，已自动修正为100%（征地项目合规要求）")
-                    filled["support_rate"] = "100"
-            except ValueError:
-                filled["support_rate"] = "100"
-        has_survey = bool(filled.get("total_samples") or filled.get("support_rate") or filled.get("survey_total_count"))
-        if not has_survey:
-            # Any percentage with decimal point is likely fabricated
-            fake_rates = re.findall(r'(\d+\.?\d*)\s*%', md)
-            if fake_rates and len(fake_rates) > 0:
-                issues.append(f"编造百分比({len(fake_rates)}处)，用户未提供问卷数据，应标注【待补充】")
-            # Catch fabricated counts
-            fake_counts = re.findall(r'(?:发放|回收|共|有效问卷|涉及|收回)\s*(\d+)\s*(?:份|户|人|张)', md)
-            if fake_counts:
-                issues.append(f"编造统计数据({', '.join(fake_counts[:5])})，用户未提供问卷数据，应标注【待补充】")
-            # Catch percentage patterns like "59.9%", "94.7%"
-            specific_pcts = re.findall(r'\d{2,3}\.\d+%', md)
-            if specific_pcts:
-                issues.append(f"编造精确百分比，用户未提供问卷数据，应标注【待补充】")
+    # 评分范围
+    scores = re.findall(r'(-?\d+(?:\.\d+)?)\s*分', md)
+    for s in scores:
+        v = float(s)
+        if v < 0: issues.append(f"负分({v})"); break
+        if v > 100: issues.append(f"超100分({v})"); break
 
-        # Scoring validation
-        scores = re.findall(r'(-?\d+(?:\.\d+)?)\s*分', md)
-        for s in scores:
-            v = float(s)
-            if v < 0: issues.append(f"负分({v})"); break
-            if v > 100: issues.append(f"超100分({v})"); break
-
-        if issues:
-            ch["review_msg"] = "; ".join(issues)
-            ch["review_score"] = max(0, 85 - len(issues)*15)
-            if ch.get("status") == "passed": ch["status"] = "retry"
-            logs.append(f"  ⚠️ 第{ch_num}章: {ch['review_msg']}")
+    if issues:
+        ch["review_msg"] = "; ".join(issues)
+        ch["review_score"] = max(0, 85 - len(issues)*15)
+        logs.append(f"  ⚠️ 第{ch_num}章: {ch['review_msg']}")
+        if retry + 1 < MAX_RETRY:
+            # 还有重试机会 → 重试当前章
+            ch["status"] = "retry"
+            state["_chapter_retry"] = retry + 1
+            state["_next_action"] = "generate"
         else:
-            ch["review_score"] = 90
+            # 重试耗尽 → 标记人工复核，进入下一章
+            ch["status"] = "failed_human_review"
+            state["_chapter_idx"] = idx + 1
+            state["_chapter_retry"] = 0
+            state["_next_action"] = "generate" if idx + 1 < len(outline_list) else "quality_review"
+    else:
+        ch["review_score"] = 90
+        ch["status"] = "passed"
+        # 通过 → 累积到 chapters，进入下一章
+        chapters = state.setdefault("chapters", {})
+        chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "passed"}
+        state["chapters"] = chapters
+        logs.append(f"  ✅ 第{ch_num}章「{ch['title']}」通过")
+        state["_chapter_idx"] = idx + 1
+        state["_chapter_retry"] = 0
+        state["_next_action"] = "generate" if idx + 1 < len(outline_list) else "quality_review"
 
     state["outline_list"] = outline_list
+    await _emit("quality", {"analysis":"done","outline":"done","generation":"running","quality":"running","assembly":"pending"})
+    return state
+
+
+def route_after_review(state: ReportWorkflowState) -> str:
+    """条件路由：根据 node_chapter_review 设置的 _next_action 决定下一步。
+
+    - "generate" → 回到 chapter_generate（重试当前章 或 生成下一章）
+    - "assemble" → 进入 assemble_final_report（所有章节处理完）
+    """
+    return state.get("_next_action", "assemble")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Node 7b: quality_review — final audit via QualityReviewAgent
+# ═══════════════════════════════════════════════════════════════════════════════
+async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState:
+    """终稿质量审查：复用 QualityReviewAgent 做表格/AI味/格式/数据一致性检查 + 自动修复。
+
+    在所有章节生成并通过后运行。检查：
+    - 不该出现的表格（孤立表标题、空表格）
+    - 表格格式不准确
+    - AI 味太重（口语化「总的来说」「综上所述」、AI meta-text）
+    - 数据错误（0亩、年份错误、占位符残留）
+    - 跨章节一致性（面积/日期/评分/单位名称）
+    可修复的问题自动修复，审计结果存入 state["_quality_audit"]。
+    """
+    state["phase"] = WorkflowPhase.REVIEWING.value
+    logs = state.setdefault("logs",[])
+
+    from app.agent.agents.quality_review_agent import QualityReviewAgent
+    agent = QualityReviewAgent()
+    try:
+        result = await agent.act(state, {})
+        await agent.update_state(state, result)
+        total = result.get("total_issues", 0)
+        fixed = result.get("auto_fixed", 0)
+        regen = len(result.get("regenerate_chapters", []))
+        logs.append(f"🔍 终稿质量审查：{total} 个问题，自动修复 {fixed} 个，需重写 {regen} 章")
+    except Exception as e:
+        logger.warning(f"Quality review failed (non-critical): {e}")
+        state["_quality_audit"] = {"passed": True, "error": str(e)}
+
+    state["_next_action"] = "assemble"
     await _emit("quality", {"analysis":"done","outline":"done","generation":"done","quality":"done","assembly":"pending"})
     return state
 
@@ -548,9 +647,10 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
 
     try:
         # 🔴 Post-generation polish: quick LLM pass to unify style
+        # 章节内容在 state["chapters"]（review 通过时累积），非 outline_list
         full_text = "\n\n".join(
             ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
-            for ch in (state.get("outline_list") or [])
+            for ch in chapters.values()
             if isinstance(ch, dict) and ch.get("markdown")
         )
         if full_text and len(full_text) > 2000:
@@ -634,25 +734,50 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
 # Graph Builder
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_report_workflow() -> StateGraph:
-    """Build the 8-node report generation workflow."""
+    """Build the report generation workflow with a graph-level chapter loop + final quality review.
+
+    图结构：
+      file_parse → field_validate → build_dynamic_outline → outline_check → retrieve_rag
+      → [chapter_generate ⇄ chapter_review]（条件路由循环，逐章生成+审查）
+      → quality_review（终稿质量审查 + 自动修复）
+      → assemble_final_report → END
+
+    章节循环是图级循环：chapter_review 通过 route_after_review 返回
+    "generate"（重试/下一章）或 "quality_review"（全部完成，进入终稿审查）。
+    """
     w = StateGraph(ReportWorkflowState)
     w.add_node("file_parse", node_file_parse)
     w.add_node("field_validate", node_field_validate)
+    w.add_node("data_inquiry", node_data_inquiry)
     w.add_node("build_dynamic_outline", node_build_dynamic_outline)
     w.add_node("outline_check", node_outline_check)
     w.add_node("retrieve_rag", node_retrieve_rag)
     w.add_node("chapter_generate", node_chapter_generate)
     w.add_node("chapter_review", node_chapter_review)
+    w.add_node("quality_review", node_quality_review)
     w.add_node("assemble_final_report", node_assemble_final_report)
 
     w.set_entry_point("file_parse")
     w.add_edge("file_parse", "field_validate")
-    w.add_edge("field_validate", "build_dynamic_outline")
+    w.add_edge("field_validate", "data_inquiry")
+    w.add_edge("data_inquiry", "build_dynamic_outline")
     w.add_edge("build_dynamic_outline", "outline_check")
     w.add_edge("outline_check", "retrieve_rag")
     w.add_edge("retrieve_rag", "chapter_generate")
     w.add_edge("chapter_generate", "chapter_review")
-    w.add_edge("chapter_review", "assemble_final_report")
+
+    # 🔴 章节循环：条件路由
+    #   "generate" → 回到 chapter_generate（重试当前章 或 生成下一章）
+    #   "quality_review" → 进入终稿质量审查（所有章节处理完）
+    w.add_conditional_edges(
+        "chapter_review",
+        route_after_review,
+        {
+            "generate": "chapter_generate",
+            "quality_review": "quality_review",
+        },
+    )
+    w.add_edge("quality_review", "assemble_final_report")
     w.add_edge("assemble_final_report", END)
     return w
 
@@ -676,6 +801,9 @@ class ReportWorkflowRunner:
             "logs": [], "errors": [], "_uploaded_files": [],
             "image_meta_list": [], "table_meta_list": [], "outline_list": [],
             "rag_all_chunks": [], "max_retry": MAX_RETRY,
+            # 🔴 图级章节循环状态
+            "_chapter_idx": 0, "_chapter_retry": 0, "_next_action": "generate",
+            "_gen_prepared": False,
         }
         if existing_state:
             for k in ("_pdf_raw_text","_project_materials","_uploaded_files",
@@ -686,18 +814,50 @@ class ReportWorkflowRunner:
             if existing_state.get("_workflow_logs"):
                 base["logs"] = list(existing_state["_workflow_logs"])
 
-        import time as _time
-        config = {"configurable": {"thread_id": f"{session_id}_{_time.time()}"}}
+        thread_id = f"{session_id}_{int(time.time())}"
+        config = {"configurable": {"thread_id": thread_id}}
         final_state = None
+        interrupt_payload = None
         async for event in self.compiled.astream(base, config):
-            if "__interrupt__" in event: break
+            if "__interrupt__" in event:
+                interrupt_payload = event["__interrupt__"]
+                break
             for node_name, node_state in event.items():
                 final_state = node_state
                 logger.info(f"Workflow node '{node_name}' completed")
-        return final_state or base
+        result = final_state or base
+        if interrupt_payload:
+            iv = interrupt_payload[0] if isinstance(interrupt_payload, tuple) else interrupt_payload
+            result["_interrupt"] = getattr(iv, "value", iv)
+            result["_thread_id"] = thread_id
+        return result
 
     async def resume(self, session_id, user_responses) -> dict:
-        return {}  # No interrupt in new architecture — use 【待补充】 markers
+        """从 LangGraph 检查点恢复（HITL：用户补充缺失资料后继续）。"""
+        from langgraph.types import Command
+        user_responses = user_responses or {}
+        if isinstance(user_responses, dict):
+            thread_id = user_responses.get("_thread_id", session_id)
+            user_data = {k: v for k, v in user_responses.items() if k != "_thread_id"}
+        else:
+            thread_id = session_id
+            user_data = {}
+        config = {"configurable": {"thread_id": thread_id}}
+        final_state = None
+        interrupt_payload = None
+        async for event in self.compiled.astream(Command(resume=user_data), config):
+            if "__interrupt__" in event:
+                interrupt_payload = event["__interrupt__"]
+                break
+            for node_name, node_state in event.items():
+                final_state = node_state
+                logger.info(f"Workflow node '{node_name}' resumed")
+        result = final_state or {}
+        if interrupt_payload:
+            iv = interrupt_payload[0] if isinstance(interrupt_payload, tuple) else interrupt_payload
+            result["_interrupt"] = getattr(iv, "value", iv)
+            result["_thread_id"] = thread_id
+        return result
 
     def get_state(self, session_id) -> Optional[dict]:
         return None

@@ -320,7 +320,11 @@ _learning_hints_cache = {"hints": "", "updated": 0}
 
 
 def _get_expert_skill_hints(chapter_num: int) -> str:
-    """加载专家蒸馏的审核 skill 文本，注入生成 prompt（同步，sqlite3 直接查）。"""
+    """加载专家蒸馏的审核 skill（规则 + 文本），注入生成 prompt 预防问题。
+
+    规则型 skill：告诉 LLM「禁止出现某模式」，从源头避免犯错
+    文本型 skill：告诉 LLM「应该怎么写」，给出纠正示例
+    """
     try:
         import sqlite3
         from app.config import settings
@@ -330,18 +334,24 @@ def _get_expert_skill_hints(chapter_num: int) -> str:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT chapter_num, rule_desc, correction FROM review_skills "
-            "WHERE is_active=1 AND skill_type='text' AND (chapter_num=0 OR chapter_num=?) "
-            "ORDER BY id LIMIT 10",
+            "SELECT chapter_num, skill_type, rule_pattern, rule_desc, correction FROM review_skills "
+            "WHERE is_active=1 AND (chapter_num=0 OR chapter_num=?) "
+            "ORDER BY id LIMIT 20",
             (chapter_num,)
         ).fetchall()
         conn.close()
         if not rows:
             return ""
-        lines = ["\n## ⚠️ 历史专家反馈（生成时必须避免）"]
+        lines = ["\n## ⚠️ 历史专家反馈（生成时必须避免，这是专家反复指出的问题）"]
         for r in rows:
             ch = f"第{r['chapter_num']}章 " if r["chapter_num"] else ""
-            lines.append(f"- {ch}{r['rule_desc']}：{r['correction']}")
+            if r["skill_type"] == "rule" and r["rule_pattern"]:
+                # 规则型：禁止出现某模式
+                corr = f"（正确写法：{r['correction']}）" if r["correction"] else ""
+                lines.append(f"- 禁止出现「{r['rule_pattern']}」：{r['rule_desc']}{corr}")
+            elif r["skill_type"] == "text" and (r["rule_desc"] or r["correction"]):
+                # 文本型：优化建议/纠正示例
+                lines.append(f"- {ch}{r['rule_desc']}：{r['correction']}")
         return "\n".join(lines) + "\n"
     except Exception:
         return ""

@@ -445,6 +445,16 @@ async def get_review_skills(domain: str = "stability"):
     return ApiResponse(message="审核 skill", data=skills)
 
 
+@router.post("/reviews/auto-extract", response_model=ApiResponse)
+async def auto_extract_skills(request: dict):
+    """自动提炼高频问题 → 生成 skill（从生成反馈的质量审计中统计高频问题）。"""
+    from app.services import skill_service
+    domain = str(request.get("domain", "stability") or "stability")
+    min_count = int(request.get("min_count", 3) or 3)
+    result = await skill_service.auto_extract_high_freq_issues(domain, min_count)
+    return ApiResponse(message="自动提炼完成", data=result)
+
+
 @router.post("/generate/start", response_model=ApiResponse)
 async def start_generation(
     request: StartGenerationRequest,

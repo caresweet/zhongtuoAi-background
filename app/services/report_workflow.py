@@ -779,6 +779,12 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
                     output_path=output,
                     full_text=full_text[:50000],
                 )
+                # 🔴 自动提炼高频问题 → 生成 skill（无需人工，自动反哺）
+                try:
+                    from app.services import skill_service
+                    await skill_service.auto_extract_high_freq_issues(domain=state.get("_domain", "stability"))
+                except Exception as _e2:
+                    logger.warning(f"Auto skill extraction skipped: {_e2}")
             except Exception as e:
                 logger.warning(f"Feedback recording failed (non-critical): {e}")
         else:

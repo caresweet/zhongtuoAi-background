@@ -472,7 +472,10 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     # 章节子集数据
     deps = list(ch.get("depend_on_data",[]) or [])
     if ch_num == 1:
-        for k in ("org_name","implement_unit","project_name","location"):
+        # 🔴 第一章需要所有小节对应的字段（1.5位置/1.6面积/1.7用途等）
+        for k in ("org_name","implement_unit","project_name","location",
+                  "area_mu","area_m2","land_use","doc_reference",
+                  "household_count","population_count","compensation_standard"):
             if k not in deps: deps.append(k)
     if ch_num == 3:
         for k in ("questionnaire_summary", "questionnaire_tallies", "survey_total_count"):

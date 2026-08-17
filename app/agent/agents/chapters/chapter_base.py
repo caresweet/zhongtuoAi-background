@@ -167,6 +167,23 @@ class ChapterAgentBase(BaseAgent):
         else:
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
+        # 🔴 真实地名/文号硬约束（无论用哪套 prompt 都注入，防止 LLM 编造地名）
+        try:
+            filled = state.get("filled_data", {})
+            loc = filled.get("location") or filled.get("land_location") or ""
+            doc_ref = filled.get("doc_reference") or filled.get("project_name") or ""
+            constraint_parts = []
+            if loc and not str(loc).startswith("【"):
+                constraint_parts.append(f"- 项目位置唯一真实值：{loc}。报告中所有位置/坐落/社区/街道必须用这个，禁止编造任何其他地名")
+            if doc_ref and not str(doc_ref).startswith("【"):
+                constraint_parts.append(f"- 项目文号唯一真实值：{doc_ref}。报告中所有征地文号必须用这个，禁止使用其他文号")
+            if constraint_parts:
+                constraint_text = "\n🔒 项目真实数据约束（必须严格遵守，不得编造或替换）：\n" + "\n".join(constraint_parts) + "\n"
+                # 追加到 user_prompt 末尾（最近原则，LLM 更重视）
+                user_prompt = user_prompt + "\n\n" + constraint_text
+        except Exception:
+            pass
+
         # 🔴 Inject Few-Shot template example for format alignment (respects style)
         from app.agent.report_styles import get_few_shot
         style_name = state.get("_report_style") or state.get("report_style") or "jinhu"
@@ -1512,6 +1529,13 @@ class ChapterAgentBase(BaseAgent):
             (r'金北街道', '朱坝街道'),
             (r'金湖县', '洪泽区'),
             (r'金湖', '洪泽'),
+            # 🔴 常见 LLM 幻觉组合（音近/形近字）
+            (r'朱紫街道', '朱坝街道'),
+            (r'三坊社区', '三圩社区'),
+            (r'三坊', '三圩'),
+            (r'朱紫', '朱坝'),
+            (r'三沪', '三圩'),
+            (r'三虎', '三圩'),
         ]
 
         for old, new in _HALLUCINATED_REPLACEMENTS:

@@ -185,6 +185,16 @@ class ChapterAgentBase(BaseAgent):
         if table_instruction:
             user_prompt = user_prompt + "\n\n" + table_instruction
 
+        # 🔴 专家蒸馏 skill 提示（追加到末尾，增强指令强度）
+        # 无论用 _custom_prompt 还是默认 prompt，都在最后强注入专家反馈
+        try:
+            from app.services.master_orchestrator import _get_expert_skill_hints
+            skill_hints = _get_expert_skill_hints(self.chapter_number)
+            if skill_hints:
+                user_prompt = user_prompt + "\n\n" + skill_hints
+        except Exception:
+            pass
+
         if not self._llm or getattr(self, '_use_template', False):
             # Template-based content — use RAG context to enrich templates
             content = self._fallback_content(state)

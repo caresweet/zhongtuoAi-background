@@ -380,6 +380,42 @@ async def analyze_all_materials(
             summary_lines.append(f"「{question}」：{'、'.join(opt_parts)}")
         result["filled_data_updates"]["questionnaire_summary"] = "；".join(summary_lines)
 
+        # 🔴 从问卷统计推导支持率/反对率（真实数据，不编造）
+        # 找到"支持/反对/了解"类题目，计算支持率
+        support_q = None
+        for q in tallies.keys():
+            if any(kw in q for kw in ['支持', '态度']):
+                support_q = q
+                break
+        if support_q and isinstance(tallies[support_q], dict):
+            opts = tallies[support_q]
+            support_n = 0
+            oppose_n = 0
+            for opt, cnt in opts.items():
+                if '支持' in opt and '条件' not in opt:
+                    support_n += cnt
+                elif '反对' in opt or '不满意' in opt:
+                    oppose_n += cnt
+            total_votes = sum(opts.values())
+            if total_votes > 0:
+                rate = round(support_n / total_votes * 100, 1)
+                result["filled_data_updates"]["support_rate"] = f"{rate}"
+                result["filled_data_updates"]["support_count"] = str(support_n)
+                result["filled_data_updates"]["oppose_count"] = str(oppose_n)
+                logger.info(f"从问卷统计推导支持率: {support_n}/{total_votes} = {rate}%")
+
+        # 🔴 从"您是/身份"题推导涉及户数（调查覆盖的户数）
+        identity_q = None
+        for q in tallies.keys():
+            if any(kw in q for kw in ['您是', '身份', '居民']):
+                identity_q = q
+                break
+        if identity_q and isinstance(tallies[identity_q], dict):
+            identity_total = sum(tallies[identity_q].values())
+            if identity_total > 0:
+                result["filled_data_updates"]["household_count"] = str(identity_total)
+                logger.info(f"从问卷身份题推导涉及户数: {identity_total}")
+
     return result
 
 

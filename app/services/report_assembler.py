@@ -19,20 +19,23 @@ logger = logging.getLogger(__name__)
 
 CN_NUM = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
 
-# ── Font specification per DB32/T4013-2021 + 南通规范 ──
-# 来源：知识库 db32_t4013_2021.md + 南通规范
-# 正文: 仿宋_GB2312 四号(14pt) | 一级标题: 黑体 小三号(15pt)
-# 二级标题: 黑体 四号(14pt) | 三级标题: 楷体_GB2312 四号(14pt)
-# 表格: 宋体 五号(10.5pt) | 封面标题: 二号黑体(22pt)
-# 目录: 小四黑体(12pt) | 落款日期: 四号楷体(14pt)
+# ── Font specification per 淮安市稳评报告格式规范 ──
+# 来源：用户提供的淮安市社会稳定风险评估报告排版规范
+# 正文: 仿宋_GB2312 四号(14pt) 首行缩进2格
+# 1级标题: 宋体 小三(15pt) 加黑 居中
+# 2级标题: 宋体 四号(14pt) 加黑 靠左
+# 3级标题: 仿宋_GB2312 四号(14pt) 加黑 靠左
+# 表格内容: 仿宋_GB2312 小四(12pt) 第一行加黑 | 表名: 宋体 小四(12pt) 居中
+# 图名: 宋体 小四(12pt) 居中 | 封面标题: 黑体 小二(18pt) 居中
 # 页码: 小四Times New Roman(12pt) | 行间距: 28磅
-FONT_BODY = '仿宋_GB2312'      # 正文四号 14pt
-FONT_H1 = '黑体'                # 一级标题 小三号 15pt
-FONT_H2 = '黑体'                # 二级标题 四号 14pt
-FONT_H3 = '楷体_GB2312'         # 三级标题 四号 14pt
-FONT_TABLE = '宋体'             # 表格 五号 10.5pt
-FONT_CAPTION = '楷体_GB2312'    # 图注
-FONT_COVER_TITLE = '黑体'       # 封面标题 二号 22pt
+FONT_BODY = '仿宋_GB2312'      # 正文 四号 14pt
+FONT_H1 = '宋体'                # 1级标题 小三 15pt 加黑 居中
+FONT_H2 = '宋体'                # 2级标题 四号 14pt 加黑 靠左
+FONT_H3 = '仿宋_GB2312'         # 3级标题 四号 14pt 加黑 靠左
+FONT_TABLE = '仿宋_GB2312'      # 表格内容 小四 12pt，第一行加黑
+FONT_CAPTION = '宋体'           # 图名/表名 小四 12pt 居中
+FONT_COVER_TITLE = '黑体'       # 封面标题 小二 18pt 居中
+FONT_SONGTI = '宋体'            # 宋体（工作组/编制说明/目录等）
 FONT_PAGE_NUM = 'Times New Roman'  # 页码
 FONT_DIGIT = 'Times New Roman'     # 数字字体
 LINE_SPACING_PT = 28            # 行间距28磅
@@ -1054,10 +1057,11 @@ class ReportAssembler:
         for _ in range(6):
             doc.add_paragraph()
 
+        # 🔴 封面标题: 黑体 小二(18pt) 居中
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run('社会稳定风险评估报告')
-        r.font.name = FONT_H1; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_H1)
-        r.font.size = Pt(26); r.bold = True
+        r.font.name = FONT_COVER_TITLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_COVER_TITLE)
+        r.font.size = Pt(18); r.bold = True
 
         doc.add_paragraph()
 
@@ -1458,7 +1462,7 @@ class ReportAssembler:
                 cell.paragraphs[0].clear()
                 r = cell.paragraphs[0].add_run(str(cell_text))
                 r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                r.font.size = Pt(9)
+                r.font.size = Pt(12)
                 if ri == 0:
                     r.bold = True
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1468,14 +1472,15 @@ class ReportAssembler:
         cell.paragraphs[0].clear()
         r = cell.paragraphs[0].add_run(text)
         r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-        r.font.size = Pt(9)
+        r.font.size = Pt(12)
         r.bold = bold
 
     def _add_survey_table(self, doc, stats, caption):
+        # 🔴 表名: 宋体 小四(12pt) 居中
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(caption); r.bold = True
         r.font.name = FONT_CAPTION; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CAPTION)
-        r.font.size = Pt(10)
+        r.font.size = Pt(12)
         doc.add_paragraph()
 
         headers = ['调查项目', '人数', '占比']
@@ -1577,7 +1582,7 @@ class ReportAssembler:
                 r = cell.paragraphs[0].add_run(str(h).replace('\n', ' '))
                 r.font.name = FONT_TABLE
                 r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                r.font.size = Pt(9)
+                r.font.size = Pt(12)
                 r.bold = True
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
@@ -1590,7 +1595,7 @@ class ReportAssembler:
                     r = cell.paragraphs[0].add_run(str(val).replace('\n', ' '))
                     r.font.name = FONT_TABLE
                     r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                    r.font.size = Pt(9)
+                    r.font.size = Pt(12)
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
             doc.add_paragraph()
@@ -1658,6 +1663,31 @@ class ReportAssembler:
                 return clean[:50]  # Truncate to reasonable length
         return caption
 
+    # 🔴 图片尺寸规范（淮安市稳评格式，单位cm）按图注关键词匹配
+    IMAGE_SIZE_SPECS = [
+        (['决策实施周期'], (13.45, 10.12)),
+        (['风险评估流程'], (13.69, 12.45)),
+        (['评估公示内容'], (16.48, 11.65)),
+        (['决策位置', '位置示意图', '征地范围图'], (10.91, 15.5)),
+        (['决策网络舆情'], (4.6, 4.41)),
+        (['单位调查问卷', '公众调查问卷'], (10.39, 7.34)),
+        (['座谈会'], (5.43, 7.23)),
+        (['现场照片'], (5.44, 7.25)),
+        (['公示照片'], (5.39, 7.18)),
+        (['会议纪要'], (20.51, 14.95)),
+        (['调查问卷'], (21.84, 15.45)),
+        (['公告'], (21.35, 14.84)),
+    ]
+
+    def _match_image_size(self, caption: str):
+        """按图注关键词匹配图片尺寸（cm），无匹配返回 None。"""
+        if not caption:
+            return None
+        for keywords, size in self.IMAGE_SIZE_SPECS:
+            if any(kw in caption for kw in keywords):
+                return size
+        return None
+
     def _add_image(self, doc, image_ref, caption, max_width=Inches(5.5), max_height=Inches(7.0)):
         img_path = self._resolve_image_path(image_ref)
         # 🔴 Global dedup: skip if already inserted
@@ -1705,11 +1735,17 @@ class ReportAssembler:
                 use_path = tmp_path
 
             aspect = orig_w / orig_h if orig_h > 0 else 1.0
-            target_w = min(max_width, Inches(5.0))
-            target_h = target_w / aspect
-            if target_h > max_height:
-                target_h = max_height
-                target_w = target_h * aspect
+            # 🔴 图片尺寸规范（淮安市稳评格式，单位cm）：按图注匹配
+            spec_size = self._match_image_size(clean_caption)
+            if spec_size:
+                target_w = Cm(spec_size[0])
+                target_h = Cm(spec_size[1])
+            else:
+                target_w = min(max_width, Inches(5.0))
+                target_h = target_w / aspect
+                if target_h > max_height:
+                    target_h = max_height
+                    target_w = target_h * aspect
 
             run_img = p_img.add_run()
             run_img.add_picture(use_path, width=target_w, height=target_h)
@@ -1721,7 +1757,7 @@ class ReportAssembler:
             logger.warning(f"Failed to add image {image_ref}: {e}")
             return
 
-        # 🔴 Caption paragraph: centered, immediately follows image (protected by _caption_ids)
+        # 🔴 图名: 宋体 小四(12pt) 居中，位于图片下方居中
         p_cap = doc.add_paragraph()
         p_cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p_cap.paragraph_format.space_before = Pt(2)
@@ -1729,8 +1765,8 @@ class ReportAssembler:
         run_cap = p_cap.add_run(clean_caption)
         run_cap.font.name = FONT_CAPTION
         run_cap._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CAPTION)
-        run_cap.font.size = Pt(9)
-        run_cap.italic = True
+        run_cap.font.size = Pt(12)  # 小四
+        run_cap.italic = False      # 不斜体
 
     # ═══════════════════════════════════════════════════════════════
     # Company Front Matter (开篇)
@@ -1771,21 +1807,26 @@ class ReportAssembler:
 
         doc.add_page_break()
 
-        # ── 稳评工作组人员及分工 ──
-        self._add_heading(doc, '稳评工作组人员及分工情况', 2)
-        self._add_para(doc, '稳评负责人', bold=True, indent=False)
-        self._add_para(doc, '陈  春（总经理、高级工程师、估价师、经济师）', indent=True)
-        self._add_para(doc, '调研工作', bold=True, indent=False)
-        self._add_para(doc, '安如月（评估专业人员）', indent=True)
-        self._add_para(doc, '张抗洪（评估专业人员）', indent=True)
-        self._add_para(doc, '朱  璇（评估助理）', indent=True)
-        self._add_para(doc, '风险研判与评估报告编制工作', bold=True, indent=False)
-        self._add_para(doc, '程士汝（技术负责人）', indent=True)
-        self._add_para(doc, '刘利伟（评估专业人员）', indent=True)
-        self._add_para(doc, '数据汇总与资料档案', bold=True, indent=False)
-        self._add_para(doc, '张抗洪（评估助理）', indent=True)
-        self._add_para(doc, '罗  娜（评估助理）', indent=True)
-        self._add_para(doc, '朱  璇（评估助理）', indent=True)
+        # ── 稳评工作组人员及分工（宋体小三加黑居中）──
+        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run('稳评工作组人员及分工情况')
+        r.font.name = FONT_SONGTI; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_SONGTI)
+        r.font.size = Pt(15); r.bold = True
+        doc.add_paragraph()
+        # 岗位标题: 宋体四号加黑靠左；内容: 宋体四号靠左
+        self._add_para(doc, '稳评负责人', bold=True, indent=False, font=FONT_SONGTI)
+        self._add_para(doc, '陈  春（总经理、高级工程师、估价师、经济师）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '调研工作', bold=True, indent=False, font=FONT_SONGTI)
+        self._add_para(doc, '安如月（评估专业人员）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '张抗洪（评估专业人员）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '朱  璇（评估助理）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '风险研判与评估报告编制工作', bold=True, indent=False, font=FONT_SONGTI)
+        self._add_para(doc, '程士汝（技术负责人）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '刘利伟（评估专业人员）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '数据汇总与资料档案', bold=True, indent=False, font=FONT_SONGTI)
+        self._add_para(doc, '张抗洪（评估助理）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '罗  娜（评估助理）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '朱  璇（评估助理）', indent=True, font=FONT_SONGTI)
 
         doc.add_page_break()
 
@@ -2189,12 +2230,22 @@ class ReportAssembler:
 
     def _add_heading(self, doc, text, level):
         h = doc.add_heading(text, level=level)
+        # 🔴 淮安市稳评格式规范：
+        # 1级标题: 宋体 小三(15pt) 加黑 居中
+        # 2级标题: 宋体 四号(14pt) 加黑 靠左
+        # 3级标题: 仿宋 四号(14pt) 加黑 靠左
+        if level == 1:
+            font, size, align = FONT_H1, Pt(15), WD_ALIGN_PARAGRAPH.CENTER
+        elif level == 2:
+            font, size, align = FONT_H2, Pt(14), WD_ALIGN_PARAGRAPH.LEFT
+        else:
+            font, size, align = FONT_H3, Pt(14), WD_ALIGN_PARAGRAPH.LEFT
+        h.alignment = align
         for run in h.runs:
-            font = FONT_H1 if level <= 2 else FONT_H3
-            size = Pt(15) if level == 1 else Pt(14) if level == 2 else Pt(14)
             run.font.name = font; run._element.rPr.rFonts.set(qn('w:eastAsia'), font)
             run.font.size = size
-            run.font.color.rgb = RGBColor(0, 0, 0)  # 🔴 强制黑色，覆盖Word默认蓝色
+            run.font.bold = True  # 🔴 标题加黑
+            run.font.color.rgb = RGBColor(0, 0, 0)  # 强制黑色，覆盖Word默认蓝色
 
     def _add_para(self, doc, text, bold=False, indent=False, font=FONT_BODY, size=Pt(14)):
         p = doc.add_paragraph()

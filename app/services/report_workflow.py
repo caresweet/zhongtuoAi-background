@@ -199,6 +199,11 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
             filled[key] = "【待补充】"
             logs.append(f"📝 {key} 未提供，标记为【待补充】")
 
+    # 🔴 稳评实施单位默认值（公司固定，无需用户提供）
+    if not filled.get("implement_unit"):
+        filled["implement_unit"] = "江苏众拓项目代理咨询有限公司"
+        filled["_locked_implement_unit"] = True
+
     state["filled_data"] = filled
     await _emit("validating", {"analysis":"done","outline":"pending","generation":"pending","assembly":"pending"})
     return state
@@ -523,6 +528,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     state["outline_list"] = outline_list
     state["_next_action"] = "review"
     logs.append(f"  ✍️ 第{ch_num}章「{ch['title']}」已生成 ({len(md)}字)")
+    logger.info(f"[GEN] 第{ch_num}章「{ch['title']}」生成 {len(md)} 字 (idx={idx}, agent={'None' if not agent else agent.__class__.__name__})")
     await _emit("generating", {"analysis":"done","outline":"done","generation":"running","quality":"pending","assembly":"pending"})
     return state
 
@@ -585,6 +591,7 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
         ch["review_msg"] = "; ".join(issues)
         ch["review_score"] = max(0, 85 - len(issues)*15)
         logs.append(f"  ⚠️ 第{ch_num}章: {ch['review_msg']}")
+        logger.info(f"[REVIEW] 第{ch_num}章审查问题: {ch['review_msg']}")
         if retry + 1 < MAX_RETRY:
             # 还有重试机会 → 重试当前章
             ch["status"] = "retry"

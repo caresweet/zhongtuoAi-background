@@ -203,16 +203,15 @@ def build_chapter_prompt(
     }
     data_lines = []
     pdf_table_data = ""
+    # 🔴 直接从 filled_data 里找 _pdf_table_data（不管是否在 data_needed 里）
+    if filled_data.get("_pdf_table_data"):
+        pdf_table_data = str(filled_data["_pdf_table_data"])
     for key in data_needed:
         val = filled_data.get(key, "")
         if not val:
             continue
-        if key == "_pdf_table_data":
-            # 🔴 PDF 提取的表格数据单独展示，不走 key: value 格式
-            pdf_table_data = str(val)
-        else:
-            label = _KEY_LABELS.get(key, key)
-            data_lines.append(f"  {label}: {val}")
+        label = _KEY_LABELS.get(key, key)
+        data_lines.append(f"  {label}: {val}")
 
     prompt = f"""你是社会稳定风险评估报告的资深编写专家。
 撰写报告第{num}章「{title}」。

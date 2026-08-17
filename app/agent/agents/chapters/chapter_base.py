@@ -167,6 +167,15 @@ class ChapterAgentBase(BaseAgent):
         else:
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
+        # 🔴 标准小标题约束（无论哪套 prompt 都注入，保证章节内小标题结构稳定）
+        try:
+            from app.agent.template_headings import format_headings_for_prompt
+            heading_hint = format_headings_for_prompt(self.chapter_number)
+            if heading_hint and heading_hint not in user_prompt:
+                user_prompt = user_prompt + "\n\n" + heading_hint
+        except Exception:
+            pass
+
         # 🔴 真实地名/文号/时间硬约束（无论用哪套 prompt 都注入，防止 LLM 编造）
         try:
             filled = state.get("filled_data", {})
@@ -1060,6 +1069,8 @@ class ChapterAgentBase(BaseAgent):
             f"- 实施单位：江苏众拓项目代理咨询有限公司\n"
             f"- 表格用 markdown 语法写，有数据支撑才写，缺数据写【待补充】\n"
             f"{skeleton_rule}\n"
+            # 🔴 标准小标题约束（修复死代码：heading_constraint 之前没拼进返回）
+            f"{heading_constraint}\n"
         )
 
     def _default_user_prompt(

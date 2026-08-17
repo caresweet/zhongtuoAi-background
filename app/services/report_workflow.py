@@ -162,12 +162,15 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
         if m: filled["project_name"] = m.group(0); logs.append(f"📝 project_name 正则提取: {filled['project_name']}")
 
     # 🔴 必要字段缺失 → interrupt 暂停询问用户（HITL）
-    # 只对报告核心信息暂停：项目名称/责任单位/位置/面积。次要字段自动标【待补充】
+    # 🔴 核心字段缺失 → 弹窗询问用户（面积/位置/文号/支持率/户数等核心数据）
     required_fields = [
         ("project_name", "项目名称"),
         ("org_name", "责任单位"),
         ("location", "项目位置"),
         ("area_mu", "征收面积（亩）"),
+        ("doc_reference", "公告文号"),
+        ("support_rate", "群众支持率"),
+        ("household_count", "涉及户数"),
     ]
     missing_required = []
     for key, label in required_fields:
@@ -177,7 +180,7 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
 
     if missing_required:
         from langgraph.types import interrupt
-        logs.append(f"⏸️ 缺少 {len(missing_required)} 项必要信息，暂停等待补充")
+        logs.append(f"⏸️ 缺少 {len(missing_required)} 项核心信息，暂停等待补充")
         user_input = interrupt({
             "type": "missing_data",
             "missing_fields": missing_required,
@@ -194,7 +197,8 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
 
     # 仍缺失的字段（用户未补的）自动标【待补充】，不再中断
     for key in ("project_name","org_name","location","area_mu","land_use",
-                "household_count","total_samples","compensation_standard"):
+                "household_count","total_samples","compensation_standard",
+                "doc_reference","support_rate"):
         if not filled.get(key):
             filled[key] = "【待补充】"
             logs.append(f"📝 {key} 未提供，标记为【待补充】")
@@ -250,6 +254,23 @@ async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
                 "message": f"提取到的补偿标准异常（{comp}），请确认或提供真实补偿标准",
             })
 
+    # 🔴 项目名称与文号矛盾检查（如名称含"10号"但文号是7号）
+    doc_ref = str(filled.get("doc_reference", "") or "")
+    project_name = str(filled.get("project_name", "") or "")
+    if doc_ref and project_name and "号" in project_name:
+        import re as _re_num
+        doc_num = _re_num.search(r'(\d+)\s*号', doc_ref)
+        proj_num = _re_num.search(r'(\d+)\s*号', project_name)
+        if doc_num and proj_num:
+            dn, pn = doc_num.group(1), proj_num.group(1)
+            if dn != pn and not any(d in project_name for d in ['待补充', '示意图']):
+                issues.append({
+                    "field": "doc_reference",
+                    "label": "公告文号",
+                    "current": doc_ref,
+                    "message": f"项目名称({project_name})中的文号与公告文号({doc_ref})不一致（{pn}号 vs {dn}号），请确认哪个是正确文号",
+                })
+
     if issues:
         from langgraph.types import interrupt
         logs.append(f"⚠️ 发现 {len(issues)} 项数据不合理，暂停询问用户")
@@ -302,6 +323,8 @@ async def node_build_dynamic_outline(state: ReportWorkflowState) -> ReportWorkfl
             "title": ch_def.get("title",""),
             "depend_on_data": ch_def.get("data_needed",[]),
             "need_spec_tags": ch_def.get("key_points",[]),
+            "depends_on": ch_def.get("depends_on", []),          # 🔴 论证依赖
+            "argument_note": ch_def.get("argument_note", ""),    # 🔴 论证任务
             "raw_content": None, "review_score": None, "review_msg": None,
             "retry_count": 0, "status": "pending",
         })
@@ -494,7 +517,8 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             ch_data["_pdf_table_data"] = "\n\n".join(md_parts)
 
     ch_def = {"num": ch_num, "title": ch["title"], "key_points": ch.get("need_spec_tags",[]),
-               "data_needed": deps}
+               "data_needed": deps, "depends_on": ch.get("depends_on", []),
+               "argument_note": ch.get("argument_note", "")}
 
     # 🔴 重试时构建反馈（包含可用数据 + 上一版内容）
     feedback = ""
@@ -509,9 +533,12 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             fb_parts.append(f"\n## 📝 上一版生成内容（参考结构，修正数据问题后重写）\n{prev_md[:2000]}")
         feedback = "\n".join(fb_parts)
 
+    # 🔴 论证主线上下文（整份大纲 + 每章论证任务）
+    outline_context = state.get("_outline", {})
     prompt = build_chapter_prompt(ch_def, ch_data, img_guide, state.get("chapters",{}),
                                   rag_context=rag_ctx,
-                                  feedback=feedback if feedback else None)
+                                  feedback=feedback if feedback else None,
+                                  outline_context=outline_context)
     agent = get_chapter_agent(ch_num, llm_service=llm)
     agent_state = {"session_id":state.get("session_id",""),"report_title":filled.get("project_name",""),
                    "filled_data":ch_data,"_domain":"stability","_report_style":"jinhu",

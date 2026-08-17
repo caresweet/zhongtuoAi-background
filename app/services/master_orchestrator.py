@@ -66,7 +66,7 @@ async def generate_outline(
 {chr(10).join(materials_summary) if materials_summary else '- 基本信息'}
 
 ## 任务
-根据上述材料的实际内容，灵活决定报告章节结构。不同的项目、不同的材料组合应该产生不同的结构。
+根据上述材料的实际内容，决定报告章节结构，并**设计清晰的论证主线**——章节之间要形成逻辑递进，像人写报告一样层层推进。
 
 ## 必须包含（根据材料按需组织）
 - 项目基本概况（位置、面积、用途等）
@@ -78,16 +78,27 @@ async def generate_outline(
 - 评审表（独立文件）
 - 附件（图片、问卷等分类整理）
 
+## 🔴 论证主线要求（最重要）
+章节之间必须形成逻辑链条，每章承担一个论证任务，前后承接：
+```
+概况(是什么) → 评估过程(怎么评估) → 调查(了解什么) → 分析(判断什么)
+→ 风险识别(发现什么) → 措施前研判(风险多大) → 措施(怎么化解)
+→ 措施后评估(是否有效) → 结论(定论) → 应急预案(兜底)
+```
+- 每章要**承接前序章节的结论**（如风险识别章要引用调查章的数据）
+- 每章要为**后序章节铺垫**（如调查章收集的数据要支撑后续风险分析）
+
 ## 输出JSON格式
 ```json
 {{
   "chapters": [
-    {{"num": 1, "title": "根据内容自拟标题", "key_points": ["本重要点1", "本重要点2"], "data_needed": ["需要的字段key"]}},
+    {{"num": 1, "title": "根据内容自拟标题", "key_points": ["本重要点1", "本重要点2"], "data_needed": ["需要的字段key"], "depends_on": [依赖的章节号], "argument_note": "本章在论证链中的任务：承接什么、为后序铺垫什么"}},
     ...
   ],
   "has_review_table": true,
   "has_appendix": true,
   "has_legal_basis": true,
+  "argument_flow": "整份报告的论证主线一句话说明（从概况到结论的逻辑路径）",
   "note": "说明为什么这样设计（基于什么材料特征）"
 }}
 ```
@@ -96,7 +107,9 @@ async def generate_outline(
 - 章节数根据材料丰富度决定，通常5-8章
 - 材料多 → 可以细分章节；材料少 → 合并相关主题
 - 标题要具体，不能所有项目都一样（如用"XX地块征收概况"而非"拟征收决策基本概况"）
-- data_needed写真实的字段key（project_name, org_name, location, area_mu, land_use, compensation_standard, household_count, total_samples等）"""
+- data_needed写真实的字段key（project_name, org_name, location, area_mu, land_use, compensation_standard, household_count, total_samples等）
+- depends_on写本章依赖的前序章节号（如第6章措施前评分依赖第3章调查、第5章风险识别）
+- argument_note写本章的论证任务（承接什么结论、为后序铺垫什么）"""
 
     try:
         response = await asyncio.wait_for(
@@ -178,12 +191,15 @@ def build_chapter_prompt(
     feedback: str = None,
     rag_context: dict = None,
     materials_summary: str = "",
+    outline_context: dict = None,
 ) -> str:
     """主Agent为单个章节编写专属提示词。"""
     num = chapter_def.get("num", 0)
     title = chapter_def.get("title", f"第{num}章")
     key_points = chapter_def.get("key_points", [])
     data_needed = chapter_def.get("data_needed", [])
+    depends_on = chapter_def.get("depends_on", []) or []
+    argument_note = chapter_def.get("argument_note", "") or ""
 
     # 🔴 字段中文标注：让 LLM 明确知道每个字段对应报告里的哪个小节
     _KEY_LABELS = {
@@ -213,8 +229,28 @@ def build_chapter_prompt(
         label = _KEY_LABELS.get(key, key)
         data_lines.append(f"  {label}: {val}")
 
+    # 🔴 论证主线：本章在报告中的逻辑位置
+    arg_flow = ""
+    if argument_note:
+        arg_flow += f"\n**本章论证任务**：{argument_note}\n"
+    if depends_on:
+        dep_titles = []
+        if outline_context:
+            for ch in (outline_context.get("chapters", []) if isinstance(outline_context, dict) else []):
+                if isinstance(ch, dict) and ch.get("num") in depends_on:
+                    dep_titles.append(f"第{ch['num']}章{ch.get('title','')}")
+        if dep_titles:
+            arg_flow += f"**必须承接前序章节**：{'、'.join(dep_titles)} 的结论和数据。引用前序章节识别的风险因素、评分、调查数据时，数字必须与前序一致，不得矛盾。\n"
+    if outline_context:
+        overall = outline_context.get("argument_flow", "")
+        if overall:
+            arg_flow += f"\n**整份报告论证主线**：{overall}\n"
+
     prompt = f"""你是社会稳定风险评估报告的资深编写专家。
 撰写报告第{num}章「{title}」。
+
+## 🧭 本章在报告中的逻辑位置（必须遵循，保证整篇逻辑连贯）
+{arg_flow if arg_flow else '（本章是报告开篇，负责总览项目基本情况）'}
 
 ## 📋 用户提供的全部资料（必须在报告中充分使用）
 {materials_summary if materials_summary else '（用户未上传资料）'}
@@ -231,7 +267,7 @@ def build_chapter_prompt(
 ## 图片
 {image_guide if image_guide else '（本章无图片）'}
 
-## 前序章节摘要
+## 前序章节关键信息（必须与前序结论保持一致）
 {_summarize_previous(previous_chapters) if previous_chapters else '（第一章，无前序内容）'}
 """
 
@@ -384,16 +420,47 @@ async def refresh_learning_hints(domain: str = "stability"):
 
 
 def _summarize_previous(chapters: dict) -> str:
-    """Summarize previous chapters for context."""
+    """Summarize previous chapters for context — 结构化提炼关键结论。
+
+    不只取前200字符，而是用正则提取每章的关键数据点（面积/位置/风险等级/评分/
+    风险因素等），让后序章节能承接前序结论，保证逻辑连贯。
+    """
     if not chapters:
         return ""
     lines = []
     for num in sorted(chapters.keys()):
-        md = chapters[num].get("markdown", "") if isinstance(chapters[num], dict) else str(chapters[num])
-        # Extract first 200 chars as summary
-        summary = md[:200].replace("\n", " ").replace("#", "")
-        lines.append(f"第{num}章: {summary}...")
+        ch = chapters[num]
+        md = ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
+        title = ch.get("title", "") if isinstance(ch, dict) else ""
+        key_facts = _extract_key_facts(md)
+        if key_facts:
+            lines.append(f"第{num}章「{title}」关键结论：{key_facts}")
+        else:
+            # 退化为前150字
+            summary = md[:150].replace("\n", " ").replace("#", "")
+            lines.append(f"第{num}章「{title}」: {summary}...")
     return "\n".join(lines)
+
+
+def _extract_key_facts(md: str) -> str:
+    """从章节 markdown 提取关键数据点（面积/位置/风险等级/评分/风险因素）。"""
+    facts = []
+    patterns = [
+        (r'(?:总面积|面积|规模)[为：:约]*\s*(\d+\.?\d*\s*(?:亩|㎡|平方米))', "面积"),
+        (r'(?:位于|坐落|位置)[为：:约]*\s*([^\s，。]{2,20}(?:街道|镇|社区|村))', "位置"),
+        (r'(?:风险等级|综合风险|判定为|属于)[为：:约]*\s*(低风险|中风险|高风险)', "风险等级"),
+        (r'(?:措施前|措施后)?(?:综合)?(?:得分|评分)[为：:约]*\s*(\d+(?:\.\d+)?)\s*分', "评分"),
+        (r'(?:支持率|知晓度)[为：:约]*\s*(\d+\.?\d*)\s*%', "调查率"),
+        (r'(?:问卷|调查)[为：:约]*\s*(\d+)\s*份', "问卷数"),
+        (r'(?:涉及|共涉及)\s*(\d+)\s*户', "户数"),
+        (r'(?:识别出|主要风险)[为：:约]*\s*([^\n。]{5,40}?)(?:等)?风险', "风险因素"),
+    ]
+    for pattern, label in patterns:
+        import re as _re
+        m = _re.search(pattern, md)
+        if m and not any(label in f for f in facts):
+            facts.append(f"{label}:{m.group(1).strip()[:30]}")
+    return "；".join(facts[:8]) if facts else ""
 
 
 _CHAPTER_ANTIPATTERNS = {

@@ -167,7 +167,7 @@ class ChapterAgentBase(BaseAgent):
         else:
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
-        # 🔴 真实地名/文号硬约束（无论用哪套 prompt 都注入，防止 LLM 编造地名）
+        # 🔴 真实地名/文号/时间硬约束（无论用哪套 prompt 都注入，防止 LLM 编造）
         try:
             filled = state.get("filled_data", {})
             loc = filled.get("location") or filled.get("land_location") or ""
@@ -177,6 +177,8 @@ class ChapterAgentBase(BaseAgent):
                 constraint_parts.append(f"- 项目位置唯一真实值：{loc}。报告中所有位置/坐落/社区/街道必须用这个，禁止编造任何其他地名")
             if doc_ref and not str(doc_ref).startswith("【"):
                 constraint_parts.append(f"- 项目文号唯一真实值：{doc_ref}。报告中所有征地文号必须用这个，禁止使用其他文号")
+            # 🔴 时间硬约束：报告年度为2026年，评估时间应在公告发布之后（2026年），禁止出现2024年等错误年份
+            constraint_parts.append("- 报告年度为2026年。本项目的公告/预公告发布时间为2026年，评估工作时间应为2026年。禁止出现2024年、2025年等错误年份作为评估启动时间")
             if constraint_parts:
                 constraint_text = "\n🔒 项目真实数据约束（必须严格遵守，不得编造或替换）：\n" + "\n".join(constraint_parts) + "\n"
                 # 追加到 user_prompt 末尾（最近原则，LLM 更重视）

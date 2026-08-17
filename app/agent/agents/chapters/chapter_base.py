@@ -201,6 +201,12 @@ class ChapterAgentBase(BaseAgent):
         from app.agent.report_styles import get_few_shot
         style_name = state.get("_report_style") or state.get("report_style") or "jinhu"
         few_shot = get_few_shot(self.chapter_number, style_name)
+        # 🔴 few-shot 前置专家 skill 提示（避免范文覆盖 skill 要求）
+        try:
+            from app.services.few_shot_service import get_few_shot_with_skills
+            few_shot = get_few_shot_with_skills(self.chapter_number)
+        except Exception:
+            pass
         if few_shot:
             system_prompt = system_prompt + few_shot
 

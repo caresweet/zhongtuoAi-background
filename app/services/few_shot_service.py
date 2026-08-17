@@ -274,5 +274,39 @@ def get_cached_few_shot(chapter_num: int) -> str:
     return "\n".join(parts)
 
 
+def get_few_shot_with_skills(chapter_num: int, domain: str = "stability") -> str:
+    """获取 few-shot 范文，并前置专家 skill 提示。
+
+    确保范文注入不会覆盖 skill 要求：先提醒遵守 skill，再看范文。
+    """
+    few_shot = get_cached_few_shot(chapter_num)
+    try:
+        from app.services.skill_service import get_skill_hints
+        # get_skill_hints 是 async，这里用同步方式读 DB
+        import sqlite3
+        from app.config import settings
+        db_path = settings.DATA_DIR / "knowledge_base.db"
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT rule_desc, correction FROM review_skills WHERE is_active=1 AND skill_type='text' "
+                "AND (chapter_num=0 OR chapter_num=?) ORDER BY id LIMIT 8",
+                (chapter_num,),
+            ).fetchall()
+            conn.close()
+            if rows:
+                hint_lines = ["\n## ⚠️ 专家反馈要求（范文参考前，先遵守这些）"]
+                for r in rows:
+                    hint_lines.append(f"- {r['rule_desc']}：{r['correction']}")
+                skill_hint = "\n".join(hint_lines) + "\n"
+                if few_shot:
+                    return skill_hint + "\n" + few_shot
+                return skill_hint
+    except Exception:
+        pass
+    return few_shot
+
+
 # Singleton
 few_shot_service = FewShotService()

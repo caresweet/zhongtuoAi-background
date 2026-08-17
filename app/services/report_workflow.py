@@ -783,6 +783,19 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
                 try:
                     from app.services import skill_service
                     await skill_service.auto_extract_high_freq_issues(domain=state.get("_domain", "stability"))
+                    # 🔴 效果验证：检查 skill 规则是否仍被违反（skill 是否生效）
+                    try:
+                        verify = await skill_service.verify_skill_effect(
+                            domain=state.get("_domain", "stability"), full_text=full_text[:50000]
+                        )
+                        if verify.get("ineffective"):
+                            state["_skill_effect"] = verify
+                            logs.append(
+                                f"🔍 skill效果验证：{verify.get('effective')}条生效，"
+                                f"{verify.get('ineffective')}条仍被违反"
+                            )
+                    except Exception as _e3:
+                        logger.warning(f"Skill effect verify skipped: {_e3}")
                 except Exception as _e2:
                     logger.warning(f"Auto skill extraction skipped: {_e2}")
             except Exception as e:

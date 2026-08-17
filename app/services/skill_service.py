@@ -362,3 +362,43 @@ async def get_skill_hints(domain: str = "stability") -> str:
         ch = f"第{t['chapter']}章 " if t.get("chapter") else ""
         lines.append(f"- {ch}{t.get('desc', '')}：{t.get('correction', '')}")
     return "\n".join(lines) + "\n"
+
+
+async def verify_skill_effect(domain: str = "stability", full_text: str = "") -> Dict[str, Any]:
+    """效果验证：检查生成的报告全文是否还违反活跃的 skill 规则。
+
+    规则型 skill 用正则检查报告文本，统计每条 skill 的命中情况。
+    命中=仍然违规（skill 没生效），未命中=已规避（skill 生效）。
+
+    Args:
+        domain: skill 领域
+        full_text: 生成的报告全文（章节拼接）
+    """
+    if not full_text:
+        return {"checked": 0, "violations": [], "effective": 0, "ineffective": 0}
+
+    skills = await get_active_skills(domain)
+    violations = []
+    effective = 0
+    ineffective = 0
+
+    for rule in skills.get("rules", []):
+        pattern = rule.get("pattern", "")
+        desc = rule.get("desc", "")
+        if not pattern:
+            continue
+        try:
+            if re.search(pattern, full_text):
+                violations.append({"pattern": pattern, "desc": desc, "still_violated": True})
+                ineffective += 1
+            else:
+                effective += 1
+        except re.error:
+            continue
+
+    return {
+        "checked": len(skills.get("rules", [])),
+        "violations": violations,
+        "effective": effective,
+        "ineffective": ineffective,
+    }

@@ -850,7 +850,8 @@ class ReportWorkflowRunner:
                 base["logs"] = list(existing_state["_workflow_logs"])
 
         thread_id = f"{session_id}_{int(time.time())}"
-        config = {"configurable": {"thread_id": thread_id}}
+        # 🔴 提高递归上限：图级章节循环（10章+重试）会超过默认25次
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 120}
         final_state = None
         interrupt_payload = None
         async for event in self.compiled.astream(base, config):
@@ -877,7 +878,8 @@ class ReportWorkflowRunner:
         else:
             thread_id = session_id
             user_data = {}
-        config = {"configurable": {"thread_id": thread_id}}
+        # 🔴 提高递归上限：图级章节循环（10章+重试）会超过默认25次
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 120}
         final_state = None
         interrupt_payload = None
         async for event in self.compiled.astream(Command(resume=user_data), config):

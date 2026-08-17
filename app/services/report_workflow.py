@@ -334,6 +334,31 @@ async def node_outline_check(state: ReportWorkflowState) -> ReportWorkflowState:
         ]
         state["outline_list"] = outline_list
 
+    # 🔴 章节编号连续性检查：动态大纲可能编号不连续（缺第1章、第6章），补全缺失章节
+    STANDARD_TITLES = {
+        1: "拟征收决策基本概况", 2: "评估过程、方法和依据", 3: "社会稳定风险因素调查",
+        4: "决策综合分析", 5: "风险因素识别与初始等级表", 6: "措施前风险等级研判",
+        7: "风险防范与化解措施", 8: "措施后风险等级评估", 9: "评估结论与建议", 10: "应急预案",
+    }
+    existing_nums = set()
+    for ch in outline_list:
+        try:
+            existing_nums.add(int(ch.get("chapter_no", 0)))
+        except (ValueError, TypeError):
+            pass
+    for num in range(1, 11):
+        if num not in existing_nums:
+            outline_list.append({
+                "chapter_no": str(num), "title": STANDARD_TITLES.get(num, f"第{num}章"),
+                "depend_on_data": [], "need_spec_tags": [],
+                "raw_content": None, "review_score": None, "review_msg": None,
+                "retry_count": 0, "status": "pending",
+            })
+            logs.append(f"⚠️ 动态大纲缺少第{num}章，已补全为标准章节")
+    # 按章节号排序，保证顺序正确
+    outline_list.sort(key=lambda ch: int(ch.get("chapter_no", 99)))
+    state["outline_list"] = outline_list
+
     for ch in outline_list:
         deps = ch.get("depend_on_data",[]) or []
         missing = [d for d in deps if not filled.get(d) or str(filled.get(d,"")).startswith("【待补充】")]

@@ -145,6 +145,16 @@ class ReportAssembler:
                 fp = str(f)
                 if fp not in uploaded_paths:
                     uploaded_paths.append(fp)
+        # 🔴 补扫 storage 根目录的用户独立图片（位置图/百度图/现场图等），
+        # 它们可能不在 _uploaded_files（旧文件）或 images/（非PDF提取）
+        if self.storage_dir and self.storage_dir.exists():
+            for f in self.storage_dir.iterdir():
+                if not f.is_file(): continue
+                if f.suffix.lower() not in ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'): continue
+                if f.name.startswith('pdf_'): continue  # PDF提取图已在 images/
+                fp = str(f)
+                if fp not in uploaded_paths:
+                    uploaded_paths.append(fp)
         img_catalog = build_image_catalog(uploaded_paths,
                                           ai_classifications=state.get("_classified_images"))
         self._chapter_image_map = img_catalog.get("by_chapter", {})
@@ -1186,6 +1196,11 @@ class ReportAssembler:
                 if img_ref:
                     self._add_image(doc, img_ref, caption)
                     continue  # 🔴 Skip image-map fallback — path was explicit
+                # 🔴 按图注关键词匹配图片（避免位置错乱）
+                matched_path = self._match_image_by_caption(caption)
+                if matched_path:
+                    self._add_image(doc, matched_path, caption)
+                    continue
                 # Fall back to catalog chapter image map only
                 ch_img_map = getattr(self, '_chapter_image_map', {})
                 ch_imgs = ch_img_map.get(ch_num, [])
@@ -1284,14 +1299,8 @@ class ReportAssembler:
         if extracted_tables:
             self._render_extracted_tables(doc, ch_num, extracted_tables)
 
-        # 🔴 Body text: only placeholders, no inline images
-        specs = {1: "位置示意图", 2: "现场照片", 3: "公示照片/调查照片", 5: "专家评审照片",
-                 6: "座谈会照片", 8: "专家评审意见", 9: "评审意见表"}
-        label = specs.get(ch_num, "")
-        # Check if the chapter markdown already has <<IMAGE:>> or [IMAGE] placeholders
-        if '<<IMAGE:' not in markdown and '![' not in markdown:
-            if label:
-                self._add_para(doc, f"【待插入：图{ch_num}-1 {label}】", indent=False)
+        # 🔴 不再生成"【待插入：图X-X】"占位文本（会造成重复占位无图）。
+        # 图片由 LLM 正文标记或章节末尾插入决定；该章无图则不显示任何占位。
 
     # ═══════════════════════════════════════════════════════════════
     # Chapter titles (template-aligned)
@@ -1662,6 +1671,42 @@ class ReportAssembler:
             if len(clean) > 3:
                 return clean[:50]  # Truncate to reasonable length
         return caption
+
+    # 🔴 按图注关键词匹配图片路径（从已分类的图片目录里找）
+    def _match_image_by_caption(self, caption: str):
+        """根据图注关键词从图片目录匹配最合适的图片路径。
+
+        图注如"图1-1 拟征收土地位置示意图"→ 匹配 map 类图片
+        图注如"图3-1 公示照片"→ 匹配 announcement 类图片
+        返回图片路径，无匹配返回 None。
+        """
+        if not caption:
+            return None
+        # 图注关键词 → 图片类别
+        cat_keywords = {
+            'map': ['位置', '示意', '红线', '勘测', '地形', '规划图'],
+            'announcement': ['公示', '公告', '张贴', '预公告'],
+            'survey': ['问卷', '调查', '签到'],
+            'review': ['评审', '意见', '专家'],
+            'photo': ['现场', '照片', '走访', '勘察'],
+            'meeting': ['座谈', '会议', '开会'],
+        }
+        target_cat = None
+        for cat, kws in cat_keywords.items():
+            if any(kw in caption for kw in kws):
+                target_cat = cat
+                break
+        if not target_cat:
+            return None
+
+        # 从图片目录里找该类别的第一张未用图片
+        catalog_data = getattr(self, '_img_catalog_data', {})
+        for img in catalog_data.get("catalog", []):
+            if img.get("category") == target_cat:
+                p = img.get("path", "")
+                if p and str(p) not in self._inserted_images:
+                    return p
+        return None
 
     # 🔴 图片尺寸规范（淮安市稳评格式，单位cm）按图注关键词匹配
     IMAGE_SIZE_SPECS = [

@@ -207,7 +207,7 @@ def _classify_filename(name: str, folder_hint: str = "") -> str:
 
     # ── Specific keywords (check most specific first) ──
     # Maps / diagrams — very specific patterns
-    if any(k in nl for k in ['红线图', '位置图', '规划图', '地形图', '宗地图', '勘测定界', '示意']):
+    if any(k in nl for k in ['红线图', '位置图', '规划图', '地形图', '宗地图', '勘测定界', '示意', '百度', '高德', '卫星图', '谷歌']):
         return "map"
     # Survey/questionnaire — specific document types
     if any(k in nl for k in ['问卷', '调查表', '统计表', '签到表', '测评表', '签到']):

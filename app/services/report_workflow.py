@@ -41,6 +41,52 @@ async def _emit(phase: str, steps: dict):
         try: await _progress_callback(phase, steps)
         except: pass
 
+
+# ── 流程耗时统计 ──────────────────────────────────────────────────────────────
+import time as _time_mod
+
+def _mark(state: dict, name: str):
+    """记录流程节点耗时（支持多次运行累加，如每章生成）。
+
+    首次调用：记录开始时间。再次调用（同name）：累加耗时。
+    """
+    timings = state.setdefault("_timings", {})
+    now = _time_mod.time()
+    t = timings.get(name)
+    if t and isinstance(t, dict) and "start" in t:
+        elapsed = now - t["start"]
+        t["secs"] = round((t.get("secs") or 0) + elapsed, 1)
+        del t["start"]
+        logger.info(f"[TIMING] {name} 累计耗时 {t['secs']} 秒")
+    else:
+        prev_secs = (t or {}).get("secs", 0) if isinstance(t, dict) else 0
+        timings[name] = {"start": now, "secs": prev_secs}
+    return state
+
+
+def _timing_summary(state: dict) -> str:
+    """汇总各流程耗时，供日志输出。"""
+    timings = state.get("_timings", {})
+    parts = []
+    for name, t in timings.items():
+        if isinstance(t, dict) and t.get("secs"):
+            parts.append(f"{name}={t['secs']}s")
+    return " | ".join(parts) if parts else ""
+
+
+def timed(name: str):
+    """节点耗时统计装饰器：自动记录节点开始/结束耗时。"""
+    def decorator(fn):
+        async def wrapper(state):
+            _mark(state, name)
+            try:
+                result = await fn(state)
+            finally:
+                _mark(state, name)
+            return result
+        return wrapper
+    return decorator
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Node 1: file_parse — OCR, field extraction, table extraction, image placeholder
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -569,6 +615,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                    "current_chapter":ch_num,"chapters":{},"_custom_prompt":prompt,"_use_custom_prompt":True}
     q = asyncio.Queue()
     md = ""
+    _mark(state, f"chapter_{ch_num}")  # 🔴 每章生成开始计时
     try:
         await asyncio.wait_for(agent.run(agent_state,q), timeout=300.0)
         cd = agent_state.get("chapters",{}).get(ch_num,{})
@@ -577,6 +624,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
         logger.error(f"Ch{ch_num} gen timeout (300s)")
     except Exception as e:
         logger.error(f"Ch{ch_num} gen failed: {e}")
+    _mark(state, f"chapter_{ch_num}")  # 🔴 每章生成结束计时
 
     ch["raw_content"] = md or f"【第{ch_num}章生成失败，请人工复核】"
     state["outline_list"] = outline_list
@@ -840,6 +888,11 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
             state["output_path"] = output
             state["phase"] = WorkflowPhase.COMPLETE.value
             logs.append(f"✅ 报告已生成: {output}")
+            # 🔴 输出各流程耗时，供后续逐步优化
+            timing_summary = _timing_summary(state)
+            if timing_summary:
+                logger.info(f"[TIMING] 各流程耗时: {timing_summary}")
+                logs.append(f"⏱️ 流程耗时: {timing_summary}")
             # 🔴 Record feedback for continuous learning
             try:
                 from app.services.learning_service import learning_service
@@ -906,16 +959,17 @@ def build_report_workflow() -> StateGraph:
     "generate"（重试/下一章）或 "quality_review"（全部完成，进入终稿审查）。
     """
     w = StateGraph(ReportWorkflowState)
-    w.add_node("file_parse", node_file_parse)
-    w.add_node("field_validate", node_field_validate)
-    w.add_node("data_inquiry", node_data_inquiry)
-    w.add_node("build_dynamic_outline", node_build_dynamic_outline)
-    w.add_node("outline_check", node_outline_check)
-    w.add_node("retrieve_rag", node_retrieve_rag)
-    w.add_node("chapter_generate", node_chapter_generate)
+    # 🔴 用 timed() 装饰器包装节点，自动统计各流程耗时
+    w.add_node("file_parse", timed("file_parse")(node_file_parse))
+    w.add_node("field_validate", timed("field_validate")(node_field_validate))
+    w.add_node("data_inquiry", timed("data_inquiry")(node_data_inquiry))
+    w.add_node("build_dynamic_outline", timed("outline")(node_build_dynamic_outline))
+    w.add_node("outline_check", timed("outline_check")(node_outline_check))
+    w.add_node("retrieve_rag", timed("rag")(node_retrieve_rag))
+    w.add_node("chapter_generate", timed("chapter_generate")(node_chapter_generate))
     w.add_node("chapter_review", node_chapter_review)
-    w.add_node("quality_review", node_quality_review)
-    w.add_node("assemble_final_report", node_assemble_final_report)
+    w.add_node("quality_review", timed("quality_review")(node_quality_review))
+    w.add_node("assemble_final_report", timed("assemble")(node_assemble_final_report))
 
     w.set_entry_point("file_parse")
     w.add_edge("file_parse", "field_validate")

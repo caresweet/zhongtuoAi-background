@@ -2254,13 +2254,14 @@ async def workflow_status(session_id: str):
             subprocess_error = "生成进程异常退出，请重试"
             running = False
 
-    # 🔴 Backend safety timeout: workflow running > 35 min → stuck
+    # 🔴 不做时间限制——生成时长不固定，改为记录耗时供优化。
+    # 若运行超长（>60分钟）仅记录日志，不中断生成。
     _started = state.get("_workflow_started_at", 0)
     if running and _started:
         import time as _time
-        if (_time.time() - _started) > 2100:  # 35 min
-            subprocess_error = "生成超时（35分钟），请刷新页面重试"
-            running = False
+        _elapsed = _time.time() - _started
+        if _elapsed > 3600:  # 60 min only log, no interrupt
+            _log.warning(f"[TIMING] 生成运行超长 {_elapsed/60:.0f} 分钟，仍在运行（不中断）")
 
     output = subprocess_output or state.get("output_path", "")
 

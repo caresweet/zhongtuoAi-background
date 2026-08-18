@@ -244,15 +244,15 @@ class QualityReviewAgent(BaseAgent):
                         "suggestion": "regenerate",
                     })
 
-            # Forbidden patterns
+            # Forbidden patterns — 🔴 降级为 auto_fix（AI套词/占位符可自动修复，不触发整章重写）
             from app.validation.content_guardrails import find_blocking_issues
             for issue in find_blocking_issues(markdown):
                 format_issues.append({
                     "chapter": ch_num,
                     "type": issue["type"],
-                    "severity": "critical",
+                    "severity": "error",
                     "message": f"第{ch_num}章存在禁止表达：{issue['description']}",
-                    "suggestion": "regenerate",
+                    "suggestion": "auto_fix",
                 })
                 chapter_issues.setdefault(ch_num, []).append(format_issues[-1])
             for pattern, desc in self.FORBIDDEN_PATTERNS:
@@ -1408,7 +1408,25 @@ class QualityReviewAgent(BaseAgent):
         new_md = markdown
         issue_type = issue.get("type", "")
 
-        if issue_type == "forbidden_pattern":
+        if issue_type == "blocking_wording":
+            # 🔴 自动修复 AI 套词/占位符/口语化
+            desc = issue.get("message", "") or ""
+            fixes = [
+                (r'后续提供|稍后补充|后期提供', ''),
+                (r'请提供|请补充|请填写', ''),
+                (r'根据实际情况|视情况而定', ''),
+                (r'\{\{[^}]+\}\}|____+|<[^>]{1,50}>', ''),
+                (r'\[.*?\]\(.*?\)', ''),
+                (r'好的[，,]|当然可以[，,]|下面我来|我将为您', ''),
+                (r'哈哈|呵呵|嘻嘻|yyds|666|给力', ''),
+                (r'我们认为|我们建议|笔者认为', ''),
+                (r'以上内容仅供参考|以上是.*?的内容', ''),
+            ]
+            for pattern, replacement in fixes:
+                new_md = re.sub(pattern, replacement, new_md)
+            fixed = new_md != markdown
+
+        elif issue_type == "forbidden_pattern":
             new_md = re.sub(
                 r'好的[，,]\s*作为稳评报告编制专家[，,]\s*以下是[^。]*[。:]?\s*',
                 '', new_md

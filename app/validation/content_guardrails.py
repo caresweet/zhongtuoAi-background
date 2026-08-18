@@ -391,7 +391,17 @@ def find_hallucinated_regulations(markdown: str) -> List[Dict[str, str]]:
     for m in REGULATION_CITATION_PATTERN.finditer(markdown):
         citations.add(m.group(0))
 
+    # 🔴 排除项目公告文号（如"洪拟征告〔2026〕7号"）——这些是项目文号，不是法规，
+    # 不应判为编造法规。项目文号错误由文号一致性检查处理。
+    def _is_project_doc(citation: str) -> bool:
+        # 检查 citation 前是否有"征告/预公告/拟征告/公告"等词
+        start = max(0, markdown.find(citation) - 8)
+        context = markdown[start:start + 8 + len(citation)]
+        return any(kw in context for kw in ['征告', '拟征告', '预公告', '征收土地预公告', '公告'])
+
     for citation in citations:
+        if _is_project_doc(citation):
+            continue  # 项目文号跳过，不是法规编造
         # Check if this exact string or a close variant is in known list
         is_known = False
         for known in KNOWN_REGULATIONS:

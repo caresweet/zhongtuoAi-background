@@ -899,6 +899,10 @@ class ChapterAgentBase(BaseAgent):
         """Clean LLM output: strip garbled text, source annotations, placeholders, fix table formatting, etc."""
         import re
 
+        # 🔴 清理一级标题下的游离正文：所有内容必须归属二级标题
+        # 结构：`## 第X章 XXX` 后若有直接正文（非标题行），且之后还有二级标题 → 删除该游离正文
+        content = self._remove_h1_free_text(content)
+
         # Strip garbled/binary characters first
         content = re.sub(r'[^\x20-\x7E一-鿿　-〿＀-￯\n\r\t]', '', content)
         # Strip source annotations like 【数据来源：XXX】
@@ -947,6 +951,52 @@ class ChapterAgentBase(BaseAgent):
             content = re.sub(pat, '', content, flags=re.MULTILINE)
 
         return content.strip()
+
+    def _remove_h1_free_text(self, markdown: str) -> str:
+        """删除一级标题（## 第X章）下的游离正文。
+
+        规则：一级标题行后紧跟的正文段落（非标题、非空行），若之后还有二级标题
+        （### 或 ## 或 数字.数字），则该正文视为"游离内容"，删除之。
+        所有正文必须归属到二级标题下。
+        """
+        import re as _re
+        lines = markdown.split('\n')
+        result = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            # 判断是否一级标题：## 第X章
+            is_h1 = bool(_re.match(r'^#+\s*第[一二三四五六七八九十\d]+章', stripped))
+            if is_h1:
+                result.append(line)
+                i += 1
+                # 收集一级标题后紧跟的游离正文行（直到遇到下一个标题）
+                free_lines = []
+                while i < len(lines):
+                    s = lines[i].strip()
+                    # 遇到标题（## 或 ### 或 数字.数字 或 第X章）→ 停止
+                    if _re.match(r'^#{1,3}\s', s) or _re.match(r'^\d+\.\d+\s', s) or _re.match(r'^第[一二三四五六七八九十\d]+章', s):
+                        break
+                    if s:  # 非空行 = 游离正文
+                        free_lines.append(lines[i])
+                    i += 1
+                # 若游离正文后确实有二级标题（free_lines 非空且后续有标题），则丢弃游离正文
+                # 判断是否还有后续标题
+                has_next_heading = any(
+                    _re.match(r'^#{1,3}\s', lines[j].strip()) or _re.match(r'^\d+\.\d+\s', lines[j].strip())
+                    for j in range(i, len(lines))
+                )
+                if free_lines and has_next_heading:
+                    # 丢弃游离正文（不 append free_lines）
+                    pass
+                else:
+                    # 一级标题后没有二级标题（整章无小节）→ 保留游离正文（否则会丢内容）
+                    result.extend(free_lines)
+                continue
+            result.append(line)
+            i += 1
+        return '\n'.join(result)
 
     def _extract_tables(self, markdown: str) -> List[Dict[str, Any]]:
         """Extract table data from markdown content."""

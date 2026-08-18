@@ -31,6 +31,7 @@ class WorkflowPhase(str, Enum):
     REVIEWING="reviewing"; ASSEMBLING="assembling"; COMPLETE="complete"; ERROR="error"
 
 MAX_RETRY = 2
+MAX_QUALITY_ROUNDS = 2  # 🔴 终稿质量循环最多轮数（每轮重写问题章节）
 
 # ── Progress emitter ───────────────────────────────────────────────────────────
 _progress_callback = None
@@ -448,14 +449,37 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     rag_chunks = state.get("rag_all_chunks",[]) or []
     idx = state.get("_chapter_idx", 0)
     retry = state.get("_chapter_retry", 0)
+    quality_rewrite = state.get("_quality_rewrite_chapters", None)
 
-    # 所有章节已处理完 → 路由到组装
-    if idx >= len(outline_list):
-        state["_next_action"] = "assemble"
-        return state
-
-    ch = outline_list[idx]
-    ch_num = int(ch.get("chapter_no","1"))
+    # 🔴 质量重写模式：只重写审核发现问题章节
+    if quality_rewrite is not None:
+        rewrite_list = [int(c) for c in quality_rewrite]
+        if idx >= len(rewrite_list):
+            # 重写完成 → 清空质量重写状态，标记完成，进入下一轮审核
+            state["_quality_rewrite_chapters"] = None
+            state["_quality_done"] = True
+            state["_next_action"] = "quality_review"
+            return state
+        target_ch = rewrite_list[idx]
+        # 找到该章节定义
+        ch = next((c for c in outline_list if int(c.get("chapter_no", 0)) == target_ch), None)
+        if ch is None:
+            state["_chapter_idx"] = idx + 1
+            return state
+        ch_num = target_ch
+        # 🔴 质量重写反馈：把审核发现的问题传给 LLM
+        issues = state.get("_quality_rewrite_issues", {}).get(str(ch_num), [])
+        if issues:
+            ch["review_msg"] = "## ⚠️ 终稿审核发现以下问题，请修正后重写：\n" + "\n".join(f"- {i}" for i in issues)
+        else:
+            ch["review_msg"] = "## ⚠️ 终稿审核要求重新生成本章，请确保内容完整、数据准确"
+    else:
+        # 所有章节已处理完 → 路由到组装
+        if idx >= len(outline_list):
+            state["_next_action"] = "assemble"
+            return state
+        ch = outline_list[idx]
+        ch_num = int(ch.get("chapter_no","1"))
 
     from app.services.llm_service import LLMService; llm = LLMService()
     from app.agent.agents.chapters import get_chapter_agent
@@ -556,7 +580,15 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
 
     ch["raw_content"] = md or f"【第{ch_num}章生成失败，请人工复核】"
     state["outline_list"] = outline_list
-    state["_next_action"] = "review"
+    # 🔴 质量重写模式：直接把新内容写回 chapters，推进 idx 继续下一个重写章节
+    if quality_rewrite is not None:
+        chapters = state.setdefault("chapters", {})
+        chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "rewritten"}
+        state["chapters"] = chapters
+        state["_chapter_idx"] = idx + 1
+        state["_next_action"] = "generate"  # 回 chapter_generate 处理下一个
+    else:
+        state["_next_action"] = "review"
     logs.append(f"  ✍️ 第{ch_num}章「{ch['title']}」已生成 ({len(md)}字)")
     logger.info(f"[GEN] 第{ch_num}章「{ch['title']}」生成 {len(md)} 字 (idx={idx}, agent={'None' if not agent else agent.__class__.__name__})")
     await _emit("generating", {"analysis":"done","outline":"done","generation":"running","quality":"pending","assembly":"pending"})
@@ -578,6 +610,16 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
     filled = state.get("filled_data",{})
     idx = state.get("_chapter_idx", 0)
     retry = state.get("_chapter_retry", 0)
+
+    # 🔴 质量重写完成 → 回 quality_review 再审
+    if state.get("_quality_done"):
+        state["_quality_done"] = False
+        state["_next_action"] = "quality_review"
+        return state
+    # 🔴 质量重写模式：跳过硬规则审查，直接路由回生成（内容已在 chapter_generate 写回）
+    if state.get("_quality_rewrite_chapters") is not None:
+        state["_next_action"] = "generate"
+        return state
 
     if idx >= len(outline_list):
         state["_next_action"] = "assemble"
@@ -659,6 +701,15 @@ def route_after_review(state: ReportWorkflowState) -> str:
     return state.get("_next_action", "assemble")
 
 
+def route_after_quality(state: ReportWorkflowState) -> str:
+    """终稿质量审查后的条件路由。
+
+    - "quality_rewrite" → 回 chapter_generate 重写问题章节（质量循环）
+    - "assemble" → 质量通过，进入组装
+    """
+    return state.get("_next_action", "assemble")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Node 7b: quality_review — final audit via QualityReviewAgent
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -685,6 +736,24 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         fixed = result.get("auto_fixed", 0)
         regen = len(result.get("regenerate_chapters", []))
         logs.append(f"🔍 终稿质量审查：{total} 个问题，自动修复 {fixed} 个，需重写 {regen} 章")
+
+        # 🔴 质量循环：有问题章节需重写 → 路由回 chapter_generate 带反馈重写
+        rewrite_chapters = result.get("regenerate_chapters", [])
+        quality_round = state.get("_quality_round", 0)
+        if rewrite_chapters and quality_round < MAX_QUALITY_ROUNDS:
+            # 设置重写队列：把需重写的章节号记录，路由回生成
+            state["_quality_rewrite_chapters"] = [int(c) for c in rewrite_chapters]
+            state["_quality_rewrite_issues"] = {
+                str(c): [i.get("message","") for i in result.get("all_issues", [])
+                         if i.get("chapter") == c and i.get("severity") == "critical"]
+                for c in rewrite_chapters
+            }
+            state["_quality_round"] = quality_round + 1
+            state["_chapter_idx"] = 0  # 从头重写问题章节
+            state["_next_action"] = "quality_rewrite"
+            logs.append(f"🔄 第{quality_round + 1}轮质量修正：重写 {len(rewrite_chapters)} 章")
+            await _emit("quality", {"analysis":"done","outline":"done","generation":"running","quality":"running","assembly":"pending"})
+            return state
     except Exception as e:
         logger.warning(f"Quality review failed (non-critical): {e}")
         state["_quality_audit"] = {"passed": True, "error": str(e)}
@@ -858,7 +927,17 @@ def build_report_workflow() -> StateGraph:
             "quality_review": "quality_review",
         },
     )
-    w.add_edge("quality_review", "assemble_final_report")
+    # 🔴 质量循环：条件路由
+    #   "quality_rewrite" → 回 chapter_generate 重写问题章节（质量循环）
+    #   "assemble" → 通过，进入组装
+    w.add_conditional_edges(
+        "quality_review",
+        route_after_quality,
+        {
+            "quality_rewrite": "chapter_generate",
+            "assemble": "assemble_final_report",
+        },
+    )
     w.add_edge("assemble_final_report", END)
     return w
 
@@ -885,6 +964,8 @@ class ReportWorkflowRunner:
             # 🔴 图级章节循环状态
             "_chapter_idx": 0, "_chapter_retry": 0, "_next_action": "generate",
             "_gen_prepared": False,
+            # 🔴 质量循环状态
+            "_quality_round": 0, "_quality_done": False,
         }
         if existing_state:
             for k in ("_pdf_raw_text","_project_materials","_uploaded_files",

@@ -296,6 +296,10 @@ class QualityReviewAgent(BaseAgent):
             struct_issues = self._check_structure_issues(markdown, ch_num)
             chapter_issues.setdefault(ch_num, []).extend(struct_issues)
 
+            # 🔴 图片问题检查：占位残留 / 图片标记无路径 / 标记残留
+            img_issues = self._check_image_issues(markdown, ch_num)
+            chapter_issues.setdefault(ch_num, []).extend(img_issues)
+
         # ═══════════════════════════════════════════════════════════
         # Step 2.5: 🔴 Enhanced data validity checks (per-chapter)
         # ═══════════════════════════════════════════════════════════
@@ -1331,6 +1335,42 @@ class QualityReviewAgent(BaseAgent):
                     "suggestion": "regenerate",
                 })
                 break
+
+        return issues
+
+    def _check_image_issues(self, markdown: str, ch_num: int) -> List[Dict]:
+        """检查章节里的图片问题。
+
+        - 【待插入：图X-X】占位残留 → 图片未插入
+        - ![图注] 无路径标记 → LLM 写了标记但未指定图片，assembler 可能匹配不到
+        - [图片X] 标记残留 → 图片标记未正确渲染
+        """
+        issues = []
+        if not markdown:
+            return issues
+
+        # 1. 【待插入：图X-X】占位残留
+        if '待插入' in markdown or '【待插入' in markdown:
+            placeholders = re.findall(r'【待插入[^】]*】|待插入[^\n]{0,20}', markdown)
+            if placeholders:
+                issues.append({
+                    "chapter": ch_num,
+                    "type": "image_placeholder",
+                    "severity": "error",
+                    "message": f"第{ch_num}章存在图片占位未插入：{'、'.join(p[:20] for p in placeholders[:3])}，应在正文插入实际图片",
+                    "suggestion": "regenerate",
+                })
+
+        # 2. [图片X] / [现场勘查照片：图片1] 标记残留
+        residual = re.findall(r'\[(?:图片\d+|[^\]]*照片[：:][^\]]*)\]', markdown)
+        if residual:
+            issues.append({
+                "chapter": ch_num,
+                "type": "image_marker_residual",
+                "severity": "warning",
+                "message": f"第{ch_num}章存在图片标记残留「{'、'.join(r[:15] for r in residual[:3])}」，应插入实际图片或删除标记",
+                "suggestion": "regenerate",
+            })
 
         return issues
 

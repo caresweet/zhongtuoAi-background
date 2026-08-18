@@ -158,6 +158,7 @@ class ReportAssembler:
         img_catalog = build_image_catalog(uploaded_paths,
                                           ai_classifications=state.get("_classified_images"))
         self._chapter_image_map = img_catalog.get("by_chapter", {})
+        self._unmatched_image_markers = []  # 🔴 图注匹配不到图片的标记（供审核感知）
         # 🔴 Full image pool: category → [{path, name, category}, ...] for appendix
         image_files = {}
         for img in img_catalog.get("catalog", []):
@@ -1214,6 +1215,12 @@ class ReportAssembler:
                     if img_path:
                         self._add_image(doc, img_path, caption)
                     ch_img_map[ch_num] = ch_imgs[1:]  # consume
+                else:
+                    # 🔴 图注匹配不到图片 → 记录问题（供审核 agent 感知）
+                    self._unmatched_image_markers.append({
+                        "chapter": ch_num,
+                        "caption": caption[:40],
+                    })
                 continue
 
             # Skip old-style AI-generated image markers

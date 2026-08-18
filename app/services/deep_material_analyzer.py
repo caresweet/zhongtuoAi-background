@@ -291,7 +291,7 @@ async def analyze_all_materials(
     # 🔴 文字文档 + 模糊图片 并发 vision 分类（限并发数，避免 API 限流）
     vision_images = text_doc_images + ambiguous_images
     if vision_images and llm_service:
-        sem = asyncio.Semaphore(6)
+        sem = asyncio.Semaphore(10)  # 🔴 提高并发加速图片分类
 
         async def _ocr_one(img_path):
             async with sem:

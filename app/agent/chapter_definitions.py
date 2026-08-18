@@ -252,6 +252,146 @@ CHAPTER_FORMAT_RULES: Dict[int, Dict[str, Any]] = {
     10: {"must_contain": ["组织指挥", "分级响应", "处置措施"], "must_have_table": False},
 }
 
+# ═══════════════════════════════════════════════════════════════
+# 章节二级标题结构规范 — 每章每个二级标题的内容要点、数据来源、图片规格
+# 章节 agent 严格按此生成，禁止自由发挥标题/结构
+# 图片规格尺寸单位 cm（淮安市稳评格式）
+# ═══════════════════════════════════════════════════════════════
+
+CHAPTER_SECTION_SPECS: Dict[int, List[Dict[str, Any]]] = {
+    1: [
+        {"title": "1.1 决策名称", "points": ["写明征收项目文号+项目全称，如'洪拟征告〔2026〕7号（XXX项目）'"],
+         "data": ["doc_reference", "project_name"], "images": []},
+        {"title": "1.2 决策主体", "points": ["写明作出征收决策的政府主体全称"],
+         "data": ["org_name"], "images": []},
+        {"title": "1.3 稳评责任单位", "points": ["写明委托稳评的责任单位（征收主体）全称，只写单位名，不写职责描述"],
+         "data": ["org_name"], "images": []},
+        {"title": "1.4 稳评实施单位", "points": ["写明实施单位：江苏众拓项目代理咨询有限公司，只写单位名"],
+         "data": ["implement_unit"], "images": []},
+        {"title": "1.5 征收位置", "points": ["写明征收地块具体位置（省市区街道社区村组）+ 四至范围，并配位置示意图"],
+         "data": ["location", "doc_reference"],
+         "images": [{"type": "map", "caption": "图1-1 拟征收土地位置示意图", "size": (10.91, 15.5)}]},
+        {"title": "1.6 征收范围及面积", "points": ["写明征收总面积（精确到小数）、地类构成（耕地/林地/建设用地），数据来自勘测定界报告"],
+         "data": ["area_mu", "area_m2", "land_classification"], "images": []},
+        {"title": "1.7 征收用途", "points": ["写明征收后的规划土地用途（如商业服务业设施用地）"],
+         "data": ["land_use"], "images": []},
+        {"title": "1.8 涉及利益相关者", "points": ["写明被征地农户/村集体/企业等利益相关者及数量"],
+         "data": ["household_count", "population_count", "villages"], "images": []},
+        {"title": "1.9 补偿安置方案要点", "points": ["写明补偿标准（区片综合地价）、安置方式要点"],
+         "data": ["compensation_standard", "resettlement"], "images": []},
+    ],
+    2: [
+        {"title": "2.1 评估过程", "points": ["写明评估启动时间、各阶段工作安排（方案制定/资料收集/实地调查/报告编制）"],
+         "data": ["commission_month"], "images": []},
+        {"title": "2.2 评估方法", "points": ["写明采用的评估方法（资料收集法/问卷调查法/座谈访谈法/现场勘查法/舆情分析法）"],
+         "data": [], "images": [{"type": "photo", "caption": "图2-1 现场勘查照片", "size": (5.44, 7.25)}]},
+        {"title": "2.3 评估依据", "points": ["写明法律/法规/政策/技术规范依据，必须写具体法规名称+文号，知识库没有的写【待补充】"],
+         "data": [], "images": []},
+    ],
+    3: [
+        {"title": "3.1 问卷调查结果", "points": ["写明问卷发放/回收/有效数、支持率（征地项目100%）、反对率0%、知晓率，数据来自座谈会PDF"],
+         "data": ["total_samples", "support_count", "oppose_count", "support_rate", "oppose_rate", "awareness_rate"],
+         "images": [{"type": "survey", "caption": "图3-1 公众意见调查问卷", "size": (21.84, 15.45)}]},
+        {"title": "3.2 利益相关者诉求", "points": ["写明座谈/走访中群众的主要诉求（补偿标准/安置方式/社保等），不编造"],
+         "data": ["public_demands", "villager_demands"],
+         "images": [{"type": "meeting", "caption": "图3-2 座谈会/签到照片", "size": (5.43, 7.23)}]},
+    ],
+    4: [
+        {"title": "4.1 合法性分析", "points": ["分析征收决策是否符合法律、程序是否合规，引用具体法规"],
+         "data": [], "images": []},
+        {"title": "4.2 合理性分析", "points": ["分析补偿标准、安置方案是否合理，群众接受度"],
+         "data": ["compensation_standard"], "images": []},
+        {"title": "4.3 可行性分析", "points": ["分析资金保障、实施方案可行性"],
+         "data": ["funding"], "images": []},
+        {"title": "4.4 可控性分析", "points": ["分析风险可控性、防范化解能力"],
+         "data": [], "images": []},
+    ],
+    5: [
+        {"title": "5.1 风险识别方法", "points": ["写明识别风险的方法（现场勘查/问卷/座谈/舆情）"],
+         "data": [], "images": []},
+        {"title": "5.2 主要风险因素分析", "points": ["逐项分析主要风险因素（补偿/社保/资金/舆情等）"],
+         "data": [], "images": []},
+        {"title": "5.3 风险因素初始等级表", "points": ["给出风险因素初始等级表（表格：序号/风险类型/风险描述/等级）"],
+         "data": [], "images": [{"type": "review", "caption": "图5-1 专家评审照片", "size": (10.91, 15.5)}]},
+        {"title": "5.4 风险等级判定说明", "points": ["说明初始风险等级判定的依据"],
+         "data": [], "images": []},
+    ],
+    6: [
+        {"title": "6.1 量化评分指标体系", "points": ["写明DB32/T4013-2021量化评分指标体系（合法性/合理性/可行性/可控性）"],
+         "data": [], "images": []},
+        {"title": "6.2 措施前逐项评分", "points": ["逐项给出措施前评分（0-100），评分必须有依据，不编造"],
+         "data": ["support_rate"], "images": []},
+        {"title": "6.3 措施前风险等级研判", "points": ["汇总措施前综合得分，判定风险等级（低/中/高）"],
+         "data": [], "images": []},
+    ],
+    7: [
+        {"title": "7.1 风险防范化解措施", "points": ["针对风险因素逐项提出防范化解措施"],
+         "data": [], "images": []},
+        {"title": "7.2 责任主体与完成时限", "points": ["明确每项措施的责任主体、完成时限"],
+         "data": ["org_name"], "images": []},
+    ],
+    8: [
+        {"title": "8.1 措施后重新评分", "points": ["给出措施后逐项评分（比措施前提升5-15分）"],
+         "data": [], "images": []},
+        {"title": "8.2 措施前后对比分析", "points": ["对比措施前后得分变化，说明措施效果"],
+         "data": [], "images": []},
+        {"title": "8.3 措施后风险等级判定", "points": ["判定措施后风险等级（应低于措施前）"],
+         "data": [], "images": []},
+    ],
+    9: [
+        {"title": "9.1 评估结论", "points": ["综合判定风险等级，给出结论（低风险可实施）"],
+         "data": [], "images": [{"type": "review", "caption": "图9-1 专家评审意见", "size": (10.91, 15.5)}]},
+        {"title": "9.2 建议", "points": ["给出4-5条工作建议"],
+         "data": [], "images": []},
+    ],
+    10: [
+        {"title": "10.1 组织指挥体系", "points": ["写明应急组织指挥体系、领导机构、职责分工"],
+         "data": ["org_name"], "images": []},
+        {"title": "10.2 分级响应", "points": ["写明应急分级响应机制"],
+         "data": [], "images": []},
+        {"title": "10.3 处置措施", "points": ["写明具体应急处置措施"],
+         "data": [], "images": []},
+    ],
+}
+
+
+def get_chapter_section_specs(chapter_number: int) -> List[Dict[str, Any]]:
+    """获取章节二级标题结构规范（含内容要点/数据/图片规格）。"""
+    return CHAPTER_SECTION_SPECS.get(chapter_number, [])
+
+
+def format_sections_for_prompt(chapter_number: int) -> str:
+    """把章节二级标题规范格式化为 prompt 注入文本。
+
+    LLM 严格按此结构生成：每个二级标题的内容要点 + 应放的图片。
+    """
+    sections = get_chapter_section_specs(chapter_number)
+    if not sections:
+        return ""
+    lines = [
+        "\n## 📋 本章结构规范（严格按此生成，禁止增删改二级标题）",
+    ]
+    for sec in sections:
+        title = sec.get("title", "")
+        points = "；".join(sec.get("points", []))
+        data = "、".join(sec.get("data", []))
+        images = sec.get("images", [])
+        img_desc = ""
+        if images:
+            img_desc = "。此节必须放：" + "；".join(
+                f"{im['caption']}（尺寸{im['size'][0]}×{im['size'][1]}cm）" for im in images
+            )
+        lines.append(f"### {title}")
+        if points:
+            lines.append(f"- 内容：{points}")
+        if data:
+            lines.append(f"- 数据：{data}")
+        if img_desc:
+            lines.append(f"- 图片：{img_desc}")
+    lines.append("\n严格按上述二级标题顺序逐一撰写，每个标题下必须有实质内容，禁止标题后空白。")
+    lines.append("图片缺失时写【图片待插入：图X-X 描述】，不得裸放或错位。")
+    return "\n".join(lines)
+
 
 def get_chapter_rag_query(chapter_number: int) -> str:
     """Get the RAG search query template for a chapter."""

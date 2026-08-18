@@ -185,7 +185,11 @@ class ChapterAgentBase(BaseAgent):
             if loc and not str(loc).startswith("【"):
                 constraint_parts.append(f"- 项目位置唯一真实值：{loc}。报告中所有位置/坐落/社区/街道必须用这个，禁止编造任何其他地名")
             if doc_ref and not str(doc_ref).startswith("【"):
-                constraint_parts.append(f"- 项目文号唯一真实值：{doc_ref}。报告中所有征地文号必须用这个，禁止使用其他文号")
+                constraint_parts.append(
+                    f"- 项目文号唯一真实值：{doc_ref}。报告中所有征地文号必须用这个，禁止使用其他文号\n"
+                    f"- 🚫 参考范文里出现的任何其他文号（如洪拟征告〔2026〕X号、清拟征告、金征预告等）都是**别的项目的**，一律忽略，绝不写入本报告\n"
+                    f"- 如发现范文里带其他文号，把它当示例格式参考，但文号一律用「{doc_ref}」"
+                )
             # 🔴 时间硬约束：报告年度为2026年，评估时间应在公告发布之后（2026年），禁止出现2024年等错误年份
             constraint_parts.append("- 报告年度为2026年。本项目的公告/预公告发布时间为2026年，评估工作时间应为2026年。禁止出现2024年、2025年等错误年份作为评估启动时间")
             # 🔴 社区背景描述约束：禁止编造社区的地理/历史/发展/水文等背景（如"地处淮河流域""紧挨城区""城镇化进程加快"等）
@@ -1055,12 +1059,20 @@ class ChapterAgentBase(BaseAgent):
         except Exception:
             heading_constraint = ""
 
+        # 🔴 章节二级标题结构规范（含每节内容要点/数据/图片规格）
+        try:
+            from app.agent.chapter_definitions import format_sections_for_prompt
+            section_spec = format_sections_for_prompt(self.chapter_number)
+        except Exception:
+            section_spec = ""
+
         return (
             f"你是江苏众拓项目代理咨询有限公司的稳评工程师，在淮安做了8年征地稳评。\n"
             f"根据你的专业经验撰写第{self._chapter_num_cn()}章「{self.chapter_title}」。\n\n"
             f"## 核心原则\n"
             f"- 根据DB32/T4013-2021规范和你8年的实战经验来组织内容\n"
-            f"- 结构自由决定，不需要固定小节数，内容说到位就停\n"
+            f"- 🔴 严格按下方「本章结构规范」的二级标题逐一撰写，禁止新增/删减/合并/改名标题\n"
+            f"- 🔴 每个二级标题下必须有实质内容，禁止标题后空白\n"
             f"- 所有地名只用：淮安市洪泽区朱坝街道三圩社区二组、三组、六组\n\n"
             f"## ⛔ 禁止\n"
             f"- 禁用词：{'、'.join(AI_BUZZWORDS)}\n"
@@ -1079,6 +1091,12 @@ class ChapterAgentBase(BaseAgent):
             f"- 你只能从「可用数据」里取真实数据。范文数字只是让你看「该在哪写什么类型的数据」，不是让你抄数值\n"
             f"- 勘测数据每次每个项目都不一样，绝不能用范文里的勘测面积套到本项目\n"
             f"- 如果「可用数据」里没有某项数据 → 写【待补充】，绝不能拿范文的数字填进去\n\n"
+            f"## 🚫 禁止模糊表达（写不出具体就标【待补充】，绝不写笼统话）\n"
+            f"- ❌ 禁止写「有关单位」「相关部门」「上级部门」「有关人员」——必须写具体单位名称，不知道就【待补充】\n"
+            f"- ❌ 禁止写「依据相关法律法规」「根据国家有关规定」「按照相关政策要求」——必须写具体法规名称+文号，知识库没有就【待补充】，不编造\n"
+            f"- ❌ 禁止写「相关部门负责」「有关方面」等责任主体模糊表述——直接写「责任单位：XX」或【待补充】\n"
+            f"- ✅ 正确示范：写「责任单位为淮安市洪泽区人民政府」或「依据《土地管理法》第四十六条」，写不出具体就标【待补充：XX未提供】\n"
+            f"- 空话凑字数（如「各单位应高度重视」）一律禁止，宁可短，不要空\n\n"
             f"## ✅ 鼓励\n"
             f"- 段落长短错落，短句穿插长段\n"
             f"- 基层过渡语：「结合入户走访」「根据社区书记反馈」\n"
@@ -1090,6 +1108,8 @@ class ChapterAgentBase(BaseAgent):
             f"{skeleton_rule}\n"
             # 🔴 标准小标题约束（修复死代码：heading_constraint 之前没拼进返回）
             f"{heading_constraint}\n"
+            # 🔴 章节二级标题结构规范（内容要点+数据+图片规格，权威结构）
+            f"{section_spec}\n"
         )
 
     def _default_user_prompt(

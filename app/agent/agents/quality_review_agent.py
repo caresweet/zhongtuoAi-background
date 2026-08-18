@@ -378,12 +378,14 @@ class QualityReviewAgent(BaseAgent):
 
             # 2.5d: Hallucinated regulation citations
             for issue in find_hallucinated_regulations(markdown):
+                # 🔴 泛化引用(auto_fix) 与 编造文号(regenerate) 区分
+                is_vague = "泛化" in issue.get("message", "") or "模糊" in issue.get("message", "")
                 regulation_issues.append({
                     "chapter": ch_num,
                     "type": "hallucinated_regulation",
                     "severity": "critical",
                     "message": f"第{ch_num}章：{issue['message']}",
-                    "suggestion": "regenerate",
+                    "suggestion": "auto_fix" if is_vague else "regenerate",
                 })
                 chapter_issues.setdefault(ch_num, []).append(regulation_issues[-1])
 
@@ -1304,7 +1306,7 @@ class QualityReviewAgent(BaseAgent):
                     "type": "empty_section",
                     "severity": "critical",
                     "message": f"第{ch_num}章小节「{heading_text}」内容为空",
-                    "suggestion": "regenerate",
+                    "suggestion": "auto_fix",  # 🔴 自动补【待补充】，不整章重写
                 })
 
         # 2. 标题重复检测
@@ -1494,14 +1496,19 @@ class QualityReviewAgent(BaseAgent):
         self, issue: Dict,
         critical: List[Dict], auto: List[Dict], warn: List[Dict],
     ) -> None:
-        """Classify an issue by severity and fixability."""
+        """Classify an issue by severity and fixability.
+
+        🔴 auto_fix 优先于 severity：能被程序自动修复的 issue
+        （泛化法规引用/责任主体泛化/空标题/口语化），即使 critical 也先修复，
+        修复后不再触发整章重写。
+        """
         severity = issue.get("severity", "warning")
         suggestion = issue.get("suggestion", "")
 
-        if severity == "critical":
-            critical.append(issue)
-        elif severity == "error" and suggestion == "auto_fix":
+        if suggestion == "auto_fix":
             auto.append(issue)
+        elif severity == "critical":
+            critical.append(issue)
         elif severity == "warning":
             warn.append(issue)
         else:
@@ -1605,6 +1612,47 @@ class QualityReviewAgent(BaseAgent):
             # 年份错误统一为 2026
             for pattern, replacement in self.YEAR_REPLACEMENTS:
                 new_md = re.sub(pattern, replacement, new_md)
+            fixed = new_md != markdown
+
+        elif issue_type == "empty_section":
+            # 🔴 空标题自动补【待补充】（无需整章重写）
+            # 找到空标题行，在其后补一行【待补充：XX数据未提供，请补充后完善】
+            msg = issue.get("message", "")
+            # 提取标题文本，如「1.2 决策主体」
+            hm = re.search(r'小节「([^」]+)」', msg)
+            if hm:
+                heading = hm.group(1)
+                # 匹配该标题行（含 # 前缀），若其后紧跟下一标题或结束则补内容
+                pattern = rf'^(#+\s*{re.escape(heading)}\s*$)(\n(?=#|$))'
+                new_md = re.sub(
+                    pattern,
+                    r'\1\n【待补充：本章节所需数据未提供，请补充后完善。】\n',
+                    new_md, flags=re.MULTILINE
+                )
+                fixed = new_md != markdown
+            else:
+                fixed = False
+
+        elif issue_type == "hallucinated_regulation":
+            # 🔴 泛化法规引用自动修复 → 替换为【待补充】
+            # 如「依据相关法律法规」「按照国家有关规定」→「【待补充：法规依据】」
+            new_md = re.sub(
+                r'(?:依据|根据|按照)\s*(?:相关|有关|国家|省|市|地方|省级|市级)\s*(?:法律法规|政策|规定|文件|标准)',
+                '【待补充：法规依据】', new_md
+            )
+            new_md = re.sub(
+                r'(?:相关|有关)\s*(?:法律法规|政策|规定|文件|标准|要求)',
+                '【待补充：法规依据】', new_md
+            )
+            fixed = new_md != markdown
+
+        elif issue_type == "blocking_wording":
+            # 🔴 责任主体泛化表达自动修复
+            # 「有关单位/相关部门/有关人员」→「【待补充：责任单位】」
+            new_md = re.sub(r'有关单位', '【待补充：责任单位】', new_md)
+            new_md = re.sub(r'相关部门', '【待补充：责任单位】', new_md)
+            new_md = re.sub(r'有关人员', '【待补充：人员】', new_md)
+            new_md = re.sub(r'有关部门', '【待补充：责任单位】', new_md)
             fixed = new_md != markdown
 
         # 🔴 Data validity / fabrication / range issues → do NOT auto-fix.

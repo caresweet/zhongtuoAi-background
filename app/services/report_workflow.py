@@ -31,7 +31,7 @@ class WorkflowPhase(str, Enum):
     REVIEWING="reviewing"; ASSEMBLING="assembling"; COMPLETE="complete"; ERROR="error"
 
 MAX_RETRY = 2
-MAX_QUALITY_ROUNDS = 2  # 🔴 终稿质量循环最多轮数（每轮重写问题章节）
+MAX_QUALITY_ROUNDS = 1  # 🔴 终稿质量循环只做1轮（避免2轮×多章重写导致超时）
 
 # ── Progress emitter ───────────────────────────────────────────────────────────
 _progress_callback = None
@@ -747,10 +747,10 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         rewrite_chapters = result.get("regenerate_chapters", [])
         quality_round = state.get("_quality_round", 0)
         if rewrite_chapters and quality_round < MAX_QUALITY_ROUNDS:
-            # 🔴 控制每轮重写章节数（避免全量重写拖时间，最多8章/轮）
-            rewrite_list = sorted(rewrite_chapters)[:8]
-            if len(rewrite_chapters) > 8:
-                logs.append(f"⚠️ 需重写章节过多({len(rewrite_chapters)})，本轮只重写前{len(rewrite_list)}章，其余下轮处理")
+            # 🔴 控制每轮重写章节数（避免全量重写拖时间，最多5章/轮）
+            rewrite_list = sorted(rewrite_chapters)[:5]
+            if len(rewrite_chapters) > 5:
+                logs.append(f"⚠️ 需重写章节过多({len(rewrite_chapters)})，本轮只重写前{len(rewrite_list)}章，其余保留原内容")
             # 设置重写队列：把需重写的章节号记录，路由回生成
             state["_quality_rewrite_chapters"] = rewrite_list
             state["_quality_rewrite_issues"] = {

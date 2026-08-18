@@ -20,13 +20,15 @@ from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Image classification categories
+# Image classification categories — 🔴 扩充为8类（survey/announcement/review/map/photo/meeting/cert/other）
 IMAGE_CATEGORIES = {
     "survey": {"kw": ["问卷", "调查表", "统计", "签名", "签到", "测评"], "desc": "调查问卷/统计表"},
     "announcement": {"kw": ["公告", "公示", "批文", "通知", "征收", "预公告", "批复"], "desc": "公告/批文"},
-    "review": {"kw": ["评审", "意见", "专家", "签字", "评估报告"], "desc": "专家评审"},
+    "review": {"kw": ["评审", "意见", "专家", "签字", "评估报告", "综合意见"], "desc": "专家评审"},
     "map": {"kw": ["地图", "红线", "规划图", "位置图", "勘测", "测定", "地形", "宗地", "示意"], "desc": "地图/红线图"},
-    "photo": {"kw": ["现场", "照片", "地块", "房屋", "附着物", "植被", "道路", "村民", "开会", "走访", "座谈"], "desc": "现场照片"},
+    "meeting": {"kw": ["座谈", "开会", "会议", "村民", "群众会"], "desc": "座谈会/开会照片"},
+    "cert": {"kw": ["执照", "证书", "资质", "备案", "营业执照"], "desc": "公司资质/证书"},
+    "photo": {"kw": ["现场", "照片", "地块", "房屋", "附着物", "植被", "道路", "走访", "勘察"], "desc": "现场照片"},
 }
 
 
@@ -138,6 +140,28 @@ def classify_image_by_filename(filepath: str) -> Optional[str]:
     return None
 
 
+def _map_vision_category(category: str) -> str:
+    """把 vision AI 返回的中文类别映射到英文 key。
+
+    vision prompt 返回：调查问卷/公告公示/专家评审/地图红线/现场照片/其他/座谈会/证书
+    """
+    if not category:
+        return "other"
+    mapping = [
+        ('调查问卷', 'survey'), ('问卷', 'survey'), ('调查表', 'survey'),
+        ('公告', 'announcement'), ('公示', 'announcement'), ('预公告', 'announcement'),
+        ('评审', 'review'), ('专家', 'review'), ('意见', 'review'),
+        ('地图', 'map'), ('红线', 'map'), ('位置', 'map'), ('勘测', 'map'),
+        ('座谈', 'meeting'), ('开会', 'meeting'), ('会议', 'meeting'),
+        ('证书', 'cert'), ('执照', 'cert'), ('资质', 'cert'),
+        ('现场', 'photo'), ('照片', 'photo'),
+    ]
+    for cn, en in mapping:
+        if cn in category:
+            return en
+    return "other"
+
+
 def _map_dept_question(question: str) -> Optional[str]:
     """把部门调查题目（贵单位开头）映射到 dept_data_maps 的 key。
 
@@ -231,8 +255,11 @@ async def analyze_all_materials(
     # 文字文档（扫描件/表单/证书）：需要 OCR 提取勾选、数据
     TEXT_DOC_KEYWORDS = ['扫描', '签字', '问卷', '调查表', '意见', '评审', '签到',
                          'pdf_page', 'pdf_', '评估', '备案', '执照', '证书', '预公告', '公告']
-    # 场景照片（人物/公示栏/现场）：直接分类，不调用 vision，节省 API
-    SCENE_KEYWORDS = ['公示栏', '现场', '照片', '微信图片', '开会', '村民', '走访', '会议', '人物', '合影']
+    # 文件名明确能判断类别的关键词（可直接分类，省 vision）
+    CLEAR_FILENAME_KEYWORDS = ['位置图', '红线', '勘测', '公示栏', '问卷', '签到表', '专家意见',
+                               '评审', '意见', '执照', '证书', '资质', '公告', '预公告', '地图', '百度']
+    # 模糊命名（无法从文件名判断）→ 调用 vision 分类
+    AMBIGUOUS_PREFIXES = ['微信图片', '图片', 'dsc', 'img', 'photo', 'image', 'mmexport', 'screenshot']
 
     classified = {cat: [] for cat in IMAGE_CATEGORIES}
     classified["other"] = []
@@ -242,22 +269,28 @@ async def analyze_all_materials(
     # 🔴 部门调查统计：dept_map_key -> {option -> count}
     dept_tallies = {}
 
-    # 分离文字文档（需 vision OCR）和场景照片（直接分类）
+    # 分离：文字文档（需 vision OCR）/ 模糊图片（需 vision 分类）/ 文件名明确（直接分类）
     text_doc_images = []
+    ambiguous_images = []
     for img_path in images:
         fname = os.path.basename(img_path).lower()
         fdir = os.path.dirname(img_path).lower() if os.path.dirname(img_path) else ""
-        is_scene = any(kw in fname or kw in fdir for kw in SCENE_KEYWORDS)
         is_text_doc = any(kw in fname or kw in fdir for kw in TEXT_DOC_KEYWORDS)
-        if is_text_doc and not is_scene and llm_service:
-            text_doc_images.append(img_path)
+        is_clear_name = any(kw in fname for kw in CLEAR_FILENAME_KEYWORDS)
+        is_ambiguous = any(fname.startswith(p) for p in AMBIGUOUS_PREFIXES) or \
+                       re.match(r'^\d+\.(jpg|png|jpeg)$', fname)
+        if is_text_doc and llm_service:
+            text_doc_images.append(img_path)  # 文字文档 → vision OCR
+        elif is_ambiguous and llm_service:
+            ambiguous_images.append(img_path)  # 模糊命名 → vision 分类
         else:
-            # 🔴 场景照片/公示栏 → 直接按文件名/文件夹分类，塞入备用
+            # 文件名明确 → 直接按文件名/文件夹分类
             cat = classify_image_by_filename(img_path) or "other"
             classified[cat].append(img_path)
 
-    # 🔴 文字文档并发 vision OCR（限并发数，避免 API 限流）
-    if text_doc_images and llm_service:
+    # 🔴 文字文档 + 模糊图片 并发 vision 分类（限并发数，避免 API 限流）
+    vision_images = text_doc_images + ambiguous_images
+    if vision_images and llm_service:
         sem = asyncio.Semaphore(6)
 
         async def _ocr_one(img_path):
@@ -269,12 +302,14 @@ async def analyze_all_materials(
                     vr = {}
                 return img_path, vr
 
-        vision_results = await asyncio.gather(*[_ocr_one(p) for p in text_doc_images])
+        vision_results = await asyncio.gather(*[_ocr_one(p) for p in vision_images])
 
         for img_path, vision_result in vision_results:
             cat = vision_result.get("category", "other")
-            if cat in classified:
-                classified[cat].append(img_path)
+            # 🔴 vision 返回的是中文类别（调查问卷/公告公示/专家评审/地图红线/现场照片等），映射到英文 key
+            cat_key = _map_vision_category(cat)
+            if cat_key in classified:
+                classified[cat_key].append(img_path)
             else:
                 classified["other"].append(img_path)
             if vision_result.get("has_text"):

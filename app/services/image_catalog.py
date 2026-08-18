@@ -213,7 +213,7 @@ def _classify_filename(name: str, folder_hint: str = "") -> str:
     if any(k in nl for k in ['问卷', '调查表', '统计表', '签到表', '测评表', '签到']):
         return "survey"
     # Expert review — specific meeting types
-    if any(k in nl for k in ['专家意见', '专家签字', '专家组', '评审意见']):
+    if any(k in nl for k in ['专家意见', '专家签字', '专家组', '评审意见', '综合意见']):
         return "review"
     # Maps — broader map keywords (after more specific checks)
     if any(k in nl for k in ['地图', '红线', '勘测', '测定', '地形', '宗地']):
@@ -230,13 +230,17 @@ def _classify_filename(name: str, folder_hint: str = "") -> str:
     # Survey/questionnaire (broader)
     if any(k in nl for k in ['问卷', '调查']):
         return "survey"
+    # 🔴 Meeting/座谈会照片（座谈/开会/会议/村民）
+    if any(k in nl for k in ['座谈', '开会', '会议', '村民会', '群众会', '村民代表']):
+        return "meeting"
+    # 🔴 公司资质/证书
+    if any(k in nl for k in ['执照', '证书', '资质', '备案']):
+        return "cert"
     # Site photos — check after specific categories
-    if any(k in nl for k in ['座谈', '走访', '入户', '村民代表', '群众']):
+    if any(k in nl for k in ['现场', '勘察', '地块现状', '临时用地', '房屋现状', '走访', '照片']):
         return "photo"
-    if any(k in nl for k in ['现场', '勘察', '地块现状', '临时用地', '房屋现状']):
-        return "photo"
-    # Meeting/WeChat photos (least specific — catch remaining)
-    if any(k in nl for k in ['微信图片', '会议', '开会']):
+    # WeChat photos (least specific — catch remaining, vision 分类会进一步细分)
+    if any(k in nl for k in ['微信图片', '图片']):
         return "photo"
     return "other"
 

@@ -107,6 +107,11 @@ MEETING_OCR_PROMPT = """请提取这份座谈会记录/签到表的内容。
 3. 主要讨论内容
 4. 群众诉求（完整段落）
 5. 会议结论
+6. 🔴 问卷统计（如果文档里有问卷/调查统计数据，必须提取）：
+   - 问卷发放总数、回收总数、有效数
+   - 支持人数、反对人数、无所谓人数
+   - 支持率、反对率、知晓率（百分比数值）
+   - 各选项的人数分布
 
 输出JSON：
 {
@@ -115,7 +120,13 @@ MEETING_OCR_PROMPT = """请提取这份座谈会记录/签到表的内容。
   "attendees": "",
   "discussion": "讨论内容完整段落",
   "public_demands": "群众诉求完整段落",
-  "conclusion": "会议结论"
+  "conclusion": "会议结论",
+  "total_samples": "问卷发放总数（无则空）",
+  "support_count": "支持人数（无则空）",
+  "oppose_count": "反对人数（无则空）",
+  "support_rate": "支持率（无则空）",
+  "oppose_rate": "反对率（无则空）",
+  "awareness_rate": "知晓率（无则空）"
 }"""
 
 GENERAL_OCR_PROMPT = """请精确提取这份文档的所有文字内容。
@@ -685,6 +696,19 @@ class PDFDataExtractor:
                 fillable["discussion_paragraph"] = str(key_data["discussion_text"])
             if key_data.get("conclusion_text"):
                 fillable["conclusion_paragraph"] = str(key_data["conclusion_text"])
+            # 🔴 座谈会 PDF 里的问卷统计数据 → 填入 filled_data
+            if key_data.get("total_samples"):
+                fillable["total_samples"] = str(key_data["total_samples"])
+            if key_data.get("support_count"):
+                fillable["support_count"] = str(key_data["support_count"])
+            if key_data.get("oppose_count"):
+                fillable["oppose_count"] = str(key_data["oppose_count"])
+            if key_data.get("support_rate"):
+                fillable["support_rate"] = str(key_data["support_rate"])
+            if key_data.get("oppose_rate"):
+                fillable["oppose_rate"] = str(key_data["oppose_rate"])
+            if key_data.get("awareness_rate"):
+                fillable["awareness_rate"] = str(key_data["awareness_rate"])
 
         elif doc_data.document_type == "survey":
             for page in doc_data.pages:

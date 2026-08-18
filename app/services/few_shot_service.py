@@ -147,6 +147,8 @@ class FewShotService:
                 if chapter_num > 0:
                     ch_text = self._extract_chapter(cand.get("text", ""), chapter_num)
                     if ch_text:
+                        # 🔴 清洗范文：剥离具体公司/项目数据/文号 → 占位符，防止数据泄漏到生成报告
+                        ch_text = self._clean_example(ch_text)
                         entry["chapter_content"] = ch_text[:3000]
                 else:
                     entry["full_text"] = (cand.get("text", "") or "")[:8000]
@@ -241,6 +243,22 @@ class FewShotService:
             end = len(text)
 
         return text[start:end].strip()
+
+    def _clean_example(self, text: str) -> str:
+        """清洗范文：剥离具体公司/项目数据/文号 → 占位符，防止数据泄漏。
+
+        复用严格版清洗（cleaning_pipeline 的三个严格 handler）：
+        - 公司信息 → {实施单位}
+        - 项目数据（面积/文号/户数/日期/百分比）→ 占位符
+        - 老旧政策 → 丢弃
+        """
+        try:
+            from app.services.cleaning_pipeline import cleaning_pipeline
+            cleaned = cleaning_pipeline.execute(text, cleaning_pipeline.get_default_config())
+            return cleaned if cleaned.strip() else text
+        except Exception as e:
+            logger.warning(f"Few-shot example cleaning failed: {e}")
+            return text
 
 
 # ── Sync cache for prompt-time access ──

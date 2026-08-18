@@ -175,6 +175,24 @@ class ReportAssembler:
         if orig_names and isinstance(filled, dict):
             filled["_image_original_names"] = orig_names
 
+        # 🔴 强制修正文号：把错误的"XX征告〔XXXX〕N号"统一为 doc_reference 的文号
+        correct_doc = str(filled.get("doc_reference", "") or "")
+        if correct_doc:
+            doc_num_match = re.search(r'(\d+)\s*号', correct_doc)
+            if doc_num_match:
+                correct_num = doc_num_match.group(1)
+                for ch_num in range(1, 11):
+                    ch_data = chapters.get(ch_num, {})
+                    if isinstance(ch_data, dict) and ch_data.get("markdown"):
+                        md = ch_data["markdown"]
+                        # 只替换"征告"类项目文号，不碰法规文号（苏政发/发改投资等）
+                        md = re.sub(
+                            rf'洪?拟征告\s*〔\d{{4}}〕\s*(?!{re.escape(correct_num)}\s*号)\d+\s*号',
+                            f'洪拟征告〔2026〕{correct_num}号',
+                            md
+                        )
+                        ch_data["markdown"] = md
+
         # Cleanup placeholders
         for ch_num in range(1, 11):
             ch_data = chapters.get(ch_num, {})
@@ -1732,23 +1750,31 @@ class ReportAssembler:
         (['决策实施周期'], (13.45, 10.12)),
         (['风险评估流程'], (13.69, 12.45)),
         (['评估公示内容'], (16.48, 11.65)),
-        (['决策位置', '位置示意图', '征地范围图'], (10.91, 15.5)),
+        (['决策位置', '位置示意图', '位置图', '征地范围图', '红线图', '勘测定界图'], (10.91, 15.5)),
         (['决策网络舆情'], (4.6, 4.41)),
         (['单位调查问卷', '公众调查问卷'], (10.39, 7.34)),
-        (['座谈会'], (5.43, 7.23)),
-        (['现场照片'], (5.44, 7.25)),
-        (['公示照片'], (5.39, 7.18)),
+        (['签到表', '座谈会', '会议照片', '走访照片'], (5.43, 7.23)),
+        (['现场照片', '勘查照片', '踏勘照片'], (5.44, 7.25)),
+        (['公示照片', '公告照片', '张贴照片'], (5.39, 7.18)),
         (['会议纪要'], (20.51, 14.95)),
-        (['调查问卷'], (21.84, 15.45)),
-        (['公告'], (21.35, 14.84)),
+        (['调查问卷', '问卷调查', '问卷'], (21.84, 15.45)),
+        (['公告', '预公告', '征收公告'], (21.35, 14.84)),
+        (['专家评审', '评审意见'], (10.91, 15.5)),
     ]
 
     def _match_image_size(self, caption: str):
-        """按图注关键词匹配图片尺寸（cm），无匹配返回 None。"""
+        """按图注关键词匹配图片尺寸（cm），无匹配返回 None。
+
+        图注格式可能是「位置示意图：位置图11」或「问卷调查及签到表：签到表」，
+        取冒号前的关键词部分做匹配（冒号后是文件名/编号，干扰匹配）。
+        """
         if not caption:
             return None
+        # 🔴 取冒号前的部分（图注类型），去掉冒号后的文件名干扰
+        clean = caption.split('：')[0].split(':')[0].strip()
+        # 用完整图注 + 冒号前部分 双重匹配，提高命中率
         for keywords, size in self.IMAGE_SIZE_SPECS:
-            if any(kw in caption for kw in keywords):
+            if any(kw in clean for kw in keywords) or any(kw in caption for kw in keywords):
                 return size
         return None
 

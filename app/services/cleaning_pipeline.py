@@ -536,7 +536,7 @@ class ProjectDataPlaceholderer(CleaningHandler):
     # 面积：数字 + 亩/平方米/㎡/公顷
     _AREA_RE = re.compile(r'\d+(?:\.\d+)?\s*(?:亩|平方米|㎡|公顷|ha)')
     # 文号：XX拟征告〔YYYY〕N号 / 政规〔YYYY〕N号 / 政发〔YYYY〕N号
-    _DOC_REF_RE = re.compile(r'[一-鿿]{0,10}(?:拟征告|征告|政规|政发|规|发)\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号')
+    _DOC_REF_RE = re.compile(r'[一-鿿]{0,10}(?:拟征告|征预告|预告|征告|政规|政发|规|发)\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号')
     # 户数/人数：数字 + 户/人
     _COUNT_RE = re.compile(r'\d+\s*(?:户|人|份)')
     # 日期：YYYY年M月D日 / YYYY-MM-DD

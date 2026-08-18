@@ -633,8 +633,14 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
 
     issues = []
     # 硬规则
+    # 🔴 AI套词直接自动删除，不触发整章重试（避免为删一个词重写整章浪费时间）
     found_bw = [b for b in AI_BUZZWORDS if b in md]
-    if found_bw: issues.append(f"AI套词: {found_bw}")
+    if found_bw:
+        for bw in found_bw:
+            md = md.replace(bw, '')
+        ch["raw_content"] = md
+        logs.append(f"  ✂️ 第{ch_num}章自动删除AI套词: {found_bw}")
+        logger.info(f"[REVIEW] 第{ch_num}章自动删除AI套词: {found_bw}")
     if len(md) < 300: issues.append(f"字数不足({len(md)})")
     # 孤立的表格标题
     has_md_table = bool(re.search(r'\|[^\n]+\|\s*\n\s*\|[\s:\-—|]+\|', md))
@@ -741,17 +747,21 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         rewrite_chapters = result.get("regenerate_chapters", [])
         quality_round = state.get("_quality_round", 0)
         if rewrite_chapters and quality_round < MAX_QUALITY_ROUNDS:
+            # 🔴 控制每轮重写章节数（避免全量重写拖时间，最多8章/轮）
+            rewrite_list = sorted(rewrite_chapters)[:8]
+            if len(rewrite_chapters) > 8:
+                logs.append(f"⚠️ 需重写章节过多({len(rewrite_chapters)})，本轮只重写前{len(rewrite_list)}章，其余下轮处理")
             # 设置重写队列：把需重写的章节号记录，路由回生成
-            state["_quality_rewrite_chapters"] = [int(c) for c in rewrite_chapters]
+            state["_quality_rewrite_chapters"] = rewrite_list
             state["_quality_rewrite_issues"] = {
                 str(c): [i.get("message","") for i in result.get("all_issues", [])
                          if i.get("chapter") == c and i.get("severity") == "critical"]
-                for c in rewrite_chapters
+                for c in rewrite_list
             }
             state["_quality_round"] = quality_round + 1
             state["_chapter_idx"] = 0  # 从头重写问题章节
             state["_next_action"] = "quality_rewrite"
-            logs.append(f"🔄 第{quality_round + 1}轮质量修正：重写 {len(rewrite_chapters)} 章")
+            logs.append(f"🔄 第{quality_round + 1}轮质量修正：重写 {len(rewrite_list)} 章")
             await _emit("quality", {"analysis":"done","outline":"done","generation":"running","quality":"running","assembly":"pending"})
             return state
     except Exception as e:

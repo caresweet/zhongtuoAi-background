@@ -1126,6 +1126,10 @@ class ReportAssembler:
         # Fix section numbering: "1 . 1" → "1.1", "1 .1" → "1.1", etc.
         markdown = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', markdown)
         markdown = re.sub(r'^### (第[一二三四五六七八九十\d]+章\s)', r'## \1', markdown, flags=re.MULTILINE)
+        # 🔴 清理 LLM 生成的"# 数字 章标题"重复（如 "# 2 评估过程、方法和依据"）
+        markdown = re.sub(r'^#{1,3}\s*\d+\s+[^\n]+\n', '', markdown, flags=re.MULTILINE)
+        # 🔴 清理图片标记残留（如 "[现场勘查照片：图片1]"）——不是实际图片路径的标记
+        markdown = re.sub(r'^\[[^\]]*照片[：:][^\]]*\]\s*\n', '', markdown, flags=re.MULTILINE)
 
         # Safety: ensure markdown is a string
         if not isinstance(markdown, str):

@@ -292,6 +292,10 @@ class QualityReviewAgent(BaseAgent):
             tbl_issues = self._check_table_format(markdown, ch_num)
             chapter_issues.setdefault(ch_num, []).extend(tbl_issues)
 
+            # 🔴 结构问题检查：空小节 / 标题重复 / 责任单位过度描述
+            struct_issues = self._check_structure_issues(markdown, ch_num)
+            chapter_issues.setdefault(ch_num, []).extend(struct_issues)
+
         # ═══════════════════════════════════════════════════════════
         # Step 2.5: 🔴 Enhanced data validity checks (per-chapter)
         # ═══════════════════════════════════════════════════════════
@@ -921,6 +925,24 @@ class QualityReviewAgent(BaseAgent):
 
         doc_id = doc_match.group(0)
 
+        # 🔴 文号唯一性检查：全文所有章节只能出现这一个文号，禁止编造其他文号（如10号 vs 7号）
+        doc_num_match = re.search(r'(\d+)\s*号', doc_id)
+        doc_num = doc_num_match.group(1) if doc_num_match else None
+        if doc_num:
+            wrong_pattern = rf'[^\s]{{1,6}}征告\s*〔?\d{{4}}〕?\s*(?!{re.escape(doc_num)}\s*号)\d+\s*号'
+            for ch_num, ch_data in chapters.items():
+                if not isinstance(ch_data, dict):
+                    continue
+                md = ch_data.get("markdown", "")
+                for m in re.finditer(wrong_pattern, md):
+                    issues.append({
+                        "chapter": ch_num,
+                        "type": "wrong_doc_number",
+                        "severity": "critical",
+                        "message": f"第{ch_num}章出现错误文号：{m.group(0)}（应为 {doc_id}），请统一修正",
+                        "suggestion": "auto_fix",
+                    })
+
         for ch_num, ch_data in chapters.items():
             if not isinstance(ch_data, dict) or ch_num == 1:
                 continue
@@ -1227,6 +1249,90 @@ class QualityReviewAgent(BaseAgent):
     # ═══════════════════════════════════════════════════════════════
     # Format Checks
     # ═══════════════════════════════════════════════════════════════
+
+    def _check_structure_issues(self, markdown: str, ch_num: int) -> List[Dict]:
+        """检查章节结构问题：空小节 / 标题重复 / 责任单位过度描述。
+
+        对应专家反复指出的问题：
+        - 1.2 决策主体空内容
+        - 1.3 稳评责任单位过多描述（应只写单位名称）
+        - 章节标题重复
+        """
+        issues = []
+        if not markdown:
+            return issues
+
+        # 1. 空小节检测：小节标题后紧跟下一标题，中间无内容
+        lines = markdown.split('\n')
+        heading_positions = []
+        for idx, line in enumerate(lines):
+            s = line.strip()
+            if re.match(r'^#{1,3}\s+\d+\.\d+', s) or re.match(r'^\d+\.\d+\s', s):
+                heading_positions.append((idx, s))
+
+        for i, (idx, heading) in enumerate(heading_positions):
+            # 下一标题位置
+            next_idx = heading_positions[i + 1][0] if i + 1 < len(heading_positions) else len(lines)
+            # 检查标题到下一标题之间是否有实质内容
+            content_between = [l.strip() for l in lines[idx + 1:next_idx] if l.strip() and not l.strip().startswith('|')]
+            real_content = [c for c in content_between if not re.match(r'^#{1,3}\s', c)]
+            if not real_content:
+                heading_text = re.sub(r'^#+\s*', '', heading).strip()
+                issues.append({
+                    "chapter": ch_num,
+                    "type": "empty_section",
+                    "severity": "critical",
+                    "message": f"第{ch_num}章小节「{heading_text}」内容为空",
+                    "suggestion": "regenerate",
+                })
+
+        # 2. 标题重复检测
+        headings = [re.sub(r'^#+\s*', '', l.strip()) for l in lines if re.match(r'^#{1,3}\s+\d+\.\d+', l.strip())]
+        seen = set()
+        for h in headings:
+            clean = h[:20]
+            if clean in seen:
+                issues.append({
+                    "chapter": ch_num,
+                    "type": "duplicate_heading",
+                    "severity": "warning",
+                    "message": f"第{ch_num}章标题重复：「{h}」",
+                    "suggestion": "regenerate",
+                })
+            seen.add(clean)
+
+        # 3. 稳评责任单位/实施单位过度描述（应只写单位名称）
+        for section_name in ['稳评责任单位', '稳评实施单位']:
+            # 找到该小节，检查是否有超过2句的职责描述
+            m = re.search(rf'#+\s*\d+\.\d+\s+{section_name}\s*\n(.*?)(?=\n#+\s*\d+\.\d+|\Z)', markdown, re.DOTALL)
+            if m:
+                section_body = m.group(1).strip()
+                # 如果小节正文超过2句（含"负责"、"统筹"等职责词且超过50字），说明过度描述
+                sentences = re.split(r'[。\n]', section_body)
+                sentences = [s for s in sentences if len(s) > 5]
+                if len(sentences) > 2 and any(kw in section_body for kw in ['负责', '统筹', '组织', '协调']):
+                    issues.append({
+                        "chapter": ch_num,
+                        "type": "over_description",
+                        "severity": "error",
+                        "message": f"第{ch_num}章「{section_name}」描述过多，应只写单位名称（如'XX人民政府、XX公司'），删除职责/能力描述",
+                        "suggestion": "regenerate",
+                    })
+
+        # 4. 表格数据不完整（含【待补充】的表）
+        table_pattern = r'(\|.+\|(?:\n\|.+\|)+)'
+        for table in re.findall(table_pattern, markdown):
+            if '待补充' in table:
+                issues.append({
+                    "chapter": ch_num,
+                    "type": "table_incomplete",
+                    "severity": "error",
+                    "message": f"第{ch_num}章存在表格数据未填充（含【待补充】），应从资料提取真实数据",
+                    "suggestion": "regenerate",
+                })
+                break
+
+        return issues
 
     def _check_table_format(self, markdown: str, ch_num: int) -> List[Dict]:
         """Check table formatting within a chapter."""

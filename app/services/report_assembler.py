@@ -207,14 +207,22 @@ class ReportAssembler:
         extracted_tables = self._get_extracted_tables(state)
 
         # ── Chapters ──
+        # 🔴 图片放置记录：ch_num → [{path, caption, fname}]，供审核 agent 观察图片位置/命名
+        self._image_placements = {}
+        self._current_chapter = 0
         for ch_num in range(1, 11):
             ch_data = chapters.get(ch_num, {})
             if isinstance(ch_data, dict) and ch_data.get("markdown"):
                 markdown = ch_data["markdown"]
+                self._current_chapter = ch_num
                 self._add_chapter(doc, ch_num, markdown, image_files, survey_stats,
                                   extracted_tables.get(ch_num, []), filled)
                 if ch_num < 10:
                     doc.add_page_break()
+        self._current_chapter = 0
+        # 把图片放置记录写回 state，供审核 agent 读取
+        state["_image_placements"] = self._image_placements
+        state["_unmatched_images"] = self._unmatched_image_markers
 
         # ── 法律法规依据（独立章节） ──
         doc.add_page_break()
@@ -1748,6 +1756,17 @@ class ReportAssembler:
         img_path = self._resolve_image_path(image_ref)
         # 🔴 Global dedup: skip if already inserted
         img_key = str(img_path)
+        # 🔴 记录图片放置信息（供审核 agent 观察图片位置/命名）
+        try:
+            if hasattr(self, '_image_placements'):
+                ch = getattr(self, '_current_chapter', 0)
+                self._image_placements.setdefault(ch, []).append({
+                    "path": str(img_path),
+                    "caption": (caption or "")[:60],
+                    "fname": os.path.basename(str(img_path))[:60],
+                })
+        except Exception:
+            pass
         if img_key in self._inserted_images:
             return
         self._inserted_images.add(img_key)

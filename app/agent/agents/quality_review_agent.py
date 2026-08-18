@@ -300,6 +300,11 @@ class QualityReviewAgent(BaseAgent):
             img_issues = self._check_image_issues(markdown, ch_num)
             chapter_issues.setdefault(ch_num, []).extend(img_issues)
 
+        # 🔴 图片放置检查（观察最终 DOCX 的图片位置/命名）
+        placement_issues = self._check_image_placements(state)
+        for pi in placement_issues:
+            chapter_issues.setdefault(pi.get("chapter", 0), []).append(pi)
+
         # ═══════════════════════════════════════════════════════════
         # Step 2.5: 🔴 Enhanced data validity checks (per-chapter)
         # ═══════════════════════════════════════════════════════════
@@ -1371,6 +1376,71 @@ class QualityReviewAgent(BaseAgent):
                 "message": f"第{ch_num}章存在图片标记残留「{'、'.join(r[:15] for r in residual[:3])}」，应插入实际图片或删除标记",
                 "suggestion": "regenerate",
             })
+
+        return issues
+
+    def _check_image_placements(self, state: dict) -> List[Dict]:
+        """检查最终 DOCX 的图片放置：位置错乱 / 命名不规范 / 图片未放对位置。
+
+        数据来源：assembler 组装时记录的 state["_image_placements"]（ch_num → 图片列表）
+        - 位置示意图应在第1章，公告图应在第3章，评审图应在第5/8/9章
+        - 图注应为"图X-X 描述"规范格式，不应是 pdf_xxx 原始文件名
+        - 未匹配到图片的图注标记（_unmatched_images）
+        """
+        issues = []
+        placements = state.get("_image_placements", {})
+        unmatched = state.get("_unmatched_images", [])
+
+        if not placements and not unmatched:
+            return issues
+
+        # 1. 各章节应放置的图片类型（图注关键词 → 期望章节）
+        expected = {
+            '位置': [1], '示意': [1], '勘测': [1],
+            '公示': [3], '公告': [3], '预公告': [3],
+            '问卷': [3], '调查': [3],
+            '评审': [5, 8, 9], '意见': [5, 8, 9],
+            '现场': [2], '勘察': [2], '座谈': [3, 6],
+        }
+
+        for ch_num, imgs in placements.items():
+            if not isinstance(imgs, list) or ch_num == 0:
+                continue
+            for img in imgs:
+                caption = img.get("caption", "") or ""
+                fname = img.get("fname", "") or ""
+                # 2. 图注命名不规范：原始文件名（pdf_xxx / 微信图片_xxx）当图注
+                if re.match(r'^(pdf_|微信图片_|图片\d+|dsc_|img_)', caption):
+                    issues.append({
+                        "chapter": ch_num,
+                        "type": "image_bad_caption",
+                        "severity": "warning",
+                        "message": f"第{ch_num}章图片图注不规范：'{caption}'（原始文件名），应改为'图X-X 描述'格式",
+                        "suggestion": "manual_fix",
+                    })
+                    continue
+                # 3. 图片位置错乱：图注关键词期望的章节 vs 实际放置章节
+                for kw, exp_chs in expected.items():
+                    if kw in caption and ch_num not in exp_chs:
+                        issues.append({
+                            "chapter": ch_num,
+                            "type": "image_wrong_chapter",
+                            "severity": "warning",
+                            "message": f"图片「{caption}」包含'{kw}'，应放在第{'、'.join(map(str, exp_chs))}章，实际放在第{ch_num}章",
+                            "suggestion": "manual_fix",
+                        })
+                        break
+
+        # 4. 未匹配到图片的图注标记
+        for um in unmatched:
+            if isinstance(um, dict):
+                issues.append({
+                    "chapter": um.get("chapter", 0),
+                    "type": "image_no_match",
+                    "severity": "warning",
+                    "message": f"第{um.get('chapter', 0)}章图注「{um.get('caption', '')}」未匹配到对应图片",
+                    "suggestion": "manual_fix",
+                })
 
         return issues
 

@@ -624,7 +624,9 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     #     LLM 盲写导致同样问题复发（日志中 6/9 章重写后仍不过审即由此造成）。
     #     只要 review_msg 有内容（普通重试或终稿质量重写）就应携带反馈。
     if ch.get("review_msg"):
-        fb_parts = [ch["review_msg"]]
+        # 🔴 优先用带修正建议的结构化反馈（review_feedback），比粗描述更能让 agent 定向修复
+        review_body = ch.get("review_feedback") or ch.get("review_msg") or ""
+        fb_parts = [review_body]
         if ch_data:
             fb_parts.append("\n## 📋 本章可用数据（只有这些数据是真实的，其他一律不准编造）")
             for k, v in ch_data.items():
@@ -716,7 +718,9 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
 
     from app.validation.content_guardrails import AI_BUZZWORDS
 
-    issues = []
+    # 🔴 结构化问题项（每项含 type/severity/message/correction/disposition，
+    #    供前端展示、重写反馈、章节 agent 定向修复）
+    issue_items = []
     # 硬规则
     # 🔴 AI套词直接自动删除，不触发整章重试（避免为删一个词重写整章浪费时间）
     found_bw = [b for b in AI_BUZZWORDS if b in md]
@@ -726,29 +730,66 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
         ch["raw_content"] = md
         logs.append(f"  ✂️ 第{ch_num}章自动删除AI套词: {found_bw}")
         logger.info(f"[REVIEW] 第{ch_num}章自动删除AI套词: {found_bw}")
-    if len(md) < 300: issues.append(f"字数不足({len(md)})")
+    if len(md) < 300:
+        issue_items.append({
+            "type": "word_count", "severity": "warning",
+            "message": f"本章字数不足（仅{len(md)}字），未达到最低字数要求",
+            "correction": "按 DB32/T4013-2021 规范和章节要点充实内容，每个要点写足篇幅，避免空话",
+            "disposition": "ai_rewrite",
+        })
     # 孤立的表格标题
     has_md_table = bool(re.search(r'\|[^\n]+\|\s*\n\s*\|[\s:\-—|]+\|', md))
     has_table_title = bool(re.search(r'表\s*\d+[-—]\d+', md))
     if has_table_title and not has_md_table:
-        issues.append("存在孤立的表格标题（表X-X 但没有表格内容）")
+        issue_items.append({
+            "type": "missing_table", "severity": "warning",
+            "message": "存在孤立表格标题：写了「表X-X」但没有对应表格内容",
+            "correction": "补上表格内容，或删除孤立的表格标题",
+            "disposition": "ai_rewrite",
+        })
 
     # 编造数据检查
     has_survey = bool(filled.get("total_samples") or filled.get("support_rate") or filled.get("survey_total_count"))
     if not has_survey:
         fake_rates = re.findall(r'(\d+\.?\d*)\s*%', md)
         if len(fake_rates) > 1:
-            issues.append(f"编造百分比({len(fake_rates)}处)，用户未提供问卷数据，应标注【待补充】")
+            issue_items.append({
+                "type": "fabricated_data", "severity": "critical",
+                "message": f"编造百分比：出现 {len(fake_rates)} 处百分比数据，但用户未提供问卷数据",
+                "correction": "改为【待补充：问卷调查数据未提供】，不得编造百分比",
+                "disposition": "human",
+            })
         fake_counts = re.findall(r'(?:发放|回收|共|有效问卷|涉及|收回)\s*(\d+)\s*(?:份|户|人|张)', md)
         if fake_counts:
-            issues.append(f"编造统计数据({', '.join(fake_counts[:5])})，用户未提供问卷数据")
+            issue_items.append({
+                "type": "fabricated_data", "severity": "critical",
+                "message": f"编造统计数据：「{'、'.join(fake_counts[:5])}」等，用户未提供问卷数据",
+                "correction": "改为【待补充】，不得编造问卷/户数等统计值",
+                "disposition": "human",
+            })
 
     # 评分范围
     scores = re.findall(r'(-?\d+(?:\.\d+)?)\s*分', md)
     for s in scores:
         v = float(s)
-        if v < 0: issues.append(f"负分({v})"); break
-        if v > 100: issues.append(f"超100分({v})"); break
+        if v < 0:
+            issue_items.append({
+                "type": "score_out_of_range", "severity": "critical",
+                "message": f"评分异常：出现负数评分「{v}分」",
+                "correction": "评分必须在0-100范围内，请核对评分项来源（DB32/T4013-2021 量化指标），修正为合理分值",
+                "disposition": "ai_rewrite",
+            })
+            break
+        if v > 100:
+            issue_items.append({
+                "type": "score_out_of_range", "severity": "critical",
+                "message": f"评分异常：评分「{v}分」超过100分上限",
+                "correction": "评分必须在0-100范围内，请核对评分项及计算",
+                "disposition": "ai_rewrite",
+            })
+            break
+
+    issues = [it["message"] for it in issue_items]
 
     # 🔴 每个章节维护独立的重试计数器（替代全局 _chapter_retry）
     human_items = state.setdefault("human_items", {})
@@ -763,6 +804,19 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
     if issues:
         ch["review_msg"] = "; ".join(issues)
         ch["review_score"] = max(0, 85 - len(issues)*15)
+        # 🔴 结构化问题记录进 chapter_audits（前端人工面板展示精确描述+修正建议）
+        audits = state.setdefault("chapter_audits", {})
+        audits[ch_num] = [
+            {k: it.get(k, "") for k in ("type", "severity", "message", "correction", "disposition")}
+            for it in issue_items
+        ]
+        state["chapter_audits"] = audits
+        # 🔴 重写反馈：携带每条问题的「修正建议」，让章节 agent 定向修复而非盲写
+        fb_lines = []
+        for it in issue_items:
+            corr = f"（修正建议：{it['correction']}）" if it.get("correction") else ""
+            fb_lines.append(f"- [{it['severity']}] {it['message']}{corr}")
+        ch["review_feedback"] = "\n".join(fb_lines)
         logs.append(f"  ⚠️ 第{ch_num}章: {ch['review_msg']}")
         logger.info(f"[REVIEW] 第{ch_num}章审查问题: {ch['review_msg']} retry={used_retries}/{max_retries} 重试机会={used_retries + 1 < max_retries}")
         if used_retries + 1 < max_retries:

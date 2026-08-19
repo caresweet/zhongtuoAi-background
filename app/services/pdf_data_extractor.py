@@ -718,14 +718,16 @@ class PDFDataExtractor:
             1 for sd in pages_structured
             if sd.get("awareness_rate") not in (None, "", "0%", "0", 0)
         )
-        # 问卷总数：优先显式 total_samples；否则 = 有表态记录(支持/反对/知晓)的页数（逐人逐页）
+        # 问卷总数：取「显式 total_samples」与「有表态记录页数」的较大值。
+        # 🔴 个别页的 total_samples 字段可能只是局部值（如某页写"2"），
+        #    而逐人逐页 PDF 的真实调查总数 = 有表态记录的页数，两者取 max 更可靠。
         surveyed_pages = [
             sd for sd in pages_structured
             if sd.get("support_count") not in (None, "", "0", 0)
             or sd.get("oppose_count") not in (None, "", "0", 0)
             or sd.get("awareness_rate") not in (None, "", "0%", "0", 0)
         ]
-        total = explicit_total if explicit_total > 0 else len(surveyed_pages)
+        total = max(explicit_total, len(surveyed_pages))
 
         if total > 0:
             aggregated["total_samples"] = total

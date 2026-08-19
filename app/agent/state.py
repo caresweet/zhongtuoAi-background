@@ -26,6 +26,70 @@ class ChapterContent(TypedDict, total=False):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Skill 审核 → 章节级审核任务 / 人工干预状态
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ChapterAuditItem(TypedDict, total=False):
+    """单章审核项：Skill/终稿审核原始输出解析后的章节级任务。
+
+    disposition 是关键：决定这条违规走「AI 自动重写」还是「人工介入」。
+    """
+    chapter: int                       # 章节号 1-10
+    type: str                          # 违规类型（expert_skill_violation / fabricated_data / ...）
+    severity: str                      # critical | error | warning | info
+    message: str                       # 违规描述（喂给前端 + 重写 prompt）
+    correction: str                    # 纠正写法（若有，喂给重写 prompt）
+    disposition: str                   # ai_rewrite | human | auto_fix | warning
+    skill_rule_id: Optional[int]       # 命中的 review_skills.id（溯源）
+    rule_pattern: Optional[str]        # 命中的正则/关键词
+    match: Optional[str]               # 命中的原文片段（用于 docx 批注定位）
+
+
+class ChapterHumanState(TypedDict, total=False):
+    """单章人工干预状态（每章独立维护）。"""
+    chapter: int
+    retry_count: int                   # 🔴 本章独立重试计数器（替代全局 _chapter_retry）
+    max_retry: int                     # 本章允许的最大 AI 重试次数（默认 = MAX_RETRY）
+    in_human_queue: bool               # 是否已推入人工待处理队列
+    queued_at: Optional[str]           # 入队时间 ISO
+    # —— 前端写入的三个字段 ——
+    human_opinion: str                 # 人工修改思路（模式1：交给 AI 重写）
+    human_override: bool               # 是否人工直接改写了内容（模式2a）
+    human_approved: bool               # 人工审批放行（模式2b：跳过后续 AI 审核重写）
+    override_content: Optional[str]    # 人工直接改写的章节全文
+    approved_at: Optional[str]
+    status: str                        # queued | ai_rewriting | human_reviewed | approved | passed
+
+
+class ReportState(TypedDict, total=False):
+    """报告工作流状态（增量扩展 ReportWorkflowState=dict）。
+
+    与 report_workflow.py 的 dict 兼容：所有字段都是可选、渐进写入，
+    不破坏现有 node 的读写。新增字段集中在审核/人工干预闭环。
+    """
+    # —— 现有字段（沿用，不重复定义）——
+    session_id: str
+    chapters: Dict[int, Dict[str, Any]]            # {ch_num: {"markdown","title","status",...}}
+    filled_data: Dict[str, str]
+    outline_list: List[Dict[str, Any]]
+
+    # —— 🔴 新增：Skill 违规解析结果 ——
+    chapter_audits: Dict[int, List[ChapterAuditItem]]   # 章节号 -> 该章违规列表（解析后）
+    skill_violations: List[Dict[str, Any]]              # 原始 skill 违规（含 rule_id/pattern）
+
+    # —— 🔴 新增：人工介入状态 ——
+    human_queue: List[int]                             # 待人工复核章节号（有序）
+    human_items: Dict[int, ChapterHumanState]          # 章节号 -> 人工干预状态
+
+    # —— 🔴 新增：全局质量循环 ——
+    global_quality_rounds: int                         # 全局重写轮次（替代 _quality_round）
+    max_quality_rounds: int                            # 轮次上限（替代 MAX_QUALITY_ROUNDS）
+
+    # —— 🔴 新增：导出元数据（docx 批注用）——
+    audit_meta: Dict[str, Any]                         # 完整审核元数据快照（含时间戳、skill 版本）
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main Agent State
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -268,6 +268,11 @@ class ReportAssembler:
         name, ext = filename.rsplit('.', 1) if '.' in filename else (filename, 'docx')
         filename = f"{name}_{ts}.{ext}"
         outpath = self.output_dir / filename
+        # 🔴 审核元信息写入 Word 批注（必须在 doc.save() 前的最后阶段，防止后续重写 run 导致批注错位）
+        try:
+            self._inject_audit_comments(doc, state)
+        except Exception as _ce:
+            logger.warning(f"Audit comment injection skipped: {_ce}")
         doc.save(str(outpath))
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
         return f"generated/{filename}"
@@ -2356,6 +2361,132 @@ class ReportAssembler:
         r = p.add_run(text)
         r.font.name = font; r._element.rPr.rFonts.set(qn('w:eastAsia'), font)
         r.font.size = size; r.bold = bold
+
+    # ═══════════════════════════════════════════════════════════════
+    # 审核元信息 → Word 批注（python-docx 无原生批注 API，直接操作 OOXML）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _inject_audit_comments(self, doc, state):
+        """把 Skill 违规信息 + 人工干预状态写入 Word 批注。
+
+        - 章节级违规挂在对应章节标题段上（chapter=0 全局项挂在封面标题）
+        - 完整审核元数据一次写入文首批注
+        - 无审核数据时跳过，不生成空的 comments part
+        """
+        from docx.oxml.ns import qn as _qn
+        chapter_audits = state.get("chapter_audits", {}) or {}
+        human_items = state.get("human_items", {}) or {}
+        audit = state.get("_quality_audit", {}) or {}
+        if not chapter_audits and not human_items and not audit:
+            return
+
+        comments_root = None
+        # 找到每章标题段作为批注锚点
+        ch_anchor = {}
+        for p in doc.paragraphs:
+            m = re.match(r'^第([一二三四五六七八九十\d]+)章\s', p.text.strip())
+            if m:
+                cn = m.group(1)
+                num = CN_NUM.get(cn, int(cn) if cn.isdigit() else 0)
+                if num:
+                    ch_anchor[num] = p
+        if not ch_anchor and doc.paragraphs:
+            ch_anchor[1] = doc.paragraphs[0]
+
+        for ch_num, items in chapter_audits.items():
+            try:
+                ch_num = int(ch_num)
+            except (ValueError, TypeError):
+                continue
+            anchor = ch_anchor.get(ch_num)
+            if anchor is None:
+                anchor = doc.paragraphs[0]
+            lines = []
+            for it in items:
+                lines.append(f"[{it.get('disposition', '?')}][{it.get('severity', '?')}] {it.get('message', '')}")
+            hi = human_items.get(ch_num, {})
+            if hi.get("human_approved"):
+                lines.append("✅ 人工审批通过（跳过 AI 审核重写）")
+            elif hi.get("human_override"):
+                lines.append("👤 人工直接改写内容")
+            elif hi.get("human_opinion"):
+                lines.append(f"👤 人工意见：{hi['human_opinion'][:80]}")
+            if lines:
+                comments_root = self._add_comment(doc, anchor, "\n".join(lines), comments_root)
+
+        # 完整审核元数据
+        if audit:
+            meta = (f"审核元数据 total_issues={audit.get('total_issues')} "
+                    f"critical={audit.get('critical_issues')} auto_fixed={audit.get('auto_fixed')} "
+                    f"regenerate={audit.get('regenerate_chapters')} timestamp={audit.get('timestamp', '')}")
+            comments_root = self._add_comment(doc, doc.paragraphs[0], meta, comments_root)
+
+    def _ensure_comments_part(self, doc):
+        """惰性创建 /word/comments.xml part，返回 w:comments 根元素。"""
+        cached = getattr(doc, '_audit_comments_root', None)
+        if cached is not None:
+            return cached
+        from docx.opc.part import XmlPart
+        from docx.opc.packuri import PackURI
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        from lxml import etree
+        W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        root = etree.Element('{%s}comments' % W_NS, nsmap={'w': W_NS})
+        part = XmlPart(PackURI('/word/comments.xml'),
+                       'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml',
+                       root, doc.part.package)
+        doc.part.relate_to(part, RT.COMMENTS)
+        doc._audit_comments_root = root
+        return root
+
+    def _add_comment(self, doc, anchor_para, text, comments_root=None):
+        """给指定段落追加一条 Word 批注。
+
+        在锚点段插入 <w:commentRangeStart/>…<w:commentRangeEnd/><w:commentReference/>，
+        批注内容写入 comments part。返回 comments 根元素（供下一条复用）。
+        """
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn as _qn
+        if comments_root is None:
+            comments_root = self._ensure_comments_part(doc)
+        cid = len(comments_root.findall(_qn('w:comment')))
+
+        # 批注内容
+        comment = OxmlElement('w:comment')
+        comment.set(_qn('w:id'), str(cid))
+        comment.set(_qn('w:author'), '稳评审核Agent')
+        cp = OxmlElement('w:p')
+        cr = OxmlElement('w:r')
+        ct = OxmlElement('w:t')
+        ct.set(_qn('xml:space'), 'preserve')
+        ct.text = text
+        cr.append(ct)
+        cp.append(cr)
+        comment.append(cp)
+        comments_root.append(comment)
+
+        # 锚点段标记
+        p_el = anchor_para._p
+        rs = OxmlElement('w:commentRangeStart'); rs.set(_qn('w:id'), str(cid))
+        re_ = OxmlElement('w:commentRangeEnd'); re_.set(_qn('w:id'), str(cid))
+        ref_r = OxmlElement('w:r')
+        ref = OxmlElement('w:commentReference'); ref.set(_qn('w:id'), str(cid))
+        ref_r.append(ref)
+
+        # 🔴 pPr 必须是 p 的第一个子元素，sectPr 必须是最后一个子元素
+        pPr = p_el.find(_qn('w:pPr'))
+        if pPr is not None:
+            pPr.addnext(rs)
+        else:
+            p_el.insert(0, rs)
+        sectPr = p_el.find(_qn('w:sectPr'))
+        if sectPr is not None:
+            sectPr.addprevious(re_)
+            sectPr.addprevious(ref_r)
+        else:
+            p_el.append(re_)
+            p_el.append(ref_r)
+        return comments_root
 
 
 # Singleton

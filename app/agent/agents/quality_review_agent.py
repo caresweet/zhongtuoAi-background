@@ -891,10 +891,14 @@ class QualityReviewAgent(BaseAgent):
                 md = ch_data.get("markdown", "")
                 try:
                     if re.search(pattern, md):
+                        needs_regen = not correction
                         issues.append({
                             "chapter": ch_num,
                             "type": "expert_skill_violation",
-                            "severity": severity,
+                            # 🔴 修复：无 correction 的专家规则违反必须整章重写（suggestion=regenerate），
+                            #     但原 severity 多为 warning/error，而 _classify_issue 只认 critical 才进重写队列，
+                            #     导致违规只做日志统计、从不触发重写。这里强制提升为 critical。
+                            "severity": "critical" if needs_regen else severity,
                             "message": f"第{ch_num}章违反专家规则：{desc}",
                             "correction": correction,
                             "suggestion": "auto_fix" if correction else "regenerate",

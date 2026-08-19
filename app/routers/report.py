@@ -2059,6 +2059,15 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             state["chapters"] = wf_state.get("chapters", {})
             state["output_path"] = wf_state.get("output_path", "")
             state["_outline"] = wf_state.get("_outline", {})
+            # 🔴 同步审核元数据 / 人工干预状态回 session state（供前端队列/批注查询）
+            if wf_state.get("chapter_audits"):
+                state["chapter_audits"] = wf_state.get("chapter_audits")
+            if wf_state.get("human_items"):
+                state["human_items"] = wf_state.get("human_items")
+            if wf_state.get("human_queue"):
+                state["human_queue"] = wf_state.get("human_queue")
+            if wf_state.get("_quality_audit"):
+                state["_quality_audit"] = wf_state.get("_quality_audit")
             # 🔴 Sync filled_data back — LLM-extracted fields must reach assembler
             wf_filled = wf_state.get("filled_data", {})
             if wf_filled:
@@ -2191,6 +2200,13 @@ async def resume_workflow(session_id: str, request: WorkflowResumeRequest):
     state["_workflow_paused"] = False
     state["_is_resume"] = True  # 🔴 Mark as resume so pipeline skips data check + reuses outline
     state["_pending_responses"] = user_responses  # 🔴 For LangGraph Command(resume=...)
+    # 🔴 人工干预闭环：把前端提交的 human_items/human_queue 带进 LangGraph 恢复载荷，
+    #    使 node_quality_review 的 interrupt 返回后能读回人工意见并驱动重写。
+    if isinstance(user_responses, dict):
+        if state.get("human_items"):
+            user_responses.setdefault("human_items", state["human_items"])
+        if state.get("human_queue"):
+            user_responses.setdefault("human_queue", state["human_queue"])
     state["phase"] = "generating"
     state["step_statuses"] = {"analysis": "done", "generation": "running", "assembly": "pending"}
     session.state = state
@@ -2698,3 +2714,163 @@ async def ws_chat(websocket: WebSocket, session_id: str):
         except: pass
     finally:
         await ws_manager.disconnect(session_id)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 人工复核闭环 API — Skill 违规 → 人工介入
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/generate/{session_id}/human-queue", response_model=ApiResponse)
+async def get_human_queue(session_id: str):
+    """① 获取待人工复核章节列表（Skill 违规 + 人工干预状态）。"""
+    try:
+        session = report_service.get_session(session_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from app.agent.state import CHAPTER_DEFINITIONS
+    state = session.state
+    queue = state.get("human_queue", []) or []
+    # 🔴 键归一化：session 持久化后 dict 键变成字符串（"6"≠6），统一转 int 再读
+    human_items = {int(k): v for k, v in (state.get("human_items", {}) or {}).items()}
+    audits = {int(k): v for k, v in (state.get("chapter_audits", {}) or {}).items()}
+
+    items = []
+    for ch in queue:
+        hi = human_items.get(int(ch), {})
+        items.append({
+            "chapter": ch,
+            "title": CHAPTER_DEFINITIONS.get(int(ch), {}).get("title", f"第{ch}章"),
+            "status": hi.get("status", "queued"),
+            "retry_count": hi.get("retry_count", 0),
+            "max_retry": hi.get("max_retry", 0),
+            "in_human_queue": hi.get("in_human_queue", False),
+            "human_opinion": hi.get("human_opinion", ""),
+            "human_approved": hi.get("human_approved", False),
+            "human_override": hi.get("human_override", False),
+            "violations": audits.get(int(ch), []),
+        })
+    # 全局人工待办（chapter=0，如缺营业执照）
+    global_items = state.get("_global_human_items", []) or []
+    return ApiResponse(
+        message=f"{len(items)} 章待人工复核",
+        data={"chapters": items, "global_items": global_items},
+    )
+
+
+@router.post("/generate/{session_id}/human/opinion", response_model=ApiResponse)
+async def submit_human_opinion(session_id: str, request: dict):
+    """② 提交人工修改想法 / 审批放行标记。
+
+    body:
+      { "chapter": 6,
+        "mode": "opinion" | "approve" | "override",
+        "opinion": "把支持率改成100%...",     # mode=opinion 必填
+        "override_content": "人工改写全文..."  # mode=override 必填
+      }
+
+    模式1 (opinion)：人工给修改思路 → 交给 AI 重写（重写时携带 Skill 缺陷 + 人工意见）
+    模式2a (override)：人工直接改写全文 → 跳过 AI 重写
+    模式2b (approve)：人工审批放行 → 跳过后续所有 AI 审核重写
+    """
+    try:
+        session = report_service.get_session(session_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    state = session.state
+    ch = int(request.get("chapter", 0) or 0)
+    mode = request.get("mode", "opinion")
+    if ch < 1 or ch > 10:
+        raise HTTPException(status_code=400, detail="chapter must be 1-10")
+    if mode not in ("opinion", "approve", "override"):
+        raise HTTPException(status_code=400, detail="mode must be opinion/approve/override")
+    if mode == "opinion" and not request.get("opinion"):
+        raise HTTPException(status_code=400, detail="opinion is required for mode=opinion")
+    if mode == "override" and not request.get("override_content"):
+        raise HTTPException(status_code=400, detail="override_content is required for mode=override")
+
+    # 🔴 键归一化：持久化后 dict 键为字符串，统一 int 键
+    raw_hi = state.get("human_items", {}) or {}
+    human_items = {int(k): v for k, v in raw_hi.items()}
+    hi = human_items.setdefault(ch, {
+        "chapter": ch, "retry_count": 0, "in_human_queue": False,
+        "human_opinion": "", "human_override": False, "human_approved": False,
+        "override_content": None,
+    })
+    if mode == "opinion":
+        hi["human_opinion"] = request.get("opinion", "")
+        hi["status"] = "human_reviewed"
+        hi["in_human_queue"] = True          # 保持入队，等 AI 重写后复核
+    elif mode == "approve":
+        hi["human_approved"] = True          # 模式2b：放行，跳过后续 AI 审核重写
+        hi["status"] = "approved"
+        hi["approved_at"] = __import__("datetime").datetime.now().isoformat()
+        hi["in_human_queue"] = False
+        if ch in state.get("human_queue", []):
+            state["human_queue"].remove(ch)
+    elif mode == "override":
+        hi["human_override"] = True          # 模式2a：人工直接改写全文
+        hi["override_content"] = request.get("override_content", "")
+        hi["status"] = "human_reviewed"
+        hi["in_human_queue"] = False
+        if ch in state.get("human_queue", []):
+            state["human_queue"].remove(ch)
+
+    human_items[ch] = hi
+    state["human_items"] = human_items
+    session.state = state
+    return ApiResponse(message=f"第{ch}章人工意见已记录（mode={mode}）", data=hi)
+
+
+@router.post("/generate/{session_id}/human/rewrite", response_model=ApiResponse)
+async def trigger_human_ai_rewrite(session_id: str, request: dict):
+    """③ 触发 AI 携人工意见重写排队章节（模式1）。
+
+    只挑「有 human_opinion 且未 human_approved / 未 human_override」的章节重写。
+    复用现有 resume 后台任务：把 human_items 作为 LangGraph 恢复载荷。
+    """
+    try:
+        session = report_service.get_session(session_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    state = session.state
+    requested = request.get("chapters") or state.get("human_queue", []) or []
+    # 🔴 键归一化：持久化后 dict 键为字符串，统一 int 键
+    human_items = {int(k): v for k, v in (state.get("human_items", {}) or {}).items()}
+    to_rewrite = [
+        c for c in requested
+        if human_items.get(int(c), {}).get("human_opinion")
+        and not human_items.get(int(c), {}).get("human_approved")
+        and not human_items.get(int(c), {}).get("human_override")
+    ]
+    if not to_rewrite:
+        return ApiResponse(message="没有可重写的章节（需先提交人工修改思路）", data={"chapters": []})
+
+    # 置为 resume：node_quality_review 的 interrupt 恢复后读 human_items 驱动重写
+    state["_pending_responses"] = {
+        "human_items": {str(c): human_items.get(int(c), {}) for c in to_rewrite},
+        "human_queue": to_rewrite,
+    }
+    state["_is_resume"] = True
+    state["_workflow_paused"] = False
+    state["_workflow_running"] = True
+    state["phase"] = "generating"
+    session.state = state
+
+    uploaded = list(state.get("_uploaded_files", []) or [])
+    report_title = state.get("report_title", state.get("filled_data", {}).get("project_name", "社会稳定风险评估报告"))
+    materials_dir = state.get("materials_dir", "")
+    project_context = state.get("project_context", "")
+    import asyncio as _asyncio
+    _wf_task3 = _asyncio.create_task(_run_workflow_bg(
+        session_id, session, uploaded, report_title, materials_dir, project_context
+    ))
+    _bg_tasks3 = session.state.setdefault("_bg_tasks", [])
+    _bg_tasks3.append(_wf_task3)
+
+    return ApiResponse(
+        message=f"已触发 AI 重写 {len(to_rewrite)} 章（携带人工意见）",
+        data={"chapters": to_rewrite},
+    )

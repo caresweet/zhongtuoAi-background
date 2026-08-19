@@ -133,6 +133,9 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
+        # 🔴 容忍无关环境变量：Docker 基础镜像自带 LANG/GPG_KEY，gunicorn 用 WORKERS，
+        #    若 extra=forbid 会导致容器内 Settings 校验失败、后端无法启动。
+        "extra": "ignore",
     }
 
 

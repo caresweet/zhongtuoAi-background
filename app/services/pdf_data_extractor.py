@@ -578,7 +578,9 @@ class PDFDataExtractor:
                 json_str = json_str.strip()
                 data = json.loads(json_str)
                 for k, v in data.items():
-                    if isinstance(v, str) and len(v) > 2:
+                    # 🔴 修复：不再丢弃短字符串（如 support_count:"1"、oppose_count:"0"），
+                    #    只丢弃真正的空值。len>2 过滤会丢掉调查选项计数。
+                    if isinstance(v, str) and v.strip():
                         result[k] = v.strip()
                     elif isinstance(v, (int, float)):
                         result[k] = str(v)
@@ -620,16 +622,38 @@ class PDFDataExtractor:
 
     # ── Aggregation ──
 
+    @staticmethod
+    def _sum_numeric(values) -> int:
+        """把每页的字符串/数字计数累加为 int（空/非数字忽略）。"""
+        total = 0
+        for v in values:
+            if v is None:
+                continue
+            try:
+                num = float(str(v).replace("%", "").replace("，", "").replace(",", "").strip())
+                total += int(num)
+            except (ValueError, TypeError):
+                continue
+        return total
+
     def _aggregate_key_data(self, doc_data: PDFDocumentData) -> Dict[str, Any]:
-        """Aggregate key data across all pages of a document."""
+        """Aggregate key data across all pages of a document.
+
+        🔴 修复：多页会议/调查记录不再 update() 覆盖，而是：
+        - 单值字段取第一个非空
+        - 问卷选项统计逐页累加（support/oppose/total），算出汇总支持率/反对率
+        - 参会人/日期/地点/诉求 合并去重
+        """
         aggregated = {}
+        pages_structured = [
+            page.structured_data
+            for page in doc_data.pages
+            if isinstance(page.structured_data, dict) and page.structured_data
+        ]
+        if not pages_structured:
+            return aggregated
 
-        # Collect all structured data from all pages
-        all_structured = {}
-        for page in doc_data.pages:
-            all_structured.update(page.structured_data)
-
-        # Map to PipelineContext fields
+        # ── 单值字段：取第一个非空（不再被最后一页覆盖）──
         field_mapping = {
             "doc_ref": "doc_reference",
             "title": "project_name",
@@ -642,16 +666,77 @@ class PDFDataExtractor:
             "scope": "scope_text",
             "total_area_sqm": "land_area_sqm",
             "boundary_points": "boundary_points",
-            "meeting_date": "symposium_date",
-            "meeting_location": "symposium_location",
-            "public_demands": "public_demands",
-            "discussion": "discussion_text",
-            "conclusion": "conclusion_text",
         }
-
         for src_key, dst_key in field_mapping.items():
-            if src_key in all_structured:
-                aggregated[dst_key] = all_structured[src_key]
+            for sd in pages_structured:
+                val = sd.get(src_key)
+                if val not in (None, "", "无"):
+                    aggregated[dst_key] = val
+                    break
+
+        # ── 会议/调查记录聚合 ──
+        # 参会人：跨页去重合并
+        attendees = []
+        seen = set()
+        for sd in pages_structured:
+            att = str(sd.get("attendees", "") or "").strip()
+            for name in re.split(r'[、，,;\n\r\s]+', att):
+                name = name.strip()
+                if name and name not in seen and len(name) >= 2 and not name.isdigit():
+                    seen.add(name)
+                    attendees.append(name)
+        if attendees:
+            aggregated["symposium_attendees"] = "、".join(attendees)
+
+        # 日期/地点：去重合并
+        dates = sorted({str(sd["meeting_date"]).strip() for sd in pages_structured if sd.get("meeting_date")})
+        locations = sorted({str(sd["meeting_location"]).strip() for sd in pages_structured if sd.get("meeting_location")})
+        if dates:
+            aggregated["symposium_date"] = "、".join(dates)
+        if locations:
+            aggregated["symposium_location"] = "、".join(locations)
+
+        # 诉求/讨论/结论：合并非空且非占位的内容
+        _PLACEHOLDER = {"无", "无明确群众诉求内容。", "无明确群众诉求段落，仅包含单位意见与建议收集。",
+                        "无明确会议结论。", "无明确会议结论内容。"}
+        for src_key, dst_key in [("public_demands", "public_demands"),
+                                  ("discussion", "discussion_text"),
+                                  ("conclusion", "conclusion_text")]:
+            vals = []
+            for sd in pages_structured:
+                v = str(sd.get(src_key, "") or "").strip()
+                if v and v not in _PLACEHOLDER and v not in vals:
+                    vals.append(v)
+            if vals:
+                aggregated[dst_key] = "；".join(vals)
+
+        # ── 🔴 问卷选项统计：逐页累加 ──
+        support = self._sum_numeric([sd.get("support_count") for sd in pages_structured])
+        oppose = self._sum_numeric([sd.get("oppose_count") for sd in pages_structured])
+        explicit_total = self._sum_numeric([sd.get("total_samples") for sd in pages_structured])
+        aware_pages = sum(
+            1 for sd in pages_structured
+            if sd.get("awareness_rate") not in (None, "", "0%", "0", 0)
+        )
+        # 问卷总数：优先显式 total_samples；否则 = 有表态记录(支持/反对/知晓)的页数（逐人逐页）
+        surveyed_pages = [
+            sd for sd in pages_structured
+            if sd.get("support_count") not in (None, "", "0", 0)
+            or sd.get("oppose_count") not in (None, "", "0", 0)
+            or sd.get("awareness_rate") not in (None, "", "0%", "0", 0)
+        ]
+        total = explicit_total if explicit_total > 0 else len(surveyed_pages)
+
+        if total > 0:
+            aggregated["total_samples"] = total
+            aggregated["support_count"] = support
+            aggregated["oppose_count"] = oppose
+            aggregated["support_rate"] = f"{round(support / total * 100, 1)}%"
+            aggregated["oppose_rate"] = f"{round(oppose / total * 100, 1)}%"
+            aggregated["awareness_rate"] = f"{round(aware_pages / total * 100, 1)}%"
+            aggregated["survey_data_source"] = (
+                "逐页累加(每人一页)" if explicit_total == 0 else "问卷显式汇总"
+            )
 
         # Convert area to float
         if "land_area_sqm" in aggregated:
@@ -696,7 +781,14 @@ class PDFDataExtractor:
                 fillable["discussion_paragraph"] = str(key_data["discussion_text"])
             if key_data.get("conclusion_text"):
                 fillable["conclusion_paragraph"] = str(key_data["conclusion_text"])
-            # 🔴 座谈会 PDF 里的问卷统计数据 → 填入 filled_data
+            # 🔴 参会人（跨页去重合并）
+            if key_data.get("symposium_attendees"):
+                fillable["symposium_attendees"] = str(key_data["symposium_attendees"])
+            if key_data.get("symposium_date"):
+                fillable["symposium_date"] = str(key_data["symposium_date"])
+            if key_data.get("symposium_location"):
+                fillable["symposium_location"] = str(key_data["symposium_location"])
+            # 🔴 座谈会 PDF 里的问卷统计数据（逐页累加后的汇总）→ 填入 filled_data
             if key_data.get("total_samples"):
                 fillable["total_samples"] = str(key_data["total_samples"])
             if key_data.get("support_count"):

@@ -439,3 +439,47 @@ def test_workflow_status_normalizes_int_keys(monkeypatch):
     assert data["human_queue"] == [6]
     assert list(data["human_items"].keys()) == ["6"]       # int 键已归一化为 str
     assert data["chapter_audits"]["6"][0]["type"] == "score_out_of_range"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OCR 数据修复回归：短值不丢弃 + 逐页累加问卷统计
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_parse_structured_data_keeps_short_counts():
+    """_parse_structured_data 不再丢弃 support_count:'1' 这类短字符串。"""
+    from app.services.pdf_data_extractor import PDFDataExtractor
+    ext = PDFDataExtractor(llm_service=None)
+    raw = '```json\n{"meeting_date":"2026年4月","attendees":"成美文","support_count":"1","oppose_count":"0","awareness_rate":"100%"}\n```'
+    sd = ext._parse_structured_data(raw, "meeting")
+    assert sd.get("support_count") == "1"
+    assert sd.get("oppose_count") == "0"
+    assert sd.get("awareness_rate") == "100%"
+
+
+def test_aggregate_key_data_sums_survey_counts():
+    """_aggregate_key_data 逐页累加 support/oppose，合并参会人，不再被最后一页覆盖。"""
+    from types import SimpleNamespace
+    from app.services.pdf_data_extractor import PDFDataExtractor
+    ext = PDFDataExtractor(llm_service=None)
+
+    def _sd(date, loc, att, support, oppose, aware):
+        return {"meeting_date": date, "meeting_location": loc, "attendees": att,
+                "discussion": "", "public_demands": "", "conclusion": "",
+                "total_samples": "", "support_count": support, "oppose_count": oppose,
+                "support_rate": "100%" if support == "1" else "",
+                "oppose_rate": "0%" if oppose == "0" else "",
+                "awareness_rate": "100%" if aware else ""}
+
+    pages = [
+        SimpleNamespace(structured_data=_sd("2026.4.28", "舟山村道三坪社区", "杨亚、叶玉华", "", "", "")),
+        SimpleNamespace(structured_data=_sd("2026.4.29", "朱坝街道三圩社区", "成美文", "1", "0", True)),
+        SimpleNamespace(structured_data=_sd("2026.4.21", "朱坝街道三圩社区", "徐守科", "1", "0", True)),
+    ]
+    doc = SimpleNamespace(pages=pages, document_type="meeting")
+    agg = ext._aggregate_key_data(doc)
+    assert agg["support_count"] == 2, f"支持数应累加为2, 实际{agg['support_count']}"
+    assert agg["oppose_count"] == 0
+    assert agg["total_samples"] == 2          # 2 个单人调查页
+    assert agg["support_rate"] == "100.0%"
+    assert "杨亚" in agg["symposium_attendees"] and "徐守科" in agg["symposium_attendees"]
+    assert len(agg["symposium_date"].split("、")) == 3   # 3 个日期都保留

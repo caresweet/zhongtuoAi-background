@@ -372,6 +372,8 @@ async def analyze_all_materials(
 
     # 2. Extract PDF text
     pdf_text = ""
+    # 🔴 收集会议/调查 PDF 逐页累加后的问卷统计（_aggregate_key_data 修复后产出）
+    pdf_survey_updates = {}
     for pdf_path in pdfs:
         try:
             from app.services.material_ingestion_service import MaterialIngestionService
@@ -382,6 +384,15 @@ async def analyze_all_materials(
             txt = getattr(artifact, 'text_content', '') or ''
             if isinstance(txt, str) and len(txt) > 10:
                 pdf_text += f"\n[{os.path.basename(pdf_path)}]\n{txt}\n"
+            # 🔴 从 PDF 聚合的 key_data 读取问卷统计（如座谈会.pdf 逐页累加结果）
+            sd = getattr(artifact, 'structured_data', None) or {}
+            if isinstance(sd, dict):
+                for k in ("total_samples", "support_count", "oppose_count",
+                          "support_rate", "oppose_rate", "awareness_rate",
+                          "symposium_attendees", "symposium_date", "symposium_location"):
+                    v = sd.get(k)
+                    if v not in (None, "", "0", "0.0", "0.0%"):
+                        pdf_survey_updates.setdefault(k, v)
         except Exception as e:
             logger.warning(f"PDF text extraction failed for {pdf_path}: {e}")
 
@@ -391,6 +402,10 @@ async def analyze_all_materials(
     if pdf_text:
         updates = _extract_data_from_text(pdf_text)
         result["filled_data_updates"].update(updates)
+    # 🔴 PDF 聚合问卷统计：问卷图/用户数据优先，缺失字段才用 PDF 聚合结果补
+    for k, v in pdf_survey_updates.items():
+        if k not in result["filled_data_updates"] or not result["filled_data_updates"].get(k):
+            result["filled_data_updates"][k] = v
 
     # 4. Extract survey data from vision results
     survey_data = result["extracted_survey_data"]

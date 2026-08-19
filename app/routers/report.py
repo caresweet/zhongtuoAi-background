@@ -2343,9 +2343,11 @@ async def workflow_status(session_id: str):
         phase = state.get("phase", "idle")
 
     # 🔴 人工复核队列：暴露给前端展示待复核章节 + 违规
-    human_queue = state.get("human_queue", []) or []
-    human_items = state.get("human_items", {}) or {}
-    chapter_audits = state.get("chapter_audits", {}) or {}
+    #   pydantic Dict[str, Any] 要求键为字符串——工作流里 human_items/chapter_audits 是 int 键，
+    #   持久化后又可能是 str 键，统一归一化为 str/int 再进模型，避免 500。
+    human_queue = [int(c) for c in (state.get("human_queue", []) or [])]
+    human_items = {str(k): v for k, v in (state.get("human_items", {}) or {}).items()}
+    chapter_audits = {str(k): v for k, v in (state.get("chapter_audits", {}) or {}).items()}
 
     # 🔴 Typed response — validated by WorkflowStatusData schema
     status_data = WorkflowStatusData(

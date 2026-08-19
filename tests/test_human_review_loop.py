@@ -414,3 +414,28 @@ def test_human_rewrite_no_action_rejected(monkeypatch):
     monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
     resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}))
     assert resp.data["chapters"] == []           # 无任何处理 → 不触发恢复
+
+
+def test_workflow_status_normalizes_int_keys(monkeypatch):
+    """workflow/status 对 int 键 human_items 归一化，避免 pydantic Dict[str,Any] 500。
+
+    工作流里 human_items/chapter_audits 是 int 键，pydantic 要求 str 键 → 必须归一化。
+    """
+    from app.routers.report import report_service, workflow_status
+    state = {
+        "human_queue": [6],
+        "human_items": {6: {"chapter": 6, "human_opinion": "改一下", "human_approved": False,
+                            "human_override": False}},
+        "chapter_audits": {6: [{"type": "score_out_of_range", "severity": "critical",
+                                "disposition": "ai_rewrite", "message": "评分超范围"}]},
+        "phase": "human_review", "chapters": {}, "_outline": {},
+        "_workflow_logs": ["⏸️ 1 个章节需人工复核"],
+        "step_statuses": {},
+    }
+    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
+    resp = asyncio.run(workflow_status("fake-sid"))
+    data = resp.data  # workflow_status 返回 model_dump() 后的 dict
+    assert data["phase"] == "human_review"
+    assert data["human_queue"] == [6]
+    assert list(data["human_items"].keys()) == ["6"]       # int 键已归一化为 str
+    assert data["chapter_audits"]["6"][0]["type"] == "score_out_of_range"

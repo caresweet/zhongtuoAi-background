@@ -91,9 +91,10 @@ def _mk_review_state(short_md="内容"):
     }
 
 
-def test_scene1_retry_exhausted_pushes_human_queue():
-    """第6章内容过短，连续两次审查：第1次重试、第2次推入人工队列。"""
+def test_scene1_retry_exhausted_pushes_human_queue(monkeypatch):
+    """人工复核开启时：第6章重试耗尽 → 推入人工队列。"""
     from app.services import report_workflow as wf
+    monkeypatch.setattr(wf, "ENABLE_HUMAN_REVIEW", True)
 
     async def _run():
         state = _mk_review_state(short_md="内容太短")   # <300字 → 必然 issues
@@ -117,6 +118,29 @@ def test_scene1_retry_exhausted_pushes_human_queue():
 
         # 验证不再消耗全局轮次相关字段（_quality_round 未被动过）
         assert state.get("_quality_round", 0) == 0
+        return state
+    asyncio.run(_run())
+
+
+def test_scene1_retry_exhausted_agent_generates_when_human_disabled(monkeypatch):
+    """人工复核关闭（默认）：第6章重试耗尽 → 不入队、不暂停，agent 自行生成。"""
+    from app.services import report_workflow as wf
+    monkeypatch.setattr(wf, "ENABLE_HUMAN_REVIEW", False)
+
+    async def _run():
+        state = _mk_review_state(short_md="内容太短")
+
+        await wf.node_chapter_review(state)   # 第1次：重试
+        assert state["human_items"][6]["retry_count"] == 1
+
+        await wf.node_chapter_review(state)   # 第2次：耗尽 → agent 自行生成
+        hi = state["human_items"][6]
+        assert hi["retry_count"] == MAX_RETRY
+        assert hi["in_human_queue"] is False          # 不入人工队列
+        assert 6 not in state.get("human_queue", [])
+        assert hi["status"] == "auto_generated"
+        assert state["chapters"][6]["status"] == "generated_with_issues"
+        assert state["_next_action"] in ("generate", "quality_review")  # 继续流程不暂停
         return state
     asyncio.run(_run())
 

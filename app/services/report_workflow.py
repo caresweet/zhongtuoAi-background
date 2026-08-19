@@ -36,6 +36,11 @@ MAX_RETRY = 2
 # 默认2轮：只给1轮时，一次批量重写修不完的章节（如6、9章）会带病进终稿。
 MAX_QUALITY_ROUNDS = int(os.environ.get("MAX_QUALITY_ROUNDS", "2"))
 
+# 🔴 人工复核开关（env 可配，默认关闭）：
+#   false → 生成全程不暂停人工干涉，章节问题由 agent 自行重试/生成，报告直接产出
+#   true  → 章节 AI 重试耗尽后推入人工队列，暂停等待前端提交意见/审批
+ENABLE_HUMAN_REVIEW = os.environ.get("ENABLE_HUMAN_REVIEW", "false").lower() in ("1", "true", "yes")
+
 # ── Progress emitter ───────────────────────────────────────────────────────────
 _progress_callback = None
 def set_workflow_progress_callback(cb): global _progress_callback; _progress_callback = cb
@@ -827,20 +832,30 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
             state["_chapter_retry"] = hi["retry_count"]  # 兼容旧读点
             state["_next_action"] = "generate"
         else:
-            # 🔴 本章重试耗尽 → 推入人工待处理队列，不再消耗全局重写轮次
-            ch["status"] = "human_review"
+            # 🔴 本章重试耗尽
             hi["retry_count"] = used_retries + 1
-            hi["in_human_queue"] = True
-            hi["status"] = "queued"
-            hi["queued_at"] = _now_iso()
-            queue = state.setdefault("human_queue", [])
-            if ch_num not in queue:
-                queue.append(ch_num)
-            # 保留当前内容进报告（避免缺章），标记人工复核
-            chapters = state.setdefault("chapters", {})
-            chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "human_review"}
-            state["chapters"] = chapters
-            logs.append(f"  ⚠️ 第{ch_num}章重试耗尽({used_retries+1}/{max_retries})，推入人工队列: {ch['review_msg']}")
+            if ENABLE_HUMAN_REVIEW:
+                # 人工复核开启：推入人工待处理队列，不再消耗全局重写轮次
+                ch["status"] = "human_review"
+                hi["in_human_queue"] = True
+                hi["status"] = "queued"
+                hi["queued_at"] = _now_iso()
+                queue = state.setdefault("human_queue", [])
+                if ch_num not in queue:
+                    queue.append(ch_num)
+                # 保留当前内容进报告（避免缺章），标记人工复核
+                chapters = state.setdefault("chapters", {})
+                chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "human_review"}
+                state["chapters"] = chapters
+                logs.append(f"  ⚠️ 第{ch_num}章重试耗尽({used_retries+1}/{max_retries})，推入人工队列: {ch['review_msg']}")
+            else:
+                # 🔴 人工复核关闭：agent 自行生成，保留当前内容继续，不暂停不入队
+                ch["status"] = "generated_with_issues"
+                hi["status"] = "auto_generated"
+                chapters = state.setdefault("chapters", {})
+                chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "generated_with_issues"}
+                state["chapters"] = chapters
+                logs.append(f"  ⚠️ 第{ch_num}章重试耗尽({used_retries+1}/{max_retries})，agent 自行生成（保留当前内容）: {ch['review_msg']}")
             state["_chapter_idx"] = idx + 1
             state["_chapter_retry"] = 0
             state["_next_action"] = "generate" if idx + 1 < len(outline_list) else "quality_review"
@@ -917,18 +932,19 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         state["chapter_audits"] = chapter_tasks
         ai_chapters, human_chapters = split_tasks(chapter_tasks)
 
-        # 🔴 终稿阶段新发现的「需人工介入」章节 → 推入人工队列
+        # 🔴 终稿阶段新发现的「需人工介入」章节 → 推入人工队列（仅人工复核开启时）
         human_items = state.setdefault("human_items", {})
         queue = state.setdefault("human_queue", [])
-        for ch in human_chapters:
-            hi = human_items.setdefault(ch, {"chapter": ch, "retry_count": MAX_RETRY,
-                                             "in_human_queue": False, "human_approved": False,
-                                             "human_override": False, "human_opinion": ""})
-            hi["in_human_queue"] = True
-            hi["status"] = "queued"
-            hi["queued_at"] = _now_iso()
-            if ch not in queue:
-                queue.append(ch)
+        if ENABLE_HUMAN_REVIEW:
+            for ch in human_chapters:
+                hi = human_items.setdefault(ch, {"chapter": ch, "retry_count": MAX_RETRY,
+                                                 "in_human_queue": False, "human_approved": False,
+                                                 "human_override": False, "human_opinion": ""})
+                hi["in_human_queue"] = True
+                hi["status"] = "queued"
+                hi["queued_at"] = _now_iso()
+                if ch not in queue:
+                    queue.append(ch)
         # chapter=0 的全局人工待办（如缺营业执照）→ 单独承载，不入具体章重写
         global_items = collect_global_human_items(result)
         if global_items:
@@ -961,22 +977,27 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
             await _emit("quality", {"analysis":"done","outline":"done","generation":"running","quality":"running","assembly":"pending"})
             return state
         elif rewrite_chapters:
-            # 🔴 质量轮数已耗尽仍有问题章节 → 推入人工队列，不静默放行
-            human_items = state.setdefault("human_items", {})
-            queue = state.setdefault("human_queue", [])
-            for c in rewrite_chapters:
-                hi = human_items.setdefault(c, {"chapter": c, "retry_count": MAX_RETRY,
-                                                 "in_human_queue": False, "human_approved": False,
-                                                 "human_override": False, "human_opinion": ""})
-                hi["in_human_queue"] = True
-                hi["status"] = "queued"
-                hi["queued_at"] = _now_iso()
-                if c not in queue:
-                    queue.append(c)
+            # 🔴 质量轮数已耗尽仍有问题章节
             state["_quality_audit"] = result
             state["_quality_audit"]["passed"] = False
             state["_quality_unfixed"] = sorted(rewrite_chapters)
-            logs.append(f"⚠️ 已达最大质量修正轮数({MAX_QUALITY_ROUNDS})，仍有 {len(rewrite_chapters)} 章未修复: {sorted(rewrite_chapters)}，已推入人工队列")
+            if ENABLE_HUMAN_REVIEW:
+                # 人工复核开启 → 推入人工队列，不静默放行
+                human_items = state.setdefault("human_items", {})
+                queue = state.setdefault("human_queue", [])
+                for c in rewrite_chapters:
+                    hi = human_items.setdefault(c, {"chapter": c, "retry_count": MAX_RETRY,
+                                                    "in_human_queue": False, "human_approved": False,
+                                                    "human_override": False, "human_opinion": ""})
+                    hi["in_human_queue"] = True
+                    hi["status"] = "queued"
+                    hi["queued_at"] = _now_iso()
+                    if c not in queue:
+                        queue.append(c)
+                logs.append(f"⚠️ 已达最大质量修正轮数({MAX_QUALITY_ROUNDS})，仍有 {len(rewrite_chapters)} 章未修复: {sorted(rewrite_chapters)}，已推入人工队列")
+            else:
+                # 人工复核关闭 → agent 自行生成，保留当前内容继续，不暂停不入队
+                logs.append(f"⚠️ 已达最大质量修正轮数({MAX_QUALITY_ROUNDS})，仍有 {len(rewrite_chapters)} 章未修复: {sorted(rewrite_chapters)}，agent 自行生成（保留当前内容）")
             logger.warning(f"[QUALITY] 轮数耗尽未修复章节: {sorted(rewrite_chapters)}")
     except Exception as e:
         logger.warning(f"Quality review failed (non-critical): {e}")
@@ -985,6 +1006,13 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         state["_quality_unfixed"] = list(range(1, 11)) if state.get("chapters") else []
 
     # 🔴 人工复核检查点：有人工队列未处理 → 中断等前端提交意见
+    #   （ENABLE_HUMAN_REVIEW=false 时直接跳过，agent 自行生成，报告直接产出）
+    if not ENABLE_HUMAN_REVIEW:
+        state["human_queue"] = []
+        logs.append("ℹ️ 人工复核已关闭，agent 自行生成全部章节")
+        state["_next_action"] = "assemble"
+        await _emit("quality", {"analysis":"done","outline":"done","generation":"done","quality":"done","assembly":"pending"})
+        return state
     _human_queue = state.get("human_queue", [])
     _human_items = state.get("human_items", {})
     _pending = [c for c in _human_queue

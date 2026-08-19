@@ -592,6 +592,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
 
     # 🔴 重试时构建反馈（包含可用数据 + 上一版内容）
     feedback = ""
+    logger.info(f"[GEN] 第{ch_num}章 idx={idx} retry={retry} quality_rewrite={'None' if quality_rewrite is None else quality_rewrite} 反馈={bool(ch.get('review_msg'))}")
     if retry > 0 and ch.get("review_msg"):
         fb_parts = [ch["review_msg"]]
         if ch_data:
@@ -717,15 +718,19 @@ async def node_chapter_review(state: ReportWorkflowState) -> ReportWorkflowState
         ch["review_msg"] = "; ".join(issues)
         ch["review_score"] = max(0, 85 - len(issues)*15)
         logs.append(f"  ⚠️ 第{ch_num}章: {ch['review_msg']}")
-        logger.info(f"[REVIEW] 第{ch_num}章审查问题: {ch['review_msg']}")
+        logger.info(f"[REVIEW] 第{ch_num}章审查问题: {ch['review_msg']} retry={retry} MAX_RETRY={MAX_RETRY} 重试机会={retry + 1 < MAX_RETRY}")
         if retry + 1 < MAX_RETRY:
             # 还有重试机会 → 重试当前章
             ch["status"] = "retry"
             state["_chapter_retry"] = retry + 1
             state["_next_action"] = "generate"
         else:
-            # 重试耗尽 → 标记人工复核，进入下一章
+            # 🔴 重试耗尽 → 保留当前内容进报告（避免缺章），标记人工复核
             ch["status"] = "failed_human_review"
+            chapters = state.setdefault("chapters", {})
+            chapters[ch_num] = {"markdown": md, "title": ch["title"], "status": "failed_human_review"}
+            state["chapters"] = chapters
+            logs.append(f"  ⚠️ 第{ch_num}章重试耗尽，保留当前内容，请人工复核: {ch['review_msg']}")
             state["_chapter_idx"] = idx + 1
             state["_chapter_retry"] = 0
             state["_next_action"] = "generate" if idx + 1 < len(outline_list) else "quality_review"
@@ -812,9 +817,18 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
             logs.append(f"🔄 第{quality_round + 1}轮质量修正：重写 {len(rewrite_list)} 章")
             await _emit("quality", {"analysis":"done","outline":"done","generation":"running","quality":"running","assembly":"pending"})
             return state
+        elif rewrite_chapters:
+            # 🔴 质量轮数已耗尽仍有问题章节 → 不静默放行，记录未修复章节供人工复核
+            state["_quality_audit"] = result
+            state["_quality_audit"]["passed"] = False
+            state["_quality_unfixed"] = sorted(rewrite_chapters)
+            logs.append(f"⚠️ 已达最大质量修正轮数({MAX_QUALITY_ROUNDS})，仍有 {len(rewrite_chapters)} 章未修复: {sorted(rewrite_chapters)}，请人工复核")
+            logger.warning(f"[QUALITY] 轮数耗尽未修复章节: {sorted(rewrite_chapters)}")
     except Exception as e:
         logger.warning(f"Quality review failed (non-critical): {e}")
-        state["_quality_audit"] = {"passed": True, "error": str(e)}
+        # 🔴 异常时不得视为通过——标记未通过，避免问题报告静默进最终报告
+        state["_quality_audit"] = {"passed": False, "error": str(e)}
+        state["_quality_unfixed"] = list(range(1, 11)) if state.get("chapters") else []
 
     state["_next_action"] = "assemble"
     await _emit("quality", {"analysis":"done","outline":"done","generation":"done","quality":"done","assembly":"pending"})

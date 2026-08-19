@@ -132,13 +132,17 @@ class MissingField(BaseModel):
 
 class WorkflowStatusData(BaseModel):
     """工作流状态响应的 data 部分（强类型）。"""
-    phase: str = Field(..., description="idle | generating | paused | complete | error")
+    phase: str = Field(..., description="idle | generating | paused | human_review | complete | error")
     running: bool = False
     paused: bool = False
     error: Optional[str] = ""
     total_chapters: int = 0
     current_chapter: int = 0
     missing_fields: List[MissingField] = Field(default_factory=list)
+    # 🔴 人工复核队列（phase=human_review 时由前端展示待复核章节+违规）
+    human_queue: List[int] = Field(default_factory=list)
+    human_items: Dict[str, Any] = Field(default_factory=dict)
+    chapter_audits: Dict[str, Any] = Field(default_factory=dict)
     logs: List[str] = Field(default_factory=list)
     step_statuses: Dict[str, Any] = Field(default_factory=dict)
     output_path: Optional[str] = ""

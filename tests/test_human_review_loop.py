@@ -383,16 +383,34 @@ def test_human_opinion_normalizes_str_keys(monkeypatch):
     assert state["human_items"][6]["status"] == "human_reviewed"
 
 
-def test_human_rewrite_filters_str_keys(monkeypatch):
-    """POST /human/rewrite 只挑「有意见且未审批」的章节（字符串键）。"""
+def test_human_rewrite_resumes_all_acted_chapters(monkeypatch):
+    """POST /human/rewrite 恢复载荷携带所有已处理章节（字符串键归一化）。
+
+    第6章有意见→AI重写，第9章已审批→放行；两者都应进入恢复载荷，由工作流分别处理。
+    """
     from app.routers.report import report_service, trigger_human_ai_rewrite
     state = {
         "human_queue": [6, 9],
         "human_items": {
             "6": {"chapter": 6, "human_opinion": "改一下", "human_approved": False, "human_override": False},
-            "9": {"chapter": 9, "human_opinion": "改一下", "human_approved": True, "human_override": False},
+            "9": {"chapter": 9, "human_opinion": "", "human_approved": True, "human_override": False},
         },
     }
     monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
     resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}))
-    assert resp.data["chapters"] == [6]          # 第9章已审批 → 跳过
+    assert resp.data["chapters"] == [6, 9]       # 队列中所有已处理章节都恢复
+    assert resp.data["acted"] == [6, 9]          # 6=意见, 9=审批
+
+
+def test_human_rewrite_no_action_rejected(monkeypatch):
+    """未对任何章节提交意见/审批 → 拒绝恢复，避免空恢复导致死循环。"""
+    from app.routers.report import report_service, trigger_human_ai_rewrite
+    state = {
+        "human_queue": [6],
+        "human_items": {
+            "6": {"chapter": 6, "human_opinion": "", "human_approved": False, "human_override": False},
+        },
+    }
+    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
+    resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}))
+    assert resp.data["chapters"] == []           # 无任何处理 → 不触发恢复

@@ -2052,6 +2052,29 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                     state["_wf_thread_id"] = wf_state.get("_thread_id", "")
                     session.state = state
                     return
+                elif isinstance(interrupt_data, dict) and interrupt_data.get("type") == "human_review":
+                    # 🔴 人工复核检查点：章节被推入人工队列，暂停等待前端提交意见/审批
+                    state["_workflow_paused"] = True
+                    state["_workflow_running"] = False
+                    state["phase"] = "human_review"
+                    state["human_queue"] = interrupt_data.get("chapters", [])
+                    state["human_items"] = interrupt_data.get("human_items", {}) or state.get("human_items", {})
+                    state["chapter_audits"] = wf_state.get("chapter_audits", state.get("chapter_audits", {}))
+                    state["_wf_thread_id"] = wf_state.get("_thread_id", "")
+                    state["_workflow_logs"] = wf_state.get("logs", _shared_logs)
+                    ch_list = "、".join(f"第{c}章" for c in interrupt_data.get("chapters", []))
+                    _shared_logs.append(f"⏸️ {len(interrupt_data.get('chapters',[]))} 个章节需人工复核（{ch_list}），请查看违规并提交意见/审批后继续")
+                    state["_workflow_logs"] = _shared_logs
+                    session.state = state
+                    try:
+                        await ws_manager.send(sid, "phase_change", {
+                            "phase": "human_review",
+                            "chapters": interrupt_data.get("chapters", []),
+                            "message": f"{len(interrupt_data.get('chapters',[]))} 个章节需人工复核",
+                        })
+                    except Exception:
+                        pass
+                    return
                 else:
                     _log.warning(f"[WORKFLOW] Unknown interrupt: {interrupt_data}")
 
@@ -2309,7 +2332,8 @@ async def workflow_status(session_id: str):
         phase = "error"
         running = False
     elif paused:
-        phase = "paused"
+        # 🔴 区分：人工复核暂停 vs 缺数据暂停
+        phase = "human_review" if state.get("human_queue") else "paused"
     elif output:
         running = False
         phase = "complete"
@@ -2317,6 +2341,11 @@ async def workflow_status(session_id: str):
         phase = "generating"
     else:
         phase = state.get("phase", "idle")
+
+    # 🔴 人工复核队列：暴露给前端展示待复核章节 + 违规
+    human_queue = state.get("human_queue", []) or []
+    human_items = state.get("human_items", {}) or {}
+    chapter_audits = state.get("chapter_audits", {}) or {}
 
     # 🔴 Typed response — validated by WorkflowStatusData schema
     status_data = WorkflowStatusData(
@@ -2327,6 +2356,9 @@ async def workflow_status(session_id: str):
         total_chapters=state.get("_outline", {}).get("total") or len(state.get("_outline", {}).get("chapters", [])),
         current_chapter=len(state.get("chapters", {})),
         missing_fields=missing,
+        human_queue=human_queue,
+        human_items=human_items,
+        chapter_audits=chapter_audits,
         logs=state.get("_workflow_logs", []) or (wf_state.get("logs", []) if wf_state else []),
         step_statuses=step_statuses,
         output_path=output,
@@ -2839,19 +2871,19 @@ async def trigger_human_ai_rewrite(session_id: str, request: dict):
     requested = request.get("chapters") or state.get("human_queue", []) or []
     # 🔴 键归一化：持久化后 dict 键为字符串，统一 int 键
     human_items = {int(k): v for k, v in (state.get("human_items", {}) or {}).items()}
-    to_rewrite = [
-        c for c in requested
-        if human_items.get(int(c), {}).get("human_opinion")
-        and not human_items.get(int(c), {}).get("human_approved")
-        and not human_items.get(int(c), {}).get("human_override")
-    ]
-    if not to_rewrite:
-        return ApiResponse(message="没有可重写的章节（需先提交人工修改思路）", data={"chapters": []})
+    queued = [int(c) for c in requested]
+    # 🔴 恢复载荷携带所有队列章节的人工状态（意见/审批/改写），
+    #    node_quality_review 恢复逻辑会分别处理：有意见→AI重写、审批→放行、改写→直接生效
+    payload_items = {str(c): human_items.get(c, {}) for c in queued if c in human_items}
+    acted = [int(c) for c, v in payload_items.items()
+             if v.get("human_opinion") or v.get("human_approved") or v.get("human_override")]
+    if not acted:
+        return ApiResponse(message="尚未对任何章节提交意见或审批，请先处理", data={"chapters": []})
 
     # 置为 resume：node_quality_review 的 interrupt 恢复后读 human_items 驱动重写
     state["_pending_responses"] = {
-        "human_items": {str(c): human_items.get(int(c), {}) for c in to_rewrite},
-        "human_queue": to_rewrite,
+        "human_items": payload_items,
+        "human_queue": queued,
     }
     state["_is_resume"] = True
     state["_workflow_paused"] = False
@@ -2871,6 +2903,6 @@ async def trigger_human_ai_rewrite(session_id: str, request: dict):
     _bg_tasks3.append(_wf_task3)
 
     return ApiResponse(
-        message=f"已触发 AI 重写 {len(to_rewrite)} 章（携带人工意见）",
-        data={"chapters": to_rewrite},
+        message=f"已继续生成：处理 {len(acted)} 个章节的人工意见/审批",
+        data={"chapters": queued, "acted": acted},
     )

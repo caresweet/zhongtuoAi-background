@@ -601,6 +601,34 @@ class ReportAssembler:
 
         facts = filled or {}
 
+        # 🔴 应急响应等级归一化：统一为「一级/二级/三级响应」（消除"级响应"缺数字、编号混乱）
+        _resp_map = [
+            (re.compile(r'(?<![一二三])级响应\s*[（(]\s*一般事件'), '一级响应（一般事件'),
+            (re.compile(r'(?<![一二三])级响应\s*[（(]\s*较大事件'), '二级响应（较大事件'),
+            (re.compile(r'(?<![一二三])级响应\s*[（(]\s*(?:重大事件|特别重大事件)'), '三级响应（重大事件'),
+        ]
+        def _fix_resp(text):
+            for pat, rep in _resp_map:
+                text = pat.sub(rep, text)
+            return text
+        for _p in list(doc.paragraphs):
+            if _p.text and '级响应' in _p.text:
+                new = _fix_resp(_p.text)
+                if new != _p.text:
+                    for r in _p.runs: r.text = ''
+                    if _p.runs: _p.runs[0].text = new
+                    else: _p.add_run(new)
+        for _tbl in doc.tables:
+            for _row in _tbl.rows:
+                for _cell in _row.cells:
+                    for _p in _cell.paragraphs:
+                        if _p.text and '级响应' in _p.text:
+                            new = _fix_resp(_p.text)
+                            if new != _p.text:
+                                for r in _p.runs: r.text = ''
+                                if _p.runs: _p.runs[0].text = new
+                                else: _p.add_run(new)
+
         # 🔴 Pre-scan: find all caption paragraphs (immediately after image paragraphs)
         # These must NEVER be modified — they contain 图X-X labels
         _caption_ids = set()

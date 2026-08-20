@@ -1902,7 +1902,8 @@ class ReportAssembler:
         self._add_para(doc,
             '公司是经淮安经济技术开发区行政审批局登记注册，经营范围包含维稳评估咨询业务的专业机构。'
             '固定办公场所面积达260m²，固定从业人员35名，评估业务部门日常工作人员10名，'
-            '其中稳评业务主要负责人、业务骨干等均持有社会稳定风险评估专业技术人员培训证书。',
+            '其中稳评业务主要负责人、业务骨干等均持有社会稳定风险评估专业技术人员培训证书。'
+            '本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件0。',
             indent=True)
         self._add_para(doc,
             '我公司先后承接了关于出台《淮安市不动产登记有关历史遗留问题的处理意见》'
@@ -1933,6 +1934,7 @@ class ReportAssembler:
         self._add_para(doc, '张抗洪（评估助理）', indent=True, font=FONT_SONGTI)
         self._add_para(doc, '罗  娜（评估助理）', indent=True, font=FONT_SONGTI)
         self._add_para(doc, '朱  璇（评估助理）', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, '本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件0。', indent=True, font=FONT_SONGTI)
 
         doc.add_page_break()
 
@@ -1985,101 +1987,132 @@ class ReportAssembler:
     # ═══════════════════════════════════════════════════════════════
 
     def _add_appendices(self, doc, survey_stats, image_files, filled):
-        """Add appendix with ALL user-provided images organized by category."""
+        """Add appendices: 附件目录 + 附件0机构资质 + 附件1问卷 + 附件2评审 + 附件3公告 + 附件4勘测 + 附件5现场照片 + 附件6台账 + 待补充清单."""
         # Collect ALL images from the catalog
         catalog_data = getattr(self, '_img_catalog_data', {})
         all_images = catalog_data.get("catalog", [])
-
-        # Skip full-page OCR renders, keep embedded images
-        SKIP_PREFIXES = ()  # Let image_catalog handle filtering
         session_images = []
         for img in all_images:
             p = img.get("path", "")
             if isinstance(p, str) and os.path.exists(p) and os.path.getsize(p) > 5000:
-                fname = os.path.basename(p)
-                if any(fname.startswith(prefix) for prefix in SKIP_PREFIXES):
-                    continue
                 if os.path.splitext(p)[1].lower() in {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}:
                     session_images.append(img)
 
-        # ── 附件一：问卷调查统计分析 ──
+        # ── 附件目录（完整清单，对应附件0-6 + 待补充）──
+        self._add_heading(doc, '附件目录', 1)
+        for line in [
+            '附件0：机构及人员资质材料',
+            '附件1：问卷调查统计分析',
+            '附件2：专家评审全套材料（评审意见、签到表）',
+            '附件3：征收土地预公告',
+            '附件4：勘测定界摘要',
+            '附件5：现场调查照片',
+            '附件6：不稳定因素动态排查台账样表',
+            '待补充附件：征地补偿费用足额预存财政专户证明材料等',
+        ]:
+            self._add_para(doc, line, indent=False)
+
+        # ── 附件0：机构及人员资质材料（预留位置插入扫描件）──
+        doc.add_page_break()
+        self._add_heading(doc, '附件0 机构及人员资质材料', 1)
+        self._add_para(doc, '本附件预留位置用于插入以下机构及人员资质扫描件：', indent=True)
+        self._add_para(doc, '附件0-1：江苏众拓项目代理咨询有限公司营业执照复印件；', indent=True)
+        self._add_para(doc, '附件0-2：稳评项目负责人陈春高级工程师、估价师、经济师职称证书扫描件；', indent=True)
+        self._add_para(doc, '附件0-3：稳评工作组主要从业人员社会稳定风险评估专业技术人员培训证书（安如月、张抗洪、程士汝、刘利伟等人）。', indent=True)
+        doc.add_paragraph()
+        self._add_para(doc, '（附件0-1 营业执照复印件扫描件粘贴处）', indent=True)
+        self._add_para(doc, '（附件0-2 负责人职称证书扫描件粘贴处）', indent=True)
+        self._add_para(doc, '（附件0-3 培训证书扫描件粘贴处）', indent=True)
+
+        # ── 附件1：问卷调查统计分析 ──
         total = survey_stats.get('total_surveys', 0)
         if total > 0:
-            self._add_heading(doc, '附件一：问卷调查统计分析', 1)
-            support_rate = survey_stats.get('support_rate', 0)
+            doc.add_page_break()
+            self._add_heading(doc, '附件1 问卷调查统计分析', 1)
             self._add_para(doc,
                 f'本次社会稳定风险评估共发放问卷 {total} 份，回收有效问卷 {total} 份。', indent=True)
             doc.add_paragraph()
             self._add_survey_table(doc, survey_stats, '附表1 公众意见调查统计汇总表')
 
-        # ── 附件二：项目资料图片（分类展示全部用户图片） ──
-        # 🔴 Load company cert images for appendix
+        # ── 附件2/3/4/5：按类别组织图片 ──
         domain = filled.get("_domain", "stability") if isinstance(filled, dict) else "stability"
         cert_images = self._load_company_certificate_images(domain=domain)
         cert_paths = set(p for p, _ in cert_images)
 
-        if session_images or cert_paths:
+        appendix_sections = [
+            ("附件2 专家评审全套材料（评审意见、签到表）", ["review"]),
+            ("附件3 征收土地预公告", ["announcement"]),
+            ("附件4 勘测定界摘要", ["map"]),
+            ("附件5 现场调查照片", ["survey", "meeting", "photo"]),
+        ]
+        for label, cats in appendix_sections:
+            paths = []
+            for cat in cats:
+                for img in session_images:
+                    if img.get("category") == cat:
+                        p = img.get("path", "")
+                        if p and p not in paths:
+                            paths.append(p)
+            fresh_paths = [p for p in paths if str(p) not in self._inserted_images]
+            if not fresh_paths:
+                continue
             doc.add_page_break()
-            self._add_heading(doc, '附件二：项目资料图片', 1)
+            self._add_heading(doc, label, 1)
+            self._add_para(doc, f'共 {len(fresh_paths)} 张', indent=True)
+            shown = 0
+            for p in fresh_paths[:8]:
+                fname = os.path.basename(p)
+                clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', fname, flags=__import__('re').I)
+                self._add_image(doc, p, clean_name[:60])
+                shown += 1
+            if len(fresh_paths) > shown:
+                self._add_para(doc, f'（共 {len(fresh_paths)} 张，以上展示 {shown} 张）', indent=True)
 
-            # 🔴 Report-relevant categories
-            cat_groups = [
-                ("一、征收公告与公示照片", ["announcement"]),
-                ("二、群众调查与座谈会照片", ["survey", "meeting"]),
-                ("三、部门调查与走访照片", ["photo"]),
-                ("四、专家评审意见", ["review"]),
-                ("五、位置示意图与勘测图", ["map"]),
-            ]
+        # 其他未分类资料
+        other_paths = []
+        for img in session_images:
+            if img.get("category") == "other":
+                p = img.get("path", "")
+                if p and str(p) not in self._inserted_images and p not in cert_paths and p not in other_paths:
+                    other_paths.append(p)
+        if other_paths:
+            doc.add_page_break()
+            self._add_heading(doc, '其他项目资料', 1)
+            self._add_para(doc, f'共 {len(other_paths)} 张', indent=True)
+            for p in other_paths[:8]:
+                clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', os.path.basename(p), flags=__import__('re').I)
+                self._add_image(doc, p, clean_name[:60])
 
-            for label, cats in cat_groups:
-                paths = []
-                for cat in cats:
-                    for img in session_images:
-                        if img.get("category") == cat:
-                            p = img.get("path", "")
-                            if p and p not in paths:
-                                paths.append(p)
-                if not paths:
-                    continue
-                # 🔴 Filter: skip already-inserted images (global dedup)
-                fresh_paths = [p for p in paths if str(p) not in self._inserted_images]
-                if not fresh_paths:
-                    continue
-                self._add_heading(doc, label, 2)
-                self._add_para(doc, f'共 {len(fresh_paths)} 张', indent=True)
-                shown = 0
-                for p in fresh_paths[:8]:
-                    fname = os.path.basename(p)
-                    clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', fname, flags=__import__('re').I)
-                    self._add_image(doc, p, clean_name[:60])
-                    shown += 1
-                total_in_category = len(paths)
-                if total_in_category > shown:
-                    self._add_para(doc, f'（共 {total_in_category} 张，以上展示 {shown} 张）', indent=True)
+        # ── 附件6：不稳定因素动态排查台账样表 ──
+        doc.add_page_break()
+        self._add_heading(doc, '附件6 不稳定因素动态排查台账样表', 1)
+        self._add_para(doc, '附件6-1：不稳定因素动态排查台账（样表），供征收实施期间对关键节点开展专项风险排查时使用。', indent=True)
+        doc.add_paragraph()
+        self._add_ledger_sample_table(doc)
 
-            # ── 六、公司资质与备案证书（从稳评模板提取）──
-            # 🔴 Only show certs NOT already shown on page 2
-            fresh_certs = [(p, cap) for p, cap in cert_images if str(p) not in self._inserted_images]
-            if fresh_certs:
-                self._add_heading(doc, '六、公司资质与备案证书', 2)
-                self._add_para(doc, f'共 {len(fresh_certs)} 张', indent=True)
-                for cert_path, cert_caption in fresh_certs[:8]:
-                    self._add_image(doc, cert_path, cert_caption)
+        # ── 待补充附件清单 ──
+        doc.add_page_break()
+        self._add_heading(doc, '待补充附件清单', 1)
+        self._add_para(doc, '以下附件材料在相关程序完成后补充归档：', indent=True)
+        self._add_para(doc, '待补充附件1：征地补偿费用足额预存财政指定专户证明材料；', indent=True)
+        self._add_para(doc, '待补充附件2：拟征收土地现状调查确认表；', indent=True)
+        self._add_para(doc, '待补充附件3：安置方案公告及听证记录材料。', indent=True)
 
-            # ── 七、其他资料（未分类图片）──
-            other_paths = []
-            for img in session_images:
-                if img.get("category") == "other":
-                    p = img.get("path", "")
-                    if p and p not in other_paths and str(p) not in self._inserted_images and p not in cert_paths:
-                        other_paths.append(p)
-            if other_paths:
-                self._add_heading(doc, '七、其他项目资料', 2)
-                self._add_para(doc, f'共 {len(other_paths)} 张', indent=True)
-                for p in other_paths[:8]:
-                    fname = os.path.basename(p)
-                    clean_name = __import__('re').sub(r'\.(jpg|jpeg|png)$', '', fname, flags=__import__('re').I)
-                    self._add_image(doc, p, clean_name[:60])
+    def _add_ledger_sample_table(self, doc):
+        """附件6 不稳定因素动态排查台账样表（表头模板）。"""
+        headers = ['序号', '排查日期', '关键节点', '排查事项', '发现情况', '责任单位', '处置情况', '备注']
+        rows = [
+            ['1', '', '现状调查公示', '公示内容完整性、群众反映、意见收集', '', '', '', ''],
+            ['2', '', '安置方案公告听证', '听证组织、群众意见、方案调整', '', '', '', ''],
+            ['3', '', '社保名额公示', '名额分配公平性、群众意见', '', '', '', ''],
+            ['4', '', '日常动态排查', '信访来访、网络舆情、苗头性信息', '', '', '', ''],
+        ]
+        table = doc.add_table(rows=len(rows) + 1, cols=len(headers), style='Table Grid')
+        for ci, h in enumerate(headers):
+            self._set_cell(table.cell(0, ci), h, bold=True)
+        for ri, row in enumerate(rows):
+            for ci, val in enumerate(row):
+                self._set_cell(table.cell(ri + 1, ci), val)
 
     def _load_company_certificate_images(self, domain: str = "stability") -> List[tuple]:
         """Load company cert images. Stability: template-extracted. Bidding: DB."""

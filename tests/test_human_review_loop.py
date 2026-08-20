@@ -504,6 +504,6 @@ def test_aggregate_key_data_sums_survey_counts():
     assert agg["support_count"] == 2, f"支持数应累加为2, 实际{agg['support_count']}"
     assert agg["oppose_count"] == 0
     assert agg["total_samples"] == 2          # 2 个单人调查页
-    assert agg["support_rate"] == "100.0%"
+    assert agg["support_rate"] == "100.0"     # 不带 %，避免下游 float 崩溃
     assert "杨亚" in agg["symposium_attendees"] and "徐守科" in agg["symposium_attendees"]
     assert len(agg["symposium_date"].split("、")) == 3   # 3 个日期都保留

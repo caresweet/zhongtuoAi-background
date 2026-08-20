@@ -26,7 +26,7 @@ class ScoringItem:
 class ScoringService:
 
     def _build_pre_measures_table(self, facts: Dict, survey: Dict) -> List[ScoringItem]:
-        support_rate = float(facts.get("support_rate", 100))
+        support_rate = float(str(facts.get("support_rate", 100)).replace('%', '').replace('％', '').strip())
         oppose_rate = 100.0 - support_rate
         aware = facts.get("survey_aware_yes", "89.0")
         doc_ref = facts.get("doc_reference", "")

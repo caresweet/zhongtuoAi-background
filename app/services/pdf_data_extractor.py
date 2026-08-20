@@ -733,9 +733,11 @@ class PDFDataExtractor:
             aggregated["total_samples"] = total
             aggregated["support_count"] = support
             aggregated["oppose_count"] = oppose
-            aggregated["support_rate"] = f"{round(support / total * 100, 1)}%"
-            aggregated["oppose_rate"] = f"{round(oppose / total * 100, 1)}%"
-            aggregated["awareness_rate"] = f"{round(aware_pages / total * 100, 1)}%"
+            # 🔴 不带 %：与 deep_material_analyzer 的 support_rate 约定一致
+            #   （"100.0" 而非 "100.0%"），避免下游 float() 转换崩溃
+            aggregated["support_rate"] = str(round(support / total * 100, 1))
+            aggregated["oppose_rate"] = str(round(oppose / total * 100, 1))
+            aggregated["awareness_rate"] = str(round(aware_pages / total * 100, 1))
             aggregated["survey_data_source"] = (
                 "逐页累加(每人一页)" if explicit_total == 0 else "问卷显式汇总"
             )

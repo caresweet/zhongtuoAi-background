@@ -2025,6 +2025,7 @@ class ReportAssembler:
             if isinstance(p, str) and os.path.exists(p) and os.path.getsize(p) > 5000:
                 if os.path.splitext(p)[1].lower() in {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}:
                     session_images.append(img)
+        domain = filled.get("_domain", "stability") if isinstance(filled, dict) else "stability"
 
         # ── 附件目录（完整清单，对应附件0-6 + 待补充）──
         self._add_heading(doc, '附件目录', 1)
@@ -2040,17 +2041,24 @@ class ReportAssembler:
         ]:
             self._add_para(doc, line, indent=False)
 
-        # ── 附件0：机构及人员资质材料（预留位置插入扫描件）──
+        # ── 附件0：机构及人员资质材料 ──
+        # 有公司资质文件（storage/extracted_imgs/stability_cert_*）→ 直接插入扫描件；
+        # 无 → 写占位「此处填入公司资质文件」，由人工后续粘贴。
         doc.add_page_break()
         self._add_heading(doc, '附件0 机构及人员资质材料', 1)
-        self._add_para(doc, '本附件预留位置用于插入以下机构及人员资质扫描件：', indent=True)
         self._add_para(doc, '附件0-1：江苏众拓项目代理咨询有限公司营业执照复印件；', indent=True)
         self._add_para(doc, '附件0-2：稳评项目负责人陈春高级工程师、估价师、经济师职称证书扫描件；', indent=True)
         self._add_para(doc, '附件0-3：稳评工作组主要从业人员社会稳定风险评估专业技术人员培训证书（安如月、张抗洪、程士汝、刘利伟等人）。', indent=True)
         doc.add_paragraph()
-        self._add_para(doc, '（附件0-1 营业执照复印件扫描件粘贴处）', indent=True)
-        self._add_para(doc, '（附件0-2 负责人职称证书扫描件粘贴处）', indent=True)
-        self._add_para(doc, '（附件0-3 培训证书扫描件粘贴处）', indent=True)
+        _cert_imgs = self._load_company_certificate_images(domain=domain)
+        if _cert_imgs:
+            for _path, _cap in _cert_imgs:
+                self._add_image(doc, _path, _cap)
+        else:
+            self._add_para(doc, '此处填入公司资质文件', indent=True)
+            self._add_para(doc, '（此处插入附件0-1 营业执照复印件扫描件）', indent=True)
+            self._add_para(doc, '（此处插入附件0-2 负责人职称证书扫描件）', indent=True)
+            self._add_para(doc, '（此处插入附件0-3 稳评培训证书扫描件）', indent=True)
 
         # ── 附件1：问卷调查统计分析 ──
         total = survey_stats.get('total_surveys', 0)
@@ -2063,7 +2071,6 @@ class ReportAssembler:
             self._add_survey_table(doc, survey_stats, '附表1 公众意见调查统计汇总表')
 
         # ── 附件2/3/4/5：按类别组织图片 ──
-        domain = filled.get("_domain", "stability") if isinstance(filled, dict) else "stability"
         cert_images = self._load_company_certificate_images(domain=domain)
         cert_paths = set(p for p, _ in cert_images)
 

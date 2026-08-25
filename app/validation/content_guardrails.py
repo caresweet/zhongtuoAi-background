@@ -769,3 +769,107 @@ def check_chapters_against_facts(
             seen.add(k)
             dedup.append(it)
     return dedup
+
+
+def fix_chapters_against_facts(
+    chapters: Dict[int, Dict[str, Any]],
+    facts: Dict[str, Any],
+):
+    """确定性强制修正：把各章与资料不符的关键数字，直接替换为事实库的正确值。
+
+    与 check_chapters_against_facts 的区别：那个只「报」，这个直接「改」。
+    不依赖 LLM 重写（LLM 重写往往改不对），保证数据 100% 准确。
+
+    安全口径（避免误改）：
+    - 面积（亩/㎡）、问卷（份）、户数（户）：单位无歧义，直接改
+    - 支持率/反对率（%）：% 有歧义（可能误伤「满意度85%」），只改带明确上下文的
+      「支持率X%」「反对率X%」表述
+
+    返回 (修正后的 chapters, 修正记录列表 [(chapter, 旧值, 新值), ...])。
+    """
+    def _fmt(v):
+        """数字格式化：整数不带小数点（100.0 → 100）。"""
+        return str(int(v)) if float(v) == int(v) else str(v)
+
+    fixes = []
+    fact_area_mu = facts.get('area_mu')
+    fact_area_m2 = facts.get('area_m2')
+    fact_support = facts.get('support_rate')
+    fact_oppose = facts.get('oppose_rate')
+    fact_total = facts.get('total_samples')
+    fact_household = facts.get('household_count')
+
+    for ch_num, ch in chapters.items():
+        if not isinstance(ch, dict):
+            continue
+        md = ch.get('markdown', '') or ''
+        if not md:
+            continue
+        orig = md
+
+        # ── 面积（亩）──
+        if fact_area_mu is not None:
+            def _fix_mu(m):
+                val = float(m.group(1))
+                if abs(val - fact_area_mu) / fact_area_mu > 0.01:
+                    fixes.append((ch_num, f"{val}亩", f"{fact_area_mu}亩"))
+                    return f"{fact_area_mu}亩"
+                return m.group(0)
+            md = re.sub(r'(?<![\d.])(\d+(?:\.\d+)?)\s*亩', _fix_mu, md)
+
+        # ── 面积（㎡）──
+        if fact_area_m2 is not None:
+            def _fix_m2(m):
+                val = float(m.group(1))
+                if abs(val - fact_area_m2) / fact_area_m2 > 0.01:
+                    fixes.append((ch_num, f"{val}㎡", f"{int(fact_area_m2)}㎡"))
+                    return f"{int(fact_area_m2)}㎡"
+                return m.group(0)
+            md = re.sub(r'(?<![\d.])(\d+(?:\.\d+)?)\s*(?:平方米|㎡)', _fix_m2, md)
+
+        # ── 支持率（仅「支持率X%」明确上下文）──
+        if fact_support is not None:
+            def _fix_sr(m):
+                val = float(m.group(1))
+                if abs(val - fact_support) > 0.5:
+                    fixes.append((ch_num, f"支持率{val}%", f"支持率{_fmt(fact_support)}%"))
+                    return f"支持率{_fmt(fact_support)}%"
+                return m.group(0)
+            md = re.sub(r'支持率\s*[：:为]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*%', _fix_sr, md)
+
+        # ── 反对率（仅「反对率X%」明确上下文）──
+        if fact_oppose is not None:
+            def _fix_or(m):
+                val = float(m.group(1))
+                if abs(val - fact_oppose) > 0.5:
+                    fixes.append((ch_num, f"反对率{val}%", f"反对率{_fmt(fact_oppose)}%"))
+                    return f"反对率{_fmt(fact_oppose)}%"
+                return m.group(0)
+            md = re.sub(r'反对率\s*[：:为]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*%', _fix_or, md)
+
+        # ── 问卷份数 ──
+        if fact_total is not None:
+            def _fix_sc(m):
+                val = float(m.group(1))
+                if val != fact_total:
+                    fixes.append((ch_num, f"{int(val)}份", f"{int(fact_total)}份"))
+                    return f"{int(fact_total)}份"
+                return m.group(0)
+            md = re.sub(r'(?<![\d.])(\d+)\s*份', _fix_sc, md)
+
+        # ── 户数 ──
+        if fact_household is not None:
+            def _fix_hc(m):
+                val = float(m.group(1))
+                if val != fact_household:
+                    fixes.append((ch_num, f"{int(val)}户", f"{int(fact_household)}户"))
+                    return f"{int(fact_household)}户"
+                return m.group(0)
+            md = re.sub(r'(?<![\d.])(\d+)\s*户', _fix_hc, md)
+
+        if md != orig:
+            ch['markdown'] = md
+            if ch.get('status') not in ('human_reviewed', 'human_review'):
+                ch['status'] = 'fact_fixed'
+
+    return chapters, fixes

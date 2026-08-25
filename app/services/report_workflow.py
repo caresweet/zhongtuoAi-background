@@ -1104,6 +1104,22 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
         state["errors"] = state.get("errors",[]) + ["无章节内容可组装"]
         return state
 
+    # 🔴 方案乙兜底：组装前按事实库确定性强制修正关键数字（面积/支持率/问卷/户数）。
+    #   LLM 重写经常改不对，这里用 ProjectFacts 正确值直接替换，保证数据准确。
+    try:
+        from app.validation.content_guardrails import (
+            build_project_facts, fix_chapters_against_facts,
+        )
+        facts = build_project_facts(state.get("filled_data", {}) or {})
+        chapters, fact_fixes = fix_chapters_against_facts(chapters, facts)
+        if fact_fixes:
+            state["chapters"] = chapters
+            logs.append(f"🔧 数据强制修正 {len(fact_fixes)} 处：")
+            for ch_num, old, new in fact_fixes[:10]:
+                logs.append(f"   第{ch_num}章 {old} → {new}")
+    except Exception as e:
+        logger.warning(f"fact fix skipped: {e}")
+
     try:
         # 🔴 Post-generation polish: quick LLM pass to unify style
         # 章节内容在 state["chapters"]（review 通过时累积），非 outline_list

@@ -85,3 +85,32 @@ def test_dedup_same_issue():
         {1: {'markdown': '面积500亩，另有300亩。'}}, facts)
     area_issues = [i for i in issues if i['type'] == 'area_mismatch']
     assert len(area_issues) == 1
+
+
+def test_fix_chapters_against_facts_force_rewrite():
+    """方案乙：错数字被确定性强制改对，不依赖 LLM。"""
+    from app.validation.content_guardrails import fix_chapters_against_facts
+    facts = build_project_facts({'area_mu': '489.51', 'area_m2': '326342',
+                                 'support_rate': '100%', 'total_samples': '52',
+                                 'household_count': '49'})
+    chapters = {
+        1: {'markdown': '本次拟征收总面积500亩，涉及50户。', 'status': 'passed'},
+        3: {'markdown': '发放问卷40份，群众支持率89.5%。', 'status': 'passed'},
+    }
+    fixed, fixes = fix_chapters_against_facts(chapters, facts)
+    assert '489.51亩' in fixed[1]['markdown']
+    assert '49户' in fixed[1]['markdown']
+    assert '52份' in fixed[3]['markdown']
+    assert '支持率100%' in fixed[3]['markdown']
+    assert fixed[1]['status'] == 'fact_fixed'
+    assert len(fixes) >= 4
+
+
+def test_fix_does_not_touch_correct_numbers():
+    """正确数字不被改动。"""
+    from app.validation.content_guardrails import fix_chapters_against_facts
+    facts = build_project_facts({'area_mu': '489.51', 'support_rate': '100%'})
+    chapters = {6: {'markdown': '面积489.51亩，支持率100%。', 'status': 'passed'}}
+    fixed, fixes = fix_chapters_against_facts(chapters, facts)
+    assert fixes == []
+    assert fixed[6]['markdown'] == '面积489.51亩，支持率100%。'

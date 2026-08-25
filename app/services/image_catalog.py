@@ -44,6 +44,36 @@ CHAPTER_IMAGE_SPECS = {
     9: [{"type": "review", "label": "稳评专家评审意见表", "min": 1, "max": 2, "keywords": ["评审", "意见表", "签字"]}],
 }
 
+# 🔴 文件夹名 → 具体章节 的确定性绑定（治「图片放错」）。
+# 文件夹名是用户整理的、最强的位置信号，优先级高于类别竞争。
+# 顺序即优先级：先匹配到的生效。
+FOLDER_CHAPTER_HINTS = [
+    (['位置图', '百度', '红线', '勘测定界', '宗地', '地图'], 1),
+    (['临时用地', '现场勘查', '现场照片', '踏勘'], 2),
+    (['公示照片', '公示栏', '公告栏', '张贴'], 3),
+    (['村民开会', '座谈会', '群众座谈', '开会现场'], 3),
+    (['问卷', '签到'], 3),
+    (['专家评审会照片', '评审会照片'], 5),
+    (['稳评专家意见', '专家意见', '综合意见'], 8),
+]
+
+
+def _classify_chapter_hint(name: str, folder_hint: str = "") -> Optional[int]:
+    """从文件夹名识别图片应放的章节（确定性绑定）。
+
+    返回章节号；识别不出返回 None（走类别竞争兜底）。
+    """
+    fl = (folder_hint or "").lower()
+    if not fl:
+        return None
+    for keywords, ch in FOLDER_CHAPTER_HINTS:
+        if any(k in fl for k in keywords):
+            return ch
+    return None
+
+
+
+
 
 def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict] = None) -> Dict:
     """Scan all user-uploaded files and build a structured image catalog.
@@ -146,29 +176,54 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         if fp and any(c.get('fingerprint') == fp for c in catalog):
             continue
 
+        # 🔴 文件夹名 → 章节 确定性绑定（治「放错」）
+        chapter_hint = _classify_chapter_hint(name, folder_hint)
+
         catalog.append({
             "path": path,
             "name": name,
             "category": cat,
             "display_name": display_name,
             "fingerprint": fp,
+            "chapter_hint": chapter_hint,
         })
 
     # 🔴 Match to chapters with global dedup (each image used at most ONCE)
     used_paths = set()
     by_chapter = {}
 
+    # 🔴 第一遍：有「文件夹→章节」确定性提示的图，直接绑定到对应章节，不参与竞争
+    for img in catalog:
+        hint = img.get("chapter_hint")
+        if not hint or hint not in CHAPTER_IMAGE_SPECS:
+            continue
+        ch_images = by_chapter.setdefault(hint, [])
+        # 找到该章节里 type 匹配的 spec，用于取 label
+        specs = CHAPTER_IMAGE_SPECS[hint]
+        # 优先挂到能匹配 category 的 spec；匹配不上就用第一个 spec 的 label
+        matched = next((s for s in specs if s["type"] == img["category"]), None)
+        label = matched["label"] if matched else specs[0]["label"]
+        # 不超过该 spec 的 max
+        existing_of_label = sum(1 for x in ch_images if x["label"] == label)
+        max_of_label = (matched or specs[0]).get("max", 3)
+        if existing_of_label >= max_of_label:
+            continue
+        used_paths.add(img["path"])
+        ch_images.append({"path": img["path"], "name": img["display_name"],
+                          "type": img["category"], "label": label})
+
+    # 🔴 第二遍：无提示的图走类别竞争兜底（维持原逻辑）
     # Process chapters with most specific requirements first
     chapter_order = sorted(CHAPTER_IMAGE_SPECS.keys(),
                            key=lambda ch: sum(s["max"] for s in CHAPTER_IMAGE_SPECS[ch]))
 
     for ch_num in chapter_order:
         specs = CHAPTER_IMAGE_SPECS[ch_num]
-        ch_images = []
+        ch_images = by_chapter.setdefault(ch_num, [])
         for spec in specs:
             # Find matching images NOT already used in another chapter
             available = [img for img in catalog
-                         if img["path"] not in used_paths and (
+                         if img["path"] not in used_paths and not img.get("chapter_hint") and (
                              img["category"] == spec["type"] or
                              (spec["type"] == "meeting" and img["category"] in ("photo", "review")) or
                              (spec["type"] == "photo" and img["category"] in ("photo", "other"))  # 🔴 Allow "other" as photo fallback
@@ -177,7 +232,6 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                 used_paths.add(m["path"])
                 ch_images.append({"path": m["path"], "name": m["display_name"],
                                   "type": spec["type"], "label": spec["label"]})
-        by_chapter[ch_num] = ch_images
 
     # 🔴 Find missing (accounting for dedup)
     missing = []

@@ -595,3 +595,177 @@ def full_guardrail_check(
     report["passed"] = critical_count == 0
 
     return report
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔴 项目事实库 + 事实比对器（治「数据不准」B+C：报告数字回对资料）
+#
+# ProjectFacts：从资料提取出的「唯一事实源」，是收口后的干净数据。
+# check_chapters_against_facts：把报告各章关键数字回对事实，输出数据问题清单。
+# 这两个都是「确定性代码」，不靠 LLM，可断言、可回归。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _norm_num(s) -> Optional[float]:
+    """把字符串/数字归一成 float：去 %、去全角、去逗号空格、去「亩/㎡/份/户」等中文单位。"""
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    t = str(s)
+    # 去全角
+    t = t.replace('％', '%').replace('，', ',').replace('．', '.')
+    # 去千分位逗号
+    t = t.replace(',', '')
+    # 去中文单位词
+    for unit in ['亩', '平方米', '㎡', '平方', '份', '户', '人', '%', '％', '号']:
+        t = t.replace(unit, '')
+    t = t.strip()
+    if not t:
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _extract_numbers(text: str) -> List[Tuple[float, str]]:
+    """从文本抽数字及其附带单位（用于回对面积/支持率等）。
+
+    返回 [(数值, 单位), ...]，单位可能为 ''。
+    """
+    results: List[Tuple[float, str]] = []
+    # 支持率/百分比
+    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*%', text):
+        results.append((float(m.group(1)), '%'))
+    # 面积（亩）
+    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*亩', text):
+        results.append((float(m.group(1)), '亩'))
+    # 面积（平方米）
+    for m in re.finditer(r'(\d+(?:\.\d+)?)\s*(?:平方米|㎡)', text):
+        results.append((float(m.group(1)), '㎡'))
+    # 问卷/户数（份、户）
+    for m in re.finditer(r'(\d+)\s*(份|户)', text):
+        results.append((float(m.group(1)), m.group(2)))
+    return results
+
+
+def build_project_facts(filled_data: Dict[str, Any]) -> Dict[str, Any]:
+    """从 filled_data 构建「项目事实库」（唯一事实源）。
+
+    只收口、归一，不新增/不猜测数据；缺的字段留空。
+    """
+    facts: Dict[str, Any] = {}
+
+    def _g(*keys):
+        for k in keys:
+            v = filled_data.get(k)
+            if v not in (None, '', '【待补充】'):
+                return v
+        return None
+
+    # 文号
+    dr = _g('doc_reference')
+    if dr:
+        facts['doc_reference'] = str(dr).strip()
+
+    # 征收面积（亩 / ㎡，保留两者）
+    am = _g('area_mu')
+    am_n = _norm_num(am)
+    if am_n is not None and am_n > 0:
+        facts['area_mu'] = am_n
+    a2 = _g('area_m2')
+    a2_n = _norm_num(a2)
+    if a2_n is not None and a2_n > 0:
+        facts['area_m2'] = a2_n
+
+    # 支持率 / 反对率
+    sr = _norm_num(_g('support_rate'))
+    if sr is not None:
+        facts['support_rate'] = sr
+    or_ = _norm_num(_g('oppose_rate'))
+    if or_ is not None:
+        facts['oppose_rate'] = or_
+
+    # 问卷份数
+    sc = _norm_num(_g('total_samples', 'survey_total_count'))
+    if sc is not None and sc > 0:
+        facts['total_samples'] = sc
+
+    # 户数
+    hc = _norm_num(_g('household_count'))
+    if hc is not None and hc > 0:
+        facts['household_count'] = hc
+
+    return facts
+
+
+def check_chapters_against_facts(
+    chapters: Dict[int, Dict[str, Any]],
+    facts: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """把各章关键数字回对项目事实，返回数据问题清单。
+
+    每个 issue 形如 {chapter, type, severity, message, suggestion}，
+    suggestion='regenerate' 用于触发对应章节重写（方案丙）。
+
+    判断口径：
+    - 面积「亩」：|报告值 - 事实| / 事实 > 1% 视为不一致（326342㎡ vs 489.51亩 本身不是同一单位，需换算）
+    - 支持率：差异 > 0.5 个百分点视为不一致
+    - 问卷份数/户数：整数不相等视为不一致
+    """
+    issues: List[Dict[str, Any]] = []
+
+    def _add(ch, typ, msg, sev='critical'):
+        issues.append({
+            "chapter": ch, "type": typ, "severity": sev,
+            "message": msg, "suggestion": "regenerate",
+        })
+
+    fact_area_mu = facts.get('area_mu')
+    fact_area_m2 = facts.get('area_m2')
+    fact_support = facts.get('support_rate')
+    fact_oppose = facts.get('oppose_rate')
+    fact_total = facts.get('total_samples')
+    fact_household = facts.get('household_count')
+
+    for ch_num, ch in chapters.items():
+        if not isinstance(ch, dict):
+            continue
+        md = ch.get('markdown', '') or ''
+        if not md:
+            continue
+        for val, unit in _extract_numbers(md):
+            if unit == '亩' and fact_area_mu is not None:
+                # 允许换算：亩 ≈ ㎡/666.67
+                if abs(val - fact_area_mu) / fact_area_mu > 0.01:
+                    _add(ch_num, 'area_mismatch',
+                         f"第{ch_num}章出现面积「{val}亩」，与资料 {fact_area_mu} 亩 不一致")
+            elif unit == '㎡' and fact_area_m2 is not None:
+                if abs(val - fact_area_m2) / fact_area_m2 > 0.01:
+                    _add(ch_num, 'area_mismatch',
+                         f"第{ch_num}章出现面积「{val}㎡」，与资料 {fact_area_m2}㎡ 不一致")
+            elif unit == '%' and fact_support is not None:
+                # 仅当数值接近支持率（±15 以内）时才当作「支持率」核对，避免误抓其他百分比
+                if abs(val - fact_support) <= 15:
+                    if abs(val - fact_support) > 0.5:
+                        _add(ch_num, 'support_rate_mismatch',
+                             f"第{ch_num}章出现支持率「{val}%」，与资料 {fact_support}% 不一致")
+            elif unit in ('份', '户') and unit == '份' and fact_total is not None:
+                if val != fact_total:
+                    _add(ch_num, 'survey_count_mismatch',
+                         f"第{ch_num}章出现问卷「{int(val)}份」，与资料 {int(fact_total)}份 不一致")
+            elif unit in ('份', '户') and unit == '户' and fact_household is not None:
+                if val != fact_household:
+                    _add(ch_num, 'household_mismatch',
+                         f"第{ch_num}章出现户数「{int(val)}户」，与资料 {int(fact_household)}户 不一致")
+
+    # 去重（同 chapter + 同 type 只保留一条，避免同一数字多段重复刷屏）
+    seen = set()
+    dedup = []
+    for it in issues:
+        k = (it['chapter'], it['type'])
+        if k not in seen:
+            seen.add(k)
+            dedup.append(it)
+    return dedup

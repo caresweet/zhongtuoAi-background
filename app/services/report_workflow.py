@@ -924,6 +924,24 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         regen = len(result.get("regenerate_chapters", []))
         logs.append(f"🔍 终稿质量审查：{total} 个问题，自动修复 {fixed} 个，需重写 {regen} 章")
 
+        # 🔴 事实比对：报告各章关键数字回对项目事实（唯一事实源），对不上 → 数据问题
+        from app.validation.content_guardrails import (
+            build_project_facts, check_chapters_against_facts,
+        )
+        facts = build_project_facts(state.get("filled_data", {}) or {})
+        fact_issues = check_chapters_against_facts(state.get("chapters", {}) or {}, facts)
+        if fact_issues:
+            # 合并进审核结果，让现有重写循环识别这些章节
+            _regen_set = set(result.get("regenerate_chapters", []) or [])
+            for fi in fact_issues:
+                fi["chapter"] = int(fi["chapter"])
+                result.setdefault("all_issues", []).append(fi)
+                _regen_set.add(fi["chapter"])
+            result["regenerate_chapters"] = sorted(_regen_set)
+            logs.append(f"📊 数据比对：发现 {len(fact_issues)} 处报告数字与资料不一致，触发对应章节重写")
+            for fi in fact_issues[:8]:
+                logs.append(f"   ⚠️ {fi['message']}")
+
         # 🔴 Skill 输出解析 → 章节级审核任务（禁止只打日志不生成任务）
         from app.validation.audit_dispatcher import (
             parse_skill_audit_to_chapter_tasks, split_tasks, collect_global_human_items,

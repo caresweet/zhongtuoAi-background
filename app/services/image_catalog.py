@@ -9,11 +9,24 @@ Image naming priority:
   3. Filename keyword fallback
 """
 
-import os, re, logging
+import os, re, logging, hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _image_fingerprint(path: str) -> str:
+    """图片内容指纹（md5）：同内容不同文件名/路径判为重复。"""
+    try:
+        h = hashlib.md5()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
 
 # Chapter image requirements: what each chapter needs
 CHAPTER_IMAGE_SPECS = {
@@ -128,11 +141,17 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                     display_name = part
                     break  # 🔴 Use first meaningful folder name, not last
 
+        # 🔴 内容指纹：同一张图（不同路径/副本）只保留一份，根除重复
+        fp = _image_fingerprint(path)
+        if fp and any(c.get('fingerprint') == fp for c in catalog):
+            continue
+
         catalog.append({
             "path": path,
             "name": name,
             "category": cat,
             "display_name": display_name,
+            "fingerprint": fp,
         })
 
     # 🔴 Match to chapters with global dedup (each image used at most ONCE)

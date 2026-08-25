@@ -4,7 +4,7 @@ Called automatically by ChapterOrchestrator after all chapters are confirmed.
 Replaces the old template-fill approach with direct DOCX construction.
 """
 
-import os, re, logging
+import os, re, logging, hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -1354,14 +1354,14 @@ class ReportAssembler:
             for img_info in ch_imgs[:3]:  # Max 3 images per chapter
                 if isinstance(img_info, dict):
                     path = img_info.get("path", "")
-                    # 🔴 用 display_name（简洁类别名，如"公示照片"）而非原始文件名
-                    name = img_info.get("name", "") or img_info.get("caption", "") or ""
+                    # 🔴 规范图注：优先用 label（语义标签「图X-X 什么什么图」），
+                    #    不用 name(display_name，可能是清洗后的文件名，不规范)
+                    label = img_info.get("label", "") or img_info.get("name", "") or ""
                 else:
                     path = str(img_info)
-                    name = ""
+                    label = ""
                 if path:
-                    # 🔴 简洁图注：图X-N 类别名（不带 pdf_xxx 原始文件名）
-                    cap = f"图{ch_num}-{img_count+1} {name}".strip() if name else f"图{ch_num}-{img_count+1}"
+                    cap = f"图{ch_num}-{img_count+1} {label}".strip() if label else f"图{ch_num}-{img_count+1}"
                     self._add_image(doc, path, cap)
                     img_count += 1
 
@@ -1811,10 +1811,28 @@ class ReportAssembler:
                 return size
         return None
 
+    @staticmethod
+    def _image_fingerprint(path) -> str:
+        """图片内容指纹：同内容不同路径判为重复。"""
+        try:
+            h = hashlib.md5()
+            with open(path, 'rb') as f:
+                for chunk in iter(lambda: f.read(65536), b''):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return ""
+
     def _add_image(self, doc, image_ref, caption, max_width=Inches(5.5), max_height=Inches(7.0)):
         img_path = self._resolve_image_path(image_ref)
-        # 🔴 Global dedup: skip if already inserted
+        # 🔴 内容指纹去重：同图（不同路径写法）只插一次，根除重复
+        fp = self._image_fingerprint(img_path)
+        if fp and fp in self._inserted_images:
+            return
         img_key = str(img_path)
+        if not fp:
+            if img_key in self._inserted_images:
+                return
         # 🔴 记录图片放置信息（供审核 agent 观察图片位置/命名）
         try:
             if hasattr(self, '_image_placements'):
@@ -1826,8 +1844,8 @@ class ReportAssembler:
                 })
         except Exception:
             pass
-        if img_key in self._inserted_images:
-            return
+        if fp:
+            self._inserted_images.add(fp)
         self._inserted_images.add(img_key)
 
         if not img_path.exists():

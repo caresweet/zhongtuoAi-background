@@ -106,6 +106,7 @@ class ReportAssembler:
     def assemble(self, state: dict) -> str:
         """Build the final report DOCX from session state."""
         self._inserted_images = set()  # 🔴 Reset per call — avoid cross-report dedup
+        self._chapter_image_counter = {}  # 🔴 图号统一计数器：章 → 已插入图数
         import traceback as _tb
         session_id = state.get("session_id", "report")
         chapters = state.get("chapters", {})
@@ -1352,20 +1353,17 @@ class ReportAssembler:
         if ch_num == 1:
             logger.info(f"Ch{ch_num} image map: {len(ch_img_map)} chapters, this chapter: {len(ch_imgs)} images")
         if ch_imgs:
-            img_count = 0
             for img_info in ch_imgs[:3]:  # Max 3 images per chapter
                 if isinstance(img_info, dict):
                     path = img_info.get("path", "")
                     # 🔴 规范图注：优先用 label（语义标签「图X-X 什么什么图」），
-                    #    不用 name(display_name，可能是清洗后的文件名，不规范)
+                    #    图号由 _add_image 内统一计数器生成（治跳号）
                     label = img_info.get("label", "") or img_info.get("name", "") or ""
                 else:
                     path = str(img_info)
                     label = ""
                 if path:
-                    cap = f"图{ch_num}-{img_count+1} {label}".strip() if label else f"图{ch_num}-{img_count+1}"
-                    self._add_image(doc, path, cap)
-                    img_count += 1
+                    self._add_image(doc, path, label)
 
         # 🔴 Render extracted PDF tables at END of chapter (any chapter with mapped tables)
         if extracted_tables:
@@ -1874,8 +1872,17 @@ class ReportAssembler:
                 self._add_para(doc, f'【图片待插入：{caption}】', indent=False)
                 return
 
-        # 🔴 Clean up caption: if it's a raw filename, extract meaningful parts
+        # 🔴 图注规范化 + 图号统一（治「图号跳号/重复」）：
+        #   忽略 LLM 手写的图号，按章内出现顺序由系统自动重编号「图X-N」。
         clean_caption = self._clean_image_caption(caption, img_path)
+        ch = getattr(self, '_current_chapter', 0)
+        counter = self._chapter_image_counter.setdefault(ch, 0) + 1
+        self._chapter_image_counter[ch] = counter
+        # 去掉 caption 里已有的「图X-N」前缀（可能跳号），只保留描述文字
+        desc = re.sub(r'^图\s*\d+[-—]\d+\s*', '', clean_caption).strip()
+        # 若描述里还带着「图X-N」但没在开头，也去掉
+        desc = re.sub(r'\b图\s*\d+[-—]\d+\b', '', desc).strip()
+        clean_caption = f"图{ch}-{counter} {desc}".strip() if desc else f"图{ch}-{counter}"
 
         # 🔴 Image above caption format: "图 X-X 描述"
         p_img = doc.add_paragraph()

@@ -33,13 +33,34 @@ IMAGE_CATEGORIES = {
 
 
 async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[str, str]:
-    """Use vision LLM to classify an image and extract any text content."""
+    """Use vision LLM to classify an image and extract any text content.
+
+    🔴 结果按文件 md5 缓存到磁盘，跨 session 复用。
+    """
     result = {
         "category": "other",
         "has_text": False,
         "extracted_text": "",
         "description": "",
     }
+
+    # 🔴 磁盘缓存 key（文件 md5）
+    cache_file = None
+    try:
+        import hashlib, pickle
+        from app.config import settings
+        cache_dir = settings.STORAGE_DIR / "image_classify_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        h = hashlib.md5()
+        with open(image_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        cache_file = cache_dir / f"{h.hexdigest()}.pkl"
+        if cache_file.exists():
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+    except Exception:
+        pass
 
     if not llm_service:
         return result
@@ -59,7 +80,23 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
                     image_path = str(cand)
                     break
         with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
+            raw = f.read()
+        # 🔴 压缩图片：超过 800px 或 > 1MB 时压缩，避免大型扫描件导致 413
+        from PIL import Image as PILImage
+        import io
+        try:
+            pil_img = PILImage.open(io.BytesIO(raw))
+            w, h = pil_img.size
+            max_dim = 800  # 🔴 视觉分类只需判断类别，800px 足够且 token 更少
+            if w > max_dim or h > max_dim or len(raw) > 300_000:
+                ratio = min(max_dim / w, max_dim / h)
+                pil_img = pil_img.resize((int(w * ratio), int(h * ratio)), PILImage.LANCZOS)
+                buf = io.BytesIO()
+                pil_img.save(buf, format='JPEG', quality=80, optimize=True)
+                raw = buf.getvalue()
+        except Exception:
+            pass
+        img_b64 = base64.b64encode(raw).decode()
 
         prompt = (
             "你是社会稳定风险评估的图片识别助手。请识别这张图片，并【只输出 JSON，不要输出任何解释文字】。\n"
@@ -84,7 +121,7 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
                 text=prompt,
                 image_base64=img_b64,
                 media_type="image/png",
-                max_tokens=1500,
+                max_tokens=200,
             ),
             timeout=60.0,
         )
@@ -130,6 +167,13 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
         logger.warning(f"Vision classification timeout for {image_path}")
     except Exception as e:
         logger.warning(f"Vision classification failed for {image_path}: {e}")
+
+    # 🔴 存磁盘缓存（即使失败也存，避免重复尝试）
+    try:
+        import pickle
+        pickle.dump(result, open(cache_file, 'wb'))
+    except Exception:
+        pass
 
     return result
 
@@ -374,31 +418,28 @@ async def analyze_all_materials(
         for map_key, option_counts in dept_tallies.items():
             result["filled_data_updates"][map_key] = option_counts
 
-    # 2. Extract PDF text
+    # 2. Extract PDF text — 从 state 已有的 _project_materials 读取，不重复 OCR
     pdf_text = ""
-    # 🔴 收集会议/调查 PDF 逐页累加后的问卷统计（_aggregate_key_data 修复后产出）
     pdf_survey_updates = {}
-    for pdf_path in pdfs:
-        try:
-            from app.services.material_ingestion_service import MaterialIngestionService
-            service = MaterialIngestionService()
-            artifact = await service.ingest_material(
-                pdf_path, scope="deep_analysis", document_type="pdf", domain="stability"
-            )
-            txt = getattr(artifact, 'text_content', '') or ''
-            if isinstance(txt, str) and len(txt) > 10:
-                pdf_text += f"\n[{os.path.basename(pdf_path)}]\n{txt}\n"
-            # 🔴 从 PDF 聚合的 key_data 读取问卷统计（如座谈会.pdf 逐页累加结果）
-            sd = getattr(artifact, 'structured_data', None) or {}
-            if isinstance(sd, dict):
-                for k in ("total_samples", "support_count", "oppose_count",
-                          "support_rate", "oppose_rate", "awareness_rate",
-                          "symposium_attendees", "symposium_date", "symposium_location"):
-                    v = sd.get(k)
-                    if v not in (None, "", "0", "0.0", "0.0%"):
-                        pdf_survey_updates.setdefault(k, v)
-        except Exception as e:
-            logger.warning(f"PDF text extraction failed for {pdf_path}: {e}")
+    existing_materials = state.get("_project_materials", []) or []
+    for item in existing_materials:
+        if not isinstance(item, dict):
+            continue
+        fp = item.get("source_path", "") or ""
+        if not fp.lower().endswith('.pdf'):
+            continue
+        txt = str(item.get('text_content', '') or '')
+        if len(txt) > 10:
+            pdf_text += f"\n[{os.path.basename(fp)}]\n{txt}\n"
+        # 从 PDF 聚合的 key_data 读取问卷统计
+        sd = item.get("structured_data", None) or {} if isinstance(item.get("structured_data"), dict) else {}
+        if isinstance(sd, dict):
+            for k in ("total_samples", "support_count", "oppose_count",
+                      "support_rate", "oppose_rate", "awareness_rate",
+                      "symposium_attendees", "symposium_date", "symposium_location", "survey_data_source"):
+                v = sd.get(k)
+                if v not in (None, "", "0", "0.0", "0.0%"):
+                    pdf_survey_updates.setdefault(k, v)
 
     result["extracted_pdf_text"] = pdf_text
 

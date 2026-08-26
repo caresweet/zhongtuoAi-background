@@ -151,7 +151,57 @@ class PDFDataExtractor:
         """
         self.llm = llm_service
         self._semaphore = asyncio.Semaphore(5)  # Limit concurrent VL calls
-        self._cache: Dict[str, PDFDocumentData] = {}  # 🔴 OCR result cache by file path
+        self._cache: Dict[str, PDFDocumentData] = {}  # 🔴 In-memory cache by file path
+
+    # ── 磁盘缓存（跨 session 持久化，避免重复 OCR）──
+
+    @staticmethod
+    def _cache_dir() -> Path:
+        from app.config import settings
+        d = settings.STORAGE_DIR / "ocr_cache"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _disk_cache_key(self, pdf_path: str) -> str:
+        """按文件内容 md5 生成缓存 key，文件变化时自动失效。"""
+        try:
+            import hashlib
+            h = hashlib.md5()
+            with open(pdf_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(65536), b''):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return ""
+
+    def _load_disk_cache(self, pdf_path: str) -> Optional[PDFDocumentData]:
+        """从磁盘加载 OCR 缓存。"""
+        dk = self._disk_cache_key(pdf_path)
+        if not dk:
+            return None
+        cache_file = self._cache_dir() / f"{dk}.pkl"
+        if not cache_file.exists():
+            return None
+        try:
+            import pickle
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            return None
+
+    def _save_disk_cache(self, pdf_path: str, data: PDFDocumentData):
+        """把 OCR 结果保存到磁盘。"""
+        dk = self._disk_cache_key(pdf_path)
+        if not dk:
+            return
+        try:
+            import pickle
+            cache_file = self._cache_dir() / f"{dk}.pkl"
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f)
+            print(f"    💾 OCR 缓存已保存: {cache_file.name}")
+        except Exception:
+            pass
 
     # ── Main entry point ──
 
@@ -182,9 +232,14 @@ class PDFDataExtractor:
         return results
 
     async def extract_pdf(self, pdf_path: str) -> PDFDocumentData:
-        """Extract all data from a single PDF. Cached by file path + mtime."""
-        # 🔴 Cache check: return cached result if file unchanged
+        """Extract all data from a single PDF. Cached by file path + mtime + disk."""
         import os as _os
+        # 🔴 磁盘缓存：跨 session 持久化，同文件直接复用
+        disk_cached = self._load_disk_cache(pdf_path)
+        if disk_cached is not None:
+            print(f"    💿 OCR 缓存命中: {Path(pdf_path).name}")
+            return disk_cached
+        # 🔴 内存缓存（同 session 内）
         cache_key = f"{pdf_path}:{_os.path.getmtime(pdf_path) if _os.path.exists(pdf_path) else 0}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -282,8 +337,9 @@ class PDFDataExtractor:
         # Step 5: Build fillable paragraphs
         doc_data.fillable_paragraphs = self._build_fillable_paragraphs(doc_data)
 
-        # 🔴 Cache result
+        # 🔴 Cache result（内存 + 磁盘）
         self._cache[cache_key] = doc_data
+        self._save_disk_cache(pdf_path, doc_data)
         return doc_data
 
     # ── Text extraction (pdfplumber) ──
@@ -346,7 +402,7 @@ class PDFDataExtractor:
                 return ""
 
     def _render_page_as_image(self, pdf_path: str, page_num: int) -> Tuple[str, str]:
-        """Render a PDF page as a base64-encoded PNG image."""
+        """Render a PDF page as a base64-encoded JPEG image（压缩后，避免 413）。"""
         try:
             import fitz
             doc = fitz.open(pdf_path)
@@ -355,14 +411,30 @@ class PDFDataExtractor:
                 return "", ""
 
             page = doc[page_num]
-            # Render at 200 DPI for good OCR quality
-            mat = fitz.Matrix(2.0, 2.0)  # 2x zoom ≈ 200 DPI
+            # 用 150 DPI 渲染（够 OCR 用，比 200 DPI 快且小）
+            mat = fitz.Matrix(1.5, 1.5)
             pix = page.get_pixmap(matrix=mat)
-            img_bytes = pix.tobytes("png")
+            # 用 JPEG 格式（压缩率高，比 PNG 小 5-10 倍）
+            img_bytes = pix.tobytes("jpeg")
             doc.close()
 
+            # 🔴 压缩到 1200px 以内，避免 413
+            from PIL import Image as PILImage
+            import io
+            try:
+                pil_img = PILImage.open(io.BytesIO(img_bytes))
+                w, h = pil_img.size
+                if w > 1200 or h > 1200:
+                    ratio = min(1200 / w, 1200 / h)
+                    pil_img = pil_img.resize((int(w * ratio), int(h * ratio)), PILImage.LANCZOS)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format='JPEG', quality=80, optimize=True)
+                    img_bytes = buf.getvalue()
+            except Exception:
+                pass
+
             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-            return img_base64, "image/png"
+            return img_base64, "image/jpeg"
         except ImportError:
             print("    ⚠️ PyMuPDF not installed, cannot render PDF pages")
             return "", ""

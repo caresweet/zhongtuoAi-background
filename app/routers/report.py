@@ -1972,7 +1972,8 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             _shared_logs.append("📂 资料已解析，直接继续生成...")
         else:
             await ws_manager.send(sid, "step_progress", {"step": "analysis", "status": "running", "step_statuses": {"analysis": "running", "generation": "pending", "assembly": "pending"}})
-            _shared_logs.append("📂 正在解析上传资料（OCR + AI分析）...")
+            # 🔴 统一分析入口：OCR + 视觉分类 + 数据提取，一次完成
+            _shared_logs.append("📂 正在解析上传资料（OCR + 图片分类 + 数据提取）...")
             await _analyze_session_attachments(state, uploaded)
             try:
                 from app.services.deep_material_analyzer import analyze_all_materials, apply_analysis_to_state
@@ -1986,31 +1987,6 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                 _shared_logs.append(f"  ✅ 解析完成：{len(uploaded)} 个文件，{n_imgs} 类图片，{n_data} 个数据字段")
             except Exception as e:
                 _shared_logs.append(f"  ⚠️ 深度分析跳过：{e}")
-
-            # 🔴 Force OCR if _pdf_raw_text is still empty (cached items may lack OCR from old code)
-            if not state.get("_pdf_raw_text") or len(state.get("_pdf_raw_text", "")) < 100:
-                _shared_logs.append("📂 检测到文本缓存为空，强制重新OCR...")
-                try:
-                    from app.services.pdf_data_extractor import PDFDataExtractor
-                    from app.services.llm_service import LLMService
-                    from app.services.file_service import file_service
-                    _ocr_llm = LLMService()
-                    _ocr_ext = PDFDataExtractor(llm_service=_ocr_llm)
-                    _parts = []
-                    for f in uploaded:
-                        path = f.get("path", f) if isinstance(f, dict) else f
-                        if isinstance(path, str) and path.lower().endswith('.pdf'):
-                            try:
-                                abs_path = str(file_service.get_absolute_path(path))
-                                _doc = await _ocr_ext.extract_pdf(abs_path)
-                                if _doc.full_text and len(_doc.full_text) > 100:
-                                    _parts.append(_doc.full_text)
-                            except: pass
-                    if _parts:
-                        state["_pdf_raw_text"] = "\n".join(_parts)
-                        _shared_logs.append(f"  ✅ 强制OCR完成：{len(state['_pdf_raw_text'])} 字")
-                except Exception as _ocr_e:
-                    _shared_logs.append(f"  ⚠️ 强制OCR失败：{_ocr_e}")
 
         await ws_manager.send(sid, "step_progress", {"step": "analysis", "status": "done", "step_statuses": {"analysis": "done", "generation": "running", "assembly": "pending"}})
 

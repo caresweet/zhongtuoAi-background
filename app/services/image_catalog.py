@@ -29,50 +29,80 @@ def _image_fingerprint(path: str) -> str:
 
 
 # Chapter image requirements: what each chapter needs
+# 🔴 权威规范（DB32/T4013-2021 十章结构，依据官方稳评模板图片位置）：
+#   - 位置示意图 → 第1章「决策基本情况」的三级标题「决策地理位置」，图注「决策地理位置」
+#   - 风险评估流程图 → 第2章「评估过程」的「评估步骤」，图注「本决策风险评估流程图」
+#   - 公示照片/现场座谈会照片 → 第3章「风险调查过程」
+#   - 网络舆情搜索截图 → 第3章「网络媒体舆论意见」
+#   - 工业单元控制性详细规划图 → 第4章「四性分析」
+#   - 其余图片（红线图/公告/勘测定界/预审意见/法人证明/签到表/问卷表/评审照片/评审签到/评审意见）
+#     全部进附件（见 APPENDIX_IMAGE_CATEGORIES）
 CHAPTER_IMAGE_SPECS = {
-    1: [{"type": "map", "label": "位置示意图", "min": 1, "max": 1, "keywords": ["位置图", "红线", "勘测", "地图", "勘测定界"]}],
-    2: [{"type": "photo", "label": "现场勘查照片", "min": 1, "max": 3, "keywords": ["现场", "勘察", "地块", "临时用地"]}],
+    1: [{"type": "map", "label": "决策地理位置", "min": 0, "max": 1, "keywords": ["位置", "地理位置", "红线", "地图", "勘测定界", "宗地"]}],
+    2: [{"type": "flowchart", "label": "本决策风险评估流程图", "min": 0, "max": 1, "keywords": ["流程", "评估流程", "流程图", "步骤"]}],
     3: [
-        {"type": "announcement", "label": "公示照片", "min": 1, "max": 2, "keywords": ["公示", "公告栏", "张贴"]},
-        {"type": "photo", "label": "风险调查现场照片", "min": 1, "max": 2, "keywords": ["调查", "走访", "入户"]},
-        {"type": "photo", "label": "座谈会照片", "min": 1, "max": 1, "keywords": ["座谈", "开会", "村民"]},
-        {"type": "survey", "label": "问卷调查及签到表", "min": 1, "max": 2, "keywords": ["问卷", "调查表", "签到", "统计"]},
+        {"type": "announcement", "label": "公示照片", "min": 0, "max": 3, "keywords": ["公示", "公告栏", "张贴"]},
+        {"type": "meeting", "label": "现场座谈会照片", "min": 0, "max": 3, "keywords": ["座谈", "开会", "村民", "会议", "群众"]},
+        {"type": "sentiment", "label": "网络舆情搜索截图", "min": 0, "max": 1, "keywords": ["舆情", "搜索", "截图", "网络", "媒体"]},
     ],
-    5: [{"type": "review", "label": "专家评审会照片", "min": 1, "max": 2, "keywords": ["评审", "专家", "意见"]}],
-    6: [{"type": "meeting", "label": "座谈会/走访照片", "min": 1, "max": 2, "keywords": ["座谈", "走访", "群众"]}],
-    8: [{"type": "review", "label": "专家评审意见", "min": 1, "max": 2, "keywords": ["评审", "意见", "签字"]}],
-    9: [{"type": "review", "label": "稳评专家评审意见表", "min": 1, "max": 2, "keywords": ["评审", "意见表", "签字"]}],
+    4: [{"type": "planning", "label": "控制性详细规划图", "min": 0, "max": 1, "keywords": ["控制性详细规划", "规划图", "工业单元", "HZ03", "详细规划"]}],
 }
 
-# 🔴 文件夹名 → 具体章节 的确定性绑定（治「图片放错」）。
-# 文件夹名是用户整理的、最强的位置信号，优先级高于类别竞争。
+# 🔴 附件图片分类（权威规范：其余图片按此进附件）
+APPENDIX_IMAGE_CATEGORIES = [
+    ("附件1 征地红线图", ["红线", "红线图"]),
+    ("附件2 拟征地公告", ["拟征地公告", "征收公告", "预公告"]),
+    ("附件3 勘测定界报告", ["勘测定界", "勘测报告"]),
+    ("附件4 建设项目用地预审与选址意见书", ["预审", "选址意见", "用地预审"]),
+    ("附件5 法人证明及身份证组织机构代码证", ["法人", "身份证", "组织机构代码", "营业执照"]),
+    ("附件6 座谈会签到表", ["座谈会签到", "签到表", "签到"]),
+    ("附件7 稳评问卷调查表", ["问卷", "调查表", "调查问卷"]),
+    ("附件8 专家评审会照片", ["评审会照片", "专家评审会"]),
+    ("附件9 专家评审签到表", ["评审签到", "专家签到"]),
+    ("附件10 专家评审意见", ["专家意见", "评审意见", "综合意见", "专家签字"]),
+]
+
+# 🔴 文件夹名/文件名 → 正文章节 的确定性绑定（治「图片放错」）。
 # 顺序即优先级：先匹配到的生效。
 FOLDER_CHAPTER_HINTS = [
-    (['位置图', '百度', '红线', '勘测定界', '宗地', '地图'], 1),
-    (['临时用地', '现场勘查', '现场照片', '踏勘'], 2),
-    (['公示照片', '公示栏', '公告栏', '张贴'], 3),
-    (['村民开会', '座谈会', '群众座谈', '开会现场'], 3),
-    (['问卷', '签到'], 3),
-    (['专家评审会照片', '评审会照片'], 5),
-    (['稳评专家意见', '专家意见', '综合意见'], 8),
+    (['位置', '地理位置', '红线', '勘测定界', '宗地', '地图'], 1),
+    (['流程', '评估流程', '流程图'], 2),
+    (['公示', '公告栏', '张贴'], 3),
+    (['座谈', '开会', '村民', '会议', '群众'], 3),
+    (['舆情', '搜索', '截图', '网络'], 3),
+    (['控制性详细规划', '规划图', '工业单元', 'HZ03', '详细规划'], 4),
 ]
 
 
 def _classify_chapter_hint(name: str, folder_hint: str = "") -> Optional[int]:
-    """从文件夹名识别图片应放的章节（确定性绑定）。
+    """从文件夹名/文件名识别图片应放的正文章节（确定性绑定）。
 
-    返回章节号；识别不出返回 None（走类别竞争兜底）。
+    返回章节号；识别不出返回 None（进附件）。
     """
+    nl = name.lower()
     fl = (folder_hint or "").lower()
-    if not fl:
-        return None
+    combined = f"{fl} {nl}"
     for keywords, ch in FOLDER_CHAPTER_HINTS:
-        if any(k in fl for k in keywords):
+        if any(k in combined for k in keywords):
             return ch
     return None
 
 
 
+
+
+def _classify_appendix(name: str, folder_hint: str = "") -> str:
+    """把「其余图片」归到附件分类（附件1-10，按权威规范）。
+
+    返回附件名（如「附件3 勘测定界报告」）；识别不出返回「其他资料图片」。
+    """
+    nl = name.lower()
+    fl = (folder_hint or "").lower()
+    combined = f"{fl} {nl}"
+    for label, kws in APPENDIX_IMAGE_CATEGORIES:
+        if any(k in combined for k in kws):
+            return label
+    return "其他资料图片"
 
 
 def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict] = None) -> Dict:
@@ -133,6 +163,17 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         if name.startswith('pdf_') and ('_full' in name or '_page' in name):
             continue  # 整页渲染（OCR用），不是报告图片材料
         if '勘测定界' in name:
+            continue
+
+        # 🔴 过滤噪音：模板提取产物/公司资质，不是项目图片材料
+        #   - doc_*_page_*：文档整页渲染（从 docx/PDF 拆出的每页截图）
+        #   - company_P*：公司模板内嵌图
+        #   - stability_cert_*：公司资质（由 _load_company_certificate_images 单独处理）
+        if re.match(r'^doc_\d+_page_\d+', name, re.I):
+            continue
+        if name.startswith('company_'):
+            continue
+        if name.startswith('stability_cert_'):
             continue
 
         # Extract folder context from path
@@ -250,11 +291,20 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                     missing.append({"chapter": ch_num, "type": spec["type"],
                                     "label": spec["label"], "need": spec["min"] - count})
 
+    # 🔴 附件图片：没进正文的图，归到附件1-10分类
+    appendix = {}
+    for img in catalog:
+        if img["path"] in used_paths:
+            continue
+        label = _classify_appendix(img["name"], folder_hint="")
+        appendix.setdefault(label, []).append(img)
+
     return {
         "total": len(catalog),
         "by_chapter": by_chapter,
         "missing": missing,
         "catalog": catalog,
+        "appendix": appendix,
     }
 
 

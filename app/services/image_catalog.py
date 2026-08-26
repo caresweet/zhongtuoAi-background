@@ -32,7 +32,9 @@ def _image_fingerprint(path: str) -> str:
 # 🔴 权威规范（DB32/T4013-2021 十章结构，依据官方稳评模板图片位置）：
 #   - 位置示意图 → 第1章「决策基本情况」的三级标题「决策地理位置」，图注「决策地理位置」
 #   - 风险评估流程图 → 第2章「评估过程」的「评估步骤」，图注「本决策风险评估流程图」
-#   - 公示照片/现场座谈会照片 → 第3章「风险调查过程」
+#   - 公示照片 → 第3章「各利益相关者对决策事项的反映」的「风险调查过程」
+#   - 现场勘查照片 → 第3章「各利益相关者对决策事项的反映」的「实地勘察」（只取2张作示例）
+#   - 现场座谈会照片 → 第3章「各利益相关者对决策事项的反映」的「座谈会介绍」
 #   - 网络舆情搜索截图 → 第3章「网络媒体舆论意见」
 #   - 工业单元控制性详细规划图 → 第4章「四性分析」
 #   - 其余图片（红线图/公告/勘测定界/预审意见/法人证明/签到表/问卷表/评审照片/评审签到/评审意见）
@@ -42,6 +44,7 @@ CHAPTER_IMAGE_SPECS = {
     2: [{"type": "flowchart", "label": "本决策风险评估流程图", "min": 0, "max": 1, "keywords": ["流程", "评估流程", "流程图", "步骤"]}],
     3: [
         {"type": "announcement", "label": "公示照片", "min": 0, "max": 3, "keywords": ["公示", "公告栏", "张贴"]},
+        {"type": "photo", "label": "现场勘查照片", "min": 0, "max": 2, "keywords": ["现场", "勘查", "勘察", "踏勘", "地块", "临时用地"]},
         {"type": "meeting", "label": "现场座谈会照片", "min": 0, "max": 3, "keywords": ["座谈", "开会", "村民", "会议", "群众"]},
         {"type": "sentiment", "label": "网络舆情搜索截图", "min": 0, "max": 1, "keywords": ["舆情", "搜索", "截图", "网络", "媒体"]},
     ],
@@ -68,6 +71,7 @@ FOLDER_CHAPTER_HINTS = [
     (['位置', '地理位置', '红线', '勘测定界', '宗地', '地图'], 1),
     (['流程', '评估流程', '流程图'], 2),
     (['公示', '公告栏', '张贴'], 3),
+    (['现场', '勘查', '勘察', '踏勘', '地块', '临时用地'], 3),
     (['座谈', '开会', '村民', '会议', '群众'], 3),
     (['舆情', '搜索', '截图', '网络'], 3),
     (['控制性详细规划', '规划图', '工业单元', 'HZ03', '详细规划'], 4),
@@ -262,6 +266,11 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         specs = CHAPTER_IMAGE_SPECS[ch_num]
         ch_images = by_chapter.setdefault(ch_num, [])
         for spec in specs:
+            # 🔴 先算当前该 label 已绑定数（第一遍 hint 绑定 + 本遍已填），不超过 max
+            already = sum(1 for x in ch_images if x["label"] == spec["label"])
+            remaining = spec["max"] - already
+            if remaining <= 0:
+                continue
             # Find matching images NOT already used in another chapter
             available = [img for img in catalog
                          if img["path"] not in used_paths and not img.get("chapter_hint") and (
@@ -269,7 +278,7 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                              (spec["type"] == "meeting" and img["category"] in ("photo", "review")) or
                              (spec["type"] == "photo" and img["category"] in ("photo", "other"))  # 🔴 Allow "other" as photo fallback
                          )]
-            for m in available[:spec["max"]]:
+            for m in available[:remaining]:
                 used_paths.add(m["path"])
                 ch_images.append({"path": m["path"], "name": m["display_name"],
                                   "type": spec["type"], "label": spec["label"]})

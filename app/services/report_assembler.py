@@ -602,6 +602,38 @@ class ReportAssembler:
 
         facts = filled or {}
 
+        # 🔴 删重复文本：清除相邻叠词（如「朱坝街道三圩社区朱坝街道三圩社区」→ 保留一次）。
+        #   只处理 2-10 字的相邻重复短语，排除纯标点/数字（避免误删「55」「一一」等）。
+        _dup_phrase = re.compile(r'(.{2,10})\1')
+        def _dedup_adjacent(text):
+            def _repl(m):
+                frag = m.group(1)
+                # 排除纯标点/数字/空白
+                if re.fullmatch(r'[\d\s。，,、；;：:！!？?]+', frag):
+                    return m.group(0)
+                # 排除「等」「了」等单字虚词叠用（长度>=2已排除单字，这里再排虚词叠）
+                if frag in ('等', '了', '的', '是', '在'):
+                    return m.group(0)
+                return frag
+            return _dup_phrase.sub(_repl, text)
+        for _p in list(doc.paragraphs):
+            if _p.text and _dup_phrase.search(_p.text):
+                new = _dedup_adjacent(_p.text)
+                if new != _p.text:
+                    for r in _p.runs: r.text = ''
+                    if _p.runs: _p.runs[0].text = new
+                    else: _p.add_run(new)
+        for _tbl in doc.tables:
+            for _row in _tbl.rows:
+                for _cell in _row.cells:
+                    for _p in _cell.paragraphs:
+                        if _p.text and _dup_phrase.search(_p.text):
+                            new = _dedup_adjacent(_p.text)
+                            if new != _p.text:
+                                for r in _p.runs: r.text = ''
+                                if _p.runs: _p.runs[0].text = new
+                                else: _p.add_run(new)
+
         # 🔴 应急响应等级归一化：统一为「一级/二级/三级响应」（消除"级响应"缺数字、编号混乱）
         _resp_map = [
             (re.compile(r'(?<![一二三])级响应\s*[（(]\s*一般事件'), '一级响应（一般事件'),

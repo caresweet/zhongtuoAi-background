@@ -62,15 +62,19 @@ async def classify_image_with_vision(image_path: str, llm_service=None) -> Dict[
             img_b64 = base64.b64encode(f.read()).decode()
 
         prompt = (
-            "你是社会稳定风险评估的问卷识别助手。请识别这张图片，并【只输出 JSON，不要输出任何解释文字】。\n"
+            "你是社会稳定风险评估的图片识别助手。请识别这张图片，并【只输出 JSON，不要输出任何解释文字】。\n"
             "JSON 格式如下：\n"
-            '{"category": "调查问卷", "has_text": true, "text": "图中所有可见文字", '
-            '"questions": [{"question": "问题文字", "options": ["选项1","选项2"], "selected": "这份问卷勾选的选项"}]}\n'
+            '{"category": "现场勘查", "has_text": false, "text": ""}\n'
             "\n要求：\n"
-            "- category 取值：调查问卷/公告公示/专家评审/地图红线/现场照片/其他\n"
-            "- 如果图片是群众填写的问卷，逐题识别：question=问题，options=该题所有选项，selected=填写者勾选/打勾的那个选项（没勾选则 selected 为空字符串）\n"
-            "- 如果没有文字，has_text=false，text 为空\n"
-            "- 严格输出 JSON，不要 markdown 代码块，不要解释"
+            "- category 取值（严格从以下选一个）：\n"
+            "  现场勘查（户外地块、施工现场、临时用地、实地踏勘的场地照片）\n"
+            "  座谈会（室内开会、村民/群众围坐讨论、会议室、签到）\n"
+            "  调查问卷（问卷、调查表、统计表）\n"
+            "  公告公示（公示栏、张贴的公告、批文）\n"
+            "  专家评审（专家意见、评审签字、评审会）\n"
+            "  地图红线（位置图、红线图、勘测定界图、规划图）\n"
+            "  其他（无法归入以上类别）\n"
+            "- 只输出 JSON，不要 markdown 代码块，不要解释"
         )
 
         # 🔴 用 chat_with_image（多模态视觉方法），而不是 chat_with_reasoning（文本模型）。
@@ -152,9 +156,9 @@ def _map_vision_category(category: str) -> str:
         ('公告', 'announcement'), ('公示', 'announcement'), ('预公告', 'announcement'),
         ('评审', 'review'), ('专家', 'review'), ('意见', 'review'),
         ('地图', 'map'), ('红线', 'map'), ('位置', 'map'), ('勘测', 'map'),
-        ('座谈', 'meeting'), ('开会', 'meeting'), ('会议', 'meeting'),
+        ('座谈', 'meeting'), ('开会', 'meeting'), ('会议', 'meeting'), ('签到', 'meeting'),
         ('证书', 'cert'), ('执照', 'cert'), ('资质', 'cert'),
-        ('现场', 'photo'), ('照片', 'photo'),
+        ('现场勘查', 'photo'), ('勘查', 'photo'), ('现场', 'photo'), ('照片', 'photo'),
     ]
     for cn, en in mapping:
         if cn in category:

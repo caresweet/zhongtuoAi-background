@@ -1201,6 +1201,7 @@ class ReportAssembler:
         table_buf, in_table = [], False
         skip_md_tables = False  # Set after rendering extracted tables
         injected_tables = set()  # Track tables injected via [TABLE:name] markers
+        pending_caption = ""  # 🔴 表格前的「表X-X 表名」行，捕获后放到表格下方
 
         for line in lines:
             s = line.strip()
@@ -1237,10 +1238,16 @@ class ReportAssembler:
                     table_buf.append(s)
                 in_table = True; continue
             elif in_table:
-                # Render collected markdown table
+                # Render collected markdown table（表题放表格下方）
                 if len(table_buf) >= 2:
-                    self._render_md_table(doc, table_buf, ch_num, survey_stats)
+                    self._render_md_table(doc, table_buf, ch_num, survey_stats, caption=pending_caption)
                 table_buf, in_table = [], False
+                pending_caption = ""
+
+            # 🔴 捕获「表X-X 表名」行（表格前），改放到表格下方
+            if re.match(r'^表\s*\d+[-—]\d+', s) and len(s) < 40:
+                pending_caption = s
+                continue
 
             # 🔴 [TABLE:name] 标记已废弃——表格由章节 agent 用 markdown 语法直接写，
             # 有数据才写，不再用固定标记注入。残留标记直接跳过。
@@ -1323,11 +1330,6 @@ class ReportAssembler:
 
             clean = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
             clean = re.sub(r'\[待补充\]', '【待补充】', clean)
-
-            # 🔴 跳过 LLM 手写的表格标题（系统 auto-inject 会统一渲染，避免重复）
-            # 第5章除外（第5章是 LLM 写 markdown 表格，标题由 LLM 自己写）
-            if ch_num != 5 and re.match(r'^表\s*\d+[-—]\d+', clean) and len(clean) < 40:
-                continue
 
             if re.match(r'^\d+\.\s*\*\*', clean):
                 self._add_para(doc, clean, bold=True)
@@ -1495,11 +1497,14 @@ class ReportAssembler:
 
         return result
 
-    def _render_md_table(self, doc, table_lines, ch_num, survey_stats):
+    def _render_md_table(self, doc, table_lines, ch_num, survey_stats, caption=""):
         """Parse markdown table lines into DOCX table.
 
         所有章节的 markdown 表格都渲染——表格由章节 agent 根据实际数据动态设计，
         有数据才写，格式参考模板。系统不再强制注入固定表格。
+
+        🔴 表题规范：表题统一放在表格「正下方」（DB32/T4013 排版规范）。
+        caption 为空时自动生成「表{章}-{序号}」。
         """
         rows = []
         for line in table_lines:
@@ -1545,7 +1550,22 @@ class ReportAssembler:
                 if ri == 0:
                     r.bold = True
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # 🔴 表题统一放表格正下方（DB32/T4013 规范）
+        if not caption:
+            idx = len(getattr(self, '_ch_table_counters', {}).get(ch_num, [])) + 1
+            caption = f"表{ch_num}-{idx}"
+        self._add_table_caption_below(doc, caption)
         doc.add_paragraph()
+
+    def _add_table_caption_below(self, doc, caption):
+        """在表格正下方加表题（宋体 小四 12pt 居中）。"""
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(caption)
+        r.font.name = FONT_CAPTION; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CAPTION)
+        r.font.size = Pt(12)
+        r.bold = False
 
     def _set_cell(self, cell, text, bold=False):
         cell.paragraphs[0].clear()
@@ -1555,13 +1575,6 @@ class ReportAssembler:
         r.bold = bold
 
     def _add_survey_table(self, doc, stats, caption):
-        # 🔴 表名: 宋体 小四(12pt) 居中
-        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(caption); r.bold = True
-        r.font.name = FONT_CAPTION; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CAPTION)
-        r.font.size = Pt(12)
-        doc.add_paragraph()
-
         headers = ['调查项目', '人数', '占比']
         rows = [
             ['支持', str(stats.get('support_count', 0)), f"{stats.get('support_rate', 0)}%"],
@@ -1576,6 +1589,8 @@ class ReportAssembler:
         for ri, row in enumerate(rows):
             for ci, val in enumerate(row):
                 self._set_cell(table.cell(ri+1, ci), val)
+        # 🔴 表题放表格正下方（DB32/T4013 规范）
+        self._add_table_caption_below(doc, caption)
 
     # ═══════════════════════════════════════════════════════════════
     # Extracted Tables (from PDF)

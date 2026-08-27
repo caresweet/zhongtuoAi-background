@@ -1655,19 +1655,20 @@ class ReportAssembler:
                             seen.add(sig)
                             all_tables.append(tbl)
 
-        # Map to chapters based on content
+        # Map to chapters based on content（🔴 按官方规范：土地分类面积表→第4章 表4-1）
         for tbl in all_tables:
             if not isinstance(tbl, dict):
                 continue
             headers = tbl.get("headers", [])
             hstr = " ".join(str(h) for h in headers).lower() if headers else ""
 
-            # 勘测定界报告 → Ch1
-            if any(kw in hstr for kw in ['地块', '坐落', '界址', '面积', '土地用途']):
+            # 勘测定界地块汇总表（序号/地块号/土地坐落/土地用途/总面积/界址点数）→ 第1章
+            if all(kw in hstr for kw in ['地块', '坐落', '界址', '用途', '面积']):
                 result.setdefault(1, []).append(tbl)
-            # 土地分类面积 → Ch1 or Ch4
-            elif any(kw in hstr for kw in ['耕地', '园地', '林地', '分类面积']):
-                result.setdefault(1, []).append(tbl)
+            # 🔴 土地分类面积表（被征用地单位/权属类别/耕地/园地/林地/草地）→ 第4章 表4-1
+            elif any(kw in hstr for kw in ['耕地', '园地', '林地', '权属', '分类面积', '被征']):
+                result.setdefault(4, []).append(tbl)
+                tbl["_rendered_caption"] = "表4-1 土地分类面积表"
             # 调查/问卷 → Ch3
             elif any(kw in hstr for kw in ['调查', '问卷', '支持', '反对']):
                 result.setdefault(3, []).append(tbl)
@@ -1722,6 +1723,10 @@ class ReportAssembler:
                     r.font.size = Pt(12)
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+            # 🔴 表题放表格正下方（自定义表题优先，如「表4-1 土地分类面积表」）
+            caption = tbl.get("_rendered_caption", "")
+            if caption:
+                self._add_table_caption_below(doc, caption)
             doc.add_paragraph()
         return True
 

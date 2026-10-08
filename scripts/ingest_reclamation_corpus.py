@@ -63,8 +63,9 @@ def _read_text(path: str) -> str:
 def build_chunks(path: str) -> List[Dict[str, Any]]:
     """一份范文 → 若干带 collection 归属的 chunk。
 
-    切分用现成的 `ChineseReportChunker.chunk_markdown`（它按 X.Y 建 section，
-    并把小节标题写进 `ChunkMetadata.section_title`）。
+    切分优先用 `ChineseReportChunker.chunk_markdown`（真 markdown 时按 # 建 section）；
+    抽出的是裸文本（docx/pdf）时它建不出带标题的 section，改用 `chunk_text`
+    —— 后者按 X.Y 识标题，把小节标题写进 `ChunkMetadata.section_title`。
     """
     from app.rag.chunker import ChineseReportChunker
 
@@ -153,8 +154,8 @@ async def ingest(files: List[str]) -> Dict[str, int]:
 
     for coll_name, idxs in by_coll.items():
         coll = vs.get_or_create_collection(coll_name)
-        slug = coll_name.replace("kb_reclamation_", "")
-        ids = [f"reclamation_{slug}_chunk_{n}" for n in range(len(idxs))]
+        # ID 直接用 collection 名（唯一），不再硬抄 "kb_reclamation_" 前缀 —— 库名只源自 COLLECTIONS
+        ids = [f"{coll_name}_chunk_{n}" for n in range(len(idxs))]
         vs.add_documents(
             coll,
             ids,

@@ -43,6 +43,12 @@ def build_default_provider() -> ImageSearchProvider:
     key = getattr(settings, "IMAGE_SEARCH_API_KEY", "") or ""
     if not url or not key:
         logger.info("未配置图片检索供应商，缺图补齐返回空候选（不影响生成）")
+    else:
+        # 🔴 凭证已配、供应商实现**尚未接入**：这条日志必须存在。
+        #    否则集成方配好了 key 却仍拿到空结果，无从判断是「没配」还是「实现没写」。
+        logger.warning(
+            "已配置图片检索凭证（URL=%s），但供应商实现尚未接入 —— "
+            "缺图补齐仍返回空候选；请接入 ImageSearchProvider 的具体实现。", url)
     # 具体供应商实现待凭证到位后补；此处一律空实现，保证链路可用。
     return _NullProvider()
 

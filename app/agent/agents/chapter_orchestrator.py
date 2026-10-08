@@ -648,7 +648,9 @@ class ChapterOrchestrator:
             chapters = [{"number": i, "title": f"第{i}章", "missing_items": []} for i in ALL_CHAPTERS]
 
         return {
-            "domain": state.get("_domain") or "stability",
+            # 🔴 与全仓其他取域点一致：走 domain_of_state（兼顾 _conversation_domain），
+            #    不要用更弱的 `_domain or "stability"`（那会漏掉会话里钉住的域）。
+            "domain": domain_of_state(state),
             "template": state.get("template_name", "内置结构"),
             "facts": state.get("_project_material_facts", {}) or state.get("filled_data", {}),
             "materials": state.get("_project_material_summary", {}),

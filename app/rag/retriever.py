@@ -406,13 +406,13 @@ class RetrieverService:
         #    任何东西，报告就悄悄少了范文。库名的唯一事实源是 reclamation_kb_map.COLLECTIONS。
         #    desc_map 单独保存「查询词描述」，使稳评查询串与改动前逐字一致。
         if domain == "reclamation":
-            from app.rag.reclamation_kb_map import RECLAMATION_KB_TYPES, COLLECTIONS
-            kb_map = {n: (COLLECTIONS[m], [COLLECTIONS[a] for a in alt])
+            from app.rag.reclamation_kb_map import RECLAMATION_KB_TYPES, collection_for
+            kb_map = {n: (collection_for(m), [collection_for(a) for a in alt])
                       for n, (m, alt) in RECLAMATION_KB_TYPES.items()}
             desc_map = {n: m for n, (m, _) in RECLAMATION_KB_TYPES.items()}
             # 章号未映射时兜到复垦主入口库（对齐 domains/reclamation 的
             # default_collection="kb_reclamation_preface"），绝不回落到稳评库
-            default_colls, default_desc = (COLLECTIONS["前言"], []), "前言"
+            default_colls, default_desc = (collection_for("前言"), []), "前言"
         else:
             from app.rag.kb_chapter_map import CHAPTER_KB_TYPES
             from app.rag.kb_types_config import TYPES

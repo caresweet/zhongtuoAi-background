@@ -130,7 +130,7 @@ class ImageAnalyzer:
 
         Args:
             image_path: Absolute or relative path to the image file.
-            analysis_type: One of "notice", "survey", "photo", "general".
+            analysis_type: One of "notice", "survey", "photo", "general", "map".
             custom_prompt: Optional custom analysis prompt.
 
         Returns:

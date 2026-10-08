@@ -72,6 +72,12 @@ class VectorStoreService:
     DOMAIN_COLLECTIONS = {
         "stability": "knowledge_base",      # 向后兼容：稳评沿用老 collection 名
         "bidding": "bidding_knowledge",     # 招标已有独立 collection
+        # 复垦主入口库：与 `domains/reclamation.default_collection` 及
+        # `retriever` 未映射章兜底（`collection_for("前言")`）保持一致。
+        # 🔴 不能靠「新类型 → kb_{domain_id}」的兜底 —— 那会得到 `kb_reclamation`，
+        #    而灌库脚本只建 12 个 `kb_reclamation_*` 类型库，从不建 `kb_reclamation`，
+        #    通用检索会落到一个**不存在**的幽灵库、静默取不到东西。
+        "reclamation": "kb_reclamation_preface",
     }
 
     @classmethod

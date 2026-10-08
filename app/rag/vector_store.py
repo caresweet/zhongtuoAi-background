@@ -84,14 +84,14 @@ class VectorStoreService:
         - 不传 → knowledge_base（稳评路径的历史依赖，**不可改**）
         """
         if not domain_id:
-            # 漏传 domain 会静默读到稳评库 —— 记一条日志让它变得可见。
+            # 该分支只在调用方**真的没给出** domain 时触发，也就是漏传 ——
+            # 正是本任务要暴露的情况，故用 warning 让它可见。
             #
-            # 用 debug 而非 warning：稳评自身大量调用**故意不传** domain 并依赖
-            # 回落 knowledge_base，warning 会把这类正常调用变成噪声，既淹没真正
-            # 「忘传 domain」的信号，又污染测试输出。
-            # 「复垦绝不读到稳评库」的真正保障，来自复垦路径显式传 domain + 其测试，
-            # 而不是这一行日志 —— 故请勿顺手把它升回 warning。
-            logger.debug(
+            # 注意别把它和稳评混为一谈：稳评正常路径**显式**传 "stability"，
+            # 经 DOMAIN_COLLECTIONS["stability"] == "knowledge_base" 落到稳评库，
+            # 并**不会**走到这里。所以这里不是稳评的常规回路，把它降级成
+            # debug（默认日志级别不可见）等于废掉「让漏传可见」这一需求。
+            logger.warning(
                 "RAG 检索未传 domain，回落 knowledge_base（稳评库）。"
                 "若非稳评路径，这是 domain 漏传，会读到稳评数据。"
             )

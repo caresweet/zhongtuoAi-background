@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """复垦「章 → 内容类型库」映射。
 
-与稳评的 `kb_chapter_map.CHAPTER_KB_TYPES` 同构，但**默认按章建库**：
-因 5 份复垦样本的 level-1/level-2 章节结构完全一致（设计文档 §3），
-不需要稳评那种跨章语义归并。
+与稳评的 `kb_chapter_map.CHAPTER_KB_TYPES` 同构，但**主要按章建库，个别章共享
+类型库**：因 5 份复垦样本的 level-1/level-2 章节结构基本一致（设计文档 §3），
+多数章各建一库即可。少数章仍共享同一类型库 —— 如第 8、9 章都落到「计划与效益」，
+第 1 章把第 3 章的「项目概况」列为备选 —— 故并非严格的「一章一库」。
 
 库名一律 `kb_reclamation_` 前缀，与稳评的 `knowledge_base`、
 投标的 `bidding_knowledge` 物理隔离。

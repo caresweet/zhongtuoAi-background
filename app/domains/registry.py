@@ -20,6 +20,19 @@ DEFAULT_DOMAIN = "stability"
 
 _REGISTRY: Dict[str, DomainConfig] = {}
 
+# 注册表为空时的降级配置 —— 只在**所有 builder 都建造失败**时才会用到。
+# 目的是让 get_domain 兑现自己 docstring 里的承诺（回落默认域），
+# 而不是把 _REGISTRY[...] 的 KeyError 泄漏给调用方，
+# 那会把一次静默降级变成稳评主链路上的 500。
+_FALLBACK_CONFIG = DomainConfig(
+    domain_id=DEFAULT_DOMAIN,
+    display_name="社会稳定风险评估报告",
+    identity_prompt="",
+    rag_domain=DEFAULT_DOMAIN,
+    chapter_structure={},
+    default_collection="knowledge_base",
+)
+
 
 def _ensure_loaded():
     """Lazily build and register configs (avoids import cycles at module load)."""
@@ -43,7 +56,12 @@ def get_domain(domain_id: Optional[str]) -> DomainConfig:
     _ensure_loaded()
     if domain_id and domain_id in _REGISTRY:
         return _REGISTRY[domain_id]
-    return _REGISTRY[DEFAULT_DOMAIN]
+    cfg = _REGISTRY.get(DEFAULT_DOMAIN)
+    if cfg is None:
+        # 注册表为空（所有 builder 都失败）—— 记 error 让它可见，但不抛。
+        logger.error("域注册表为空，回落最小降级配置；请检查各域 builder 的报错日志")
+        return _FALLBACK_CONFIG
+    return cfg
 
 
 def list_domains() -> List[DomainConfig]:

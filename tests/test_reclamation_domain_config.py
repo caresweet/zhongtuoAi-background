@@ -50,3 +50,27 @@ def test_reclamation_own_expressions_detected():
     ]
     for msg in reclamation_messages:
         assert detect_domain(msg) == "reclamation", msg
+
+
+def test_get_domain_does_not_raise_when_registry_empty(monkeypatch):
+    """契约：注册表为空（所有域 builder 都建造失败）时，get_domain 必须回落默认域，
+    而不是把 _REGISTRY[...] 的 KeyError 泄漏给调用方 —— 那会把一次静默降级
+    变成稳评主链路上的 500。
+
+    这条测试锁死 _FALLBACK_CONFIG 的存在价值：谁删了它（或改回直接下标取值），这里即变红。
+    """
+    import app.domains.registry as reg
+    from app.domains import DomainConfig
+
+    def _boom():
+        raise RuntimeError("模拟域建造失败")
+
+    # 让所有 builder 失败并清空注册表，复现「全部建造失败 → 注册表为空」的真实状态。
+    monkeypatch.setattr("app.domains.stability.build_stability_config", _boom)
+    monkeypatch.setattr("app.domains.bidding.build_bidding_config", _boom)
+    monkeypatch.setattr("app.domains.reclamation.build_reclamation_config", _boom)
+    monkeypatch.setattr(reg, "_REGISTRY", {})
+
+    cfg = reg.get_domain("stability")          # 不抛异常即为通过
+    assert isinstance(cfg, DomainConfig)
+    assert cfg.domain_id == "stability"

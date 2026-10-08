@@ -29,8 +29,39 @@ def test_reclamation_title_and_rag_query_not_overwritten_by_stability():
 
 
 def test_reclamation_out_of_range_returns_none():
+    """一期只实现第 1–3 章；**4–10 也在「无 agent」之列**，不得落到稳评的 agent。
+
+    4–10 是复垦的合法章号，但本期未实现对应 agent —— 必须返回 None（编排层跳过）。
+    若这里改回稳评的 agent，复垦第 4 章就会拿到稳评的风险源正文。
+    """
+    for n in range(4, 11):
+        assert get_chapter_agent(n, domain="reclamation") is None, n
     assert get_chapter_agent(11, domain="reclamation") is None
     assert get_chapter_agent(14, domain="reclamation") is None
+
+
+def test_reclamation_composed_rag_query_has_no_stability_wording():
+    """复垦章拼出的检索串**不得**含稳评措辞（FIX 1 的回归护栏）。
+
+    `get_chapter_rag_query(3)` 取自**稳评**的 CHAPTER_RAG_QUERIES
+    （「社会稳定风险评估评审表 …」）。复垦基类置 `rag_query_complete=True`
+    跳过它，否则检索会把稳评素材拉进复垦章节。
+    """
+    a = get_chapter_agent(3, domain="reclamation")
+    q = a._compose_rag_query()
+    assert q, "复垦章的检索串不应为空"
+    assert "社会稳定风险评估" not in q
+    assert q == a.rag_query_extra
+
+
+def test_stability_composed_rag_query_unchanged():
+    """不传 domain 时，检索串仍是「稳评模板 + 本章检索词」—— 稳评的护栏。"""
+    from app.agent.chapter_definitions import get_chapter_rag_query
+
+    a = get_chapter_agent(3)
+    q = a._compose_rag_query()
+    assert get_chapter_rag_query(3) in q
+    assert "社会稳定风险评估" in q
 
 
 def test_stability_default_behaviour_unchanged():

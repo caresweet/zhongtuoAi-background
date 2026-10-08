@@ -20,6 +20,11 @@ from .chapter_base import ChapterAgentBase
 class ReclamationChapterAgentBase(ChapterAgentBase):
     """复垦章节 agent 基类（标题与检索词均以复垦章节目录为准）。"""
 
+    # 🔴 复垦章的 `rag_query_extra` 已是**完整**检索词（来自 RECLAMATION_CHAPTER_RAG_QUERIES），
+    #    置 True 让 `_compose_rag_query` 跳过稳评的查询模板 —— 否则复垦章会拼上
+    #    「社会稳定风险评估…」的措辞，把稳评素材检索进来。
+    rag_query_complete = True
+
     def __init__(self, llm_service=None):
         super().__init__(llm_service=llm_service)
         from app.agent.reclamation_definitions import (

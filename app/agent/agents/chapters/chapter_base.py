@@ -105,6 +105,9 @@ class ChapterAgentBase(BaseAgent):
     rag_query_extra: str = ""
     required_data_keys: List[str] = []
     key_tables: List[str] = []
+    # 子类若已自带完整的检索词（如复垦章），置 True 以免再拼上稳评那份的查询模板。
+    # 默认 False —— 稳评章的检索串与改动前逐字一致。
+    rag_query_complete: bool = False
 
     def __init__(self, llm_service=None):
         super().__init__(llm_service=llm_service)
@@ -801,6 +804,23 @@ class ChapterAgentBase(BaseAgent):
             return "十" + ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][n - 10]
         return f"{n // 10}十" + (["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][n % 10] if n % 10 else "")
 
+    def _compose_rag_query(self) -> str:
+        """把本章的 RAG 检索词拼成最终检索串（`_retrieve_rag` 用它组装 project_context）。
+
+        - 稳评（`rag_query_complete=False`，默认）：稳评章节目录的查询模板
+          `get_chapter_rag_query(章号)` + 本章 `rag_query_extra` —— 与改动前逐字一致。
+        - 复垦等**自带完整检索词**的子类把 `rag_query_complete` 置 True：跳过稳评模板，
+          否则复垦章会拼上「社会稳定风险评估…」的措辞，把稳评素材检索进来。
+        """
+        if self.rag_query_complete:
+            base = ""
+        else:
+            from app.agent.chapter_definitions import get_chapter_rag_query
+            base = get_chapter_rag_query(self.chapter_number)
+        if self.rag_query_extra:
+            base = f"{base} {self.rag_query_extra}".strip()
+        return base
+
     async def _retrieve_rag(self, state: dict) -> Dict[str, Any]:
         """Retrieve chapter-specific RAG context from knowledge base.
 
@@ -820,14 +840,11 @@ class ChapterAgentBase(BaseAgent):
 
         try:
             from app.rag.rag_service import rag_service
-            from app.agent.chapter_definitions import get_chapter_rag_query
 
             session_id = state.get("session_id", "")
             project_context = state.get("project_context", "")
 
-            base_query = get_chapter_rag_query(self.chapter_number)
-            if self.rag_query_extra:
-                base_query += " " + self.rag_query_extra
+            base_query = self._compose_rag_query()
 
             result = await rag_service.retrieve_for_chapter(
                 chapter_number=self.chapter_number,

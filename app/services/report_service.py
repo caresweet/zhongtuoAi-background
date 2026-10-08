@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.models.history import Report, ConversationMessage
 from app.config import settings
+from app.domains import domain_of_state
 
 logger = logging.getLogger(__name__)
 
@@ -25,15 +26,6 @@ def _ensure_company_ctx(session: "ReportSession") -> None:
             session.state["_company_id"] = session.company_id
     except Exception:
         pass
-
-
-def _domain_of_state(state: Optional[Dict[str, Any]]) -> str:
-    """报告类型域：取会话里已钉住的域，否则回落稳评（该列加入前唯一落表的域）。
-
-    `_domain` / `_conversation_domain` 由 report.py 的意图识别写入会话 state。
-    """
-    state = state or {}
-    return state.get("_domain") or state.get("_conversation_domain") or "stability"
 
 
 class ReportSession:
@@ -390,7 +382,7 @@ class ReportService:
                         user_id=session.user_id or "default",
                         company_id=session.company_id,
                         # 报告类型域：复垦 / 稳评，供历史列表按域过滤
-                        domain=_domain_of_state(session.state),
+                        domain=domain_of_state(session.state),
                         template_id=getattr(session, "template_id", None),
                         template_name=getattr(session, "template_name", None),
                         status=status,
@@ -450,7 +442,7 @@ class ReportService:
                         company_id=session.company_id,
                         # 草稿期也要写对域，否则同会话后续 persist_report 走更新分支
                         # 不会覆盖，复垦草稿会一直挂在稳评域下
-                        domain=_domain_of_state(session.state),
+                        domain=domain_of_state(session.state),
                         template_id=getattr(session, "template_id", None),
                         template_name=getattr(session, "template_name", None),
                         status=session.state.get("status", "created"),

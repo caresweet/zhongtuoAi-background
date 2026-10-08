@@ -102,6 +102,7 @@ def push_human_chapters(state: dict, chapters) -> list:
 # ── 流程耗时统计 ──────────────────────────────────────────────────────────────
 import time as _time_mod
 from app.agent.chapter_definitions import ALL_CHAPTERS
+from app.domains import domain_of_state
 
 def _mark(state: dict, name: str):
     """记录流程节点耗时（支持多次运行累加，如每章生成）。
@@ -163,7 +164,7 @@ async def node_file_parse(state: ReportWorkflowState) -> ReportWorkflowState:
     try:
         from app.routers.report import _analyze_session_attachments
         session_state = {
-            "session_id": state.get("session_id",""), "_domain": "stability",
+            "session_id": state.get("session_id",""), "_domain": domain_of_state(state),
             "filled_data": state.get("filled_data",{}), "_uploaded_files": [],
         }
         for f in (state.get("_uploaded_files",[]) or []):
@@ -1265,7 +1266,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                                   previous_chapters=state.get("chapters", {}),
                                   feedback=feedback if feedback else None,
                                   outline_context=outline_context, state=state)
-    agent = get_chapter_agent(ch_num, llm_service=llm)
+    agent = get_chapter_agent(ch_num, llm_service=llm, domain=domain_of_state(state))
     # 🔴 这里的 agent_state 以前只给「本章依赖子集」(`ch_data`)，比脚本路径
     #    （scripts/gen_full_report.py）少三样东西，界面产出因此系统性偏差：
     #      ① `filled_data` 给的是子集 → 章节 agent 读不到完整事实卡（预公告全文、
@@ -1281,7 +1282,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                        ("project_name", "location", "land_use", "doc_reference")),
                    "filled_data": filled,
                    "_chapter_data": ch_data,
-                   "_domain": "stability", "_report_style": "jinhu",
+                   "_domain": domain_of_state(state), "_report_style": "jinhu",
                    "current_chapter": ch_num, "chapters": {},
                    "_custom_prompt": prompt, "_use_custom_prompt": True,
                    "_uploaded_files": state.get("_uploaded_files", []),
@@ -1885,7 +1886,7 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
         _company = await load_company(state.get("_company_id"))
         asm_state = {
             "session_id": state.get("session_id","report"), "chapters": chapters,
-            "filled_data": filled, "_domain": "stability",
+            "filled_data": filled, "_domain": domain_of_state(state),
             # 🔴 公司归属**必须带进来**：装配器靠它决定「公司简介 / 编写单位 /
             #    营业执照·资质证书取哪一套」。外来的用户没有公司 → 报告里显示
             #    「待填写」，**绝不回落成江苏众拓**（那等于把别人的客户抬头印成我们的）。

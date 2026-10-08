@@ -8,6 +8,7 @@ from app.domains.registry import (
     get_domain,
     list_domains,
     detect_domain,
+    domain_of_state,
     DEFAULT_DOMAIN,
 )
 
@@ -16,5 +17,6 @@ __all__ = [
     "get_domain",
     "list_domains",
     "detect_domain",
+    "domain_of_state",
     "DEFAULT_DOMAIN",
 ]

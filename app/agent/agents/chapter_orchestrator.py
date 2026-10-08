@@ -11,6 +11,7 @@ from typing import Dict, List, Any, Optional
 
 from .chapters import get_chapter_agent
 from app.agent.chapter_definitions import ALL_CHAPTERS
+from app.domains import domain_of_state
 
 logger = logging.getLogger(__name__)
 
@@ -312,9 +313,7 @@ class ChapterOrchestrator:
         try:
             from app.services.fixed_data_service import get_fixed_data_for_domain
             await self._emit("thinking", "正在从知识库检索公司固定数据（营业执照、人员证书等）...")
-            fixed_data = await get_fixed_data_for_domain(
-                state.get("_domain") or state.get("_conversation_domain") or "stability"
-            )
+            fixed_data = await get_fixed_data_for_domain(domain_of_state(state))
             state["_fixed_company_assets"] = fixed_data
             asset_count = len(fixed_data.get("assets", []))
             image_count = len(fixed_data.get("images", []))
@@ -703,7 +702,7 @@ class ChapterOrchestrator:
 
         Pipeline: DataValidator → KnowledgeAgent → ChapterAgent → FormatCompliance
         """
-        agent = get_chapter_agent(ch_num, llm_service=self._llm)
+        agent = get_chapter_agent(ch_num, llm_service=self._llm, domain=domain_of_state(state))
         if agent is None:
             return False
 
@@ -856,7 +855,7 @@ class ChapterOrchestrator:
             if self._cancelled:
                 return False
 
-            agent = get_chapter_agent(chapter_num, llm_service=self._llm)
+            agent = get_chapter_agent(chapter_num, llm_service=self._llm, domain=domain_of_state(state))
             if agent is None:
                 return False
             state["_chapter_context"] = chapter_context if isinstance(chapter_context, dict) else {}

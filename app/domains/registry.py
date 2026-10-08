@@ -64,6 +64,17 @@ def get_domain(domain_id: Optional[str]) -> DomainConfig:
     return cfg
 
 
+def domain_of_state(state: Optional[dict]) -> str:
+    """从会话 state 里取出已钉住的域，缺省回落稳评。
+
+    `_domain` / `_conversation_domain` 由 report.py 的意图识别写入会话 state。
+    🔴 这是全仓唯一的取域表达式：调用点（章节工厂、附件解析、报告装配）
+       都从这里取，避免 fallback 链散落多处后各自漂移。
+    """
+    state = state or {}
+    return state.get("_domain") or state.get("_conversation_domain") or DEFAULT_DOMAIN
+
+
 def list_domains() -> List[DomainConfig]:
     _ensure_loaded()
     return list(_REGISTRY.values())

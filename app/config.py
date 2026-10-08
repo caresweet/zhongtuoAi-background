@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     VISION_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     VISION_API_KEY: str = ""
 
+    # 缺图时的网络图片检索（可选；不配则自动降级为空候选）
+    IMAGE_SEARCH_API_URL: str = ""
+    IMAGE_SEARCH_API_KEY: str = ""
+
     # RAG / Embedding (DashScope Qwen embedding)
     EMBEDDING_API_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     EMBEDDING_MODEL: str = "text-embedding-v3"

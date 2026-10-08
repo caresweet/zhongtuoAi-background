@@ -12,7 +12,7 @@
 import ast
 import operator
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 # 允许出现在算式里的字面量：数字、+-*/ () 空白、以及「中文/字母/下划线」组成的变量名

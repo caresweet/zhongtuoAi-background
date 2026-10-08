@@ -61,9 +61,44 @@ def resolve_material_path(path: str) -> str:
         pass
     return path
 
-# ── 表识别特征 ──
-_SUMMARY_KEYS = ("地块号", "土地坐落", "土地用途", "界址点")
-_CLASSIFICATION_KEYS = ("被征", "权属类别", "面积总计")
+# ── 表识别特征（收进 profile：不同业务的勘测定界表头「方言」不同） ──
+@dataclass(frozen=True)
+class LandSurveyProfile:
+    """一份勘测定界报告的「表头方言」。
+
+    不同业务的勘测定界报告表头不同（征地 vs 临时用地），
+    但解析引擎完全一样 —— 把差异收进这个 profile，引擎不动。
+    """
+
+    summary_keys: tuple          # 汇总表识别关键词
+    classification_keys: tuple   # 土地分类面积表识别关键词
+    owner_keywords: tuple        # 权属单位列识别关键词
+    split_marks: tuple           # 子表切分标记
+    owner_header: str            # 输出表头（权属单位那一列）
+    table_caption: str           # 输出表题（分类面积表的**表名**，序号由渲染处拼）
+
+
+# 默认 = 征地。值逐字取自改动前的硬编码，**稳评行为不变**。
+DEFAULT_PROFILE = LandSurveyProfile(
+    summary_keys=("地块号", "土地坐落", "土地用途", "界址点"),
+    classification_keys=("被征", "权属类别", "面积总计"),
+    owner_keywords=("被征", "被占", "权属单位", "用地单位"),
+    split_marks=("地块号", "土地坐落", "被征", "被占", "权属类别", "面积总计"),
+    owner_header="被征（用）地单位",
+    # 🔴 只存**表名**（不带「表6-N」前缀）—— 前缀的序号是渲染时按实际位置动态拼的，
+    #    写死在这里会把「表6-2」拼成「表6-2 表6-1 …」，等于改了稳评输出。
+    table_caption="土地分类面积表",
+)
+
+# 临时用地（复垦业务）
+RECLAMATION_PROFILE = LandSurveyProfile(
+    summary_keys=("地块号", "土地坐落", "土地用途", "界址点"),
+    classification_keys=("临时用地", "地类", "面积总计"),
+    owner_keywords=("权属单位", "用地单位", "权利人", "临时用地"),
+    split_marks=("地块号", "土地坐落", "临时用地", "权属类别", "面积总计"),
+    owner_header="临时用地单位",
+    table_caption="临时用地土地利用现状统计表",
+)
 
 # 地类名（用于把扁平化后的列名归一到标准地类）
 _LAND_TYPES = [
@@ -265,7 +300,9 @@ def _parse_summary(table: List[List[str]]) -> List[SurveyPlot]:
     return plots
 
 
-def _parse_classification(table: List[List[str]]) -> List[LandClassification]:
+def _parse_classification(table: List[List[str]],
+                          profile: LandSurveyProfile = DEFAULT_PROFILE
+                          ) -> List[LandClassification]:
     """解析「土地分类面积表」。"""
     hdr_i = _find_header_rows(table)
     if hdr_i == 0:
@@ -277,7 +314,7 @@ def _parse_classification(table: List[List[str]]) -> List[LandClassification]:
     col_sub: Dict[int, Optional[str]] = {}
     owner_i = type_i = total_i = None
     for i, h in enumerate(headers):
-        if owner_i is None and any(k in h for k in ("被征", "被占", "权属单位", "用地单位")):
+        if owner_i is None and any(k in h for k in profile.owner_keywords):
             owner_i = i
         if type_i is None and "权属类别" in h:
             type_i = i
@@ -346,7 +383,9 @@ def _tables_from_pdf(path: str) -> List[List[List[str]]]:
     return out
 
 
-def _tables_from_xlsx(path: str) -> List[List[List[str]]]:
+def _tables_from_xlsx(path: str,
+                      profile: LandSurveyProfile = DEFAULT_PROFILE
+                      ) -> List[List[List[str]]]:
     """读 XLSX 并**按表头切分**——一个 sheet 里常混着「汇总表 + 土地分类面积表」。"""
     import openpyxl
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -355,7 +394,7 @@ def _tables_from_xlsx(path: str) -> List[List[List[str]]]:
         rows = [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
         rows = [r for r in rows if any(_clean(c) for c in r)]
         if rows:
-            out.extend(_split_subtables(rows))
+            out.extend(_split_subtables(rows, profile))
     return out
 
 
@@ -372,12 +411,14 @@ def _compact_columns(rows: List[List[str]]) -> List[List[str]]:
     return [[(r[ci] if ci < len(r) else "") for ci in keep] for r in rows]
 
 
-def _split_subtables(rows: List[List[str]]) -> List[List[List[str]]]:
+def _split_subtables(rows: List[List[str]],
+                     profile: LandSurveyProfile = DEFAULT_PROFILE
+                     ) -> List[List[List[str]]]:
     """把若干行按「表头行」切分成多张子表。
 
     表头行特征：整行文字里含表名关键词（地块号/被征/权属类别/面积总计）。
     """
-    marks = ("地块号", "土地坐落", "被征", "被占", "权属类别", "面积总计")
+    marks = profile.split_marks
     starts = [0]
     for i, row in enumerate(rows[1:], start=1):
         txt = "".join(_clean(c) for c in row)
@@ -404,11 +445,13 @@ def _split_subtables(rows: List[List[str]]) -> List[List[List[str]]]:
     return out
 
 
-def parse_land_survey(path: str) -> Dict[str, Any]:
+def parse_land_survey(path: str,
+                      profile: LandSurveyProfile = DEFAULT_PROFILE) -> Dict[str, Any]:
     """解析勘测定界报告（PDF 或 XLSX），返回结构化数据。
 
     Args:
         path: 勘测定界报告文件路径（.pdf / .xlsx / .xls）。
+        profile: 表头「方言」；默认＝征地（稳评主链路），临时用地见 `RECLAMATION_PROFILE`。
 
     Returns:
         结构化字段字典；无法解析时返回空 dict。
@@ -421,7 +464,8 @@ def parse_land_survey(path: str) -> Dict[str, Any]:
         return {}
     ext = os.path.splitext(path)[1].lower()
     try:
-        tables = _tables_from_xlsx(path) if ext in (".xlsx", ".xls") else _tables_from_pdf(path)
+        tables = (_tables_from_xlsx(path, profile) if ext in (".xlsx", ".xls")
+                  else _tables_from_pdf(path))
     except Exception as e:
         logger.warning(f"勘测定界表格提取失败 {path}: {e}")
         return {}
@@ -437,16 +481,16 @@ def parse_land_survey(path: str) -> Dict[str, Any]:
 
     for t in tables:
         flat = "".join(_clean(c) for row in t[:3] for c in row)
-        if any(k in flat for k in _SUMMARY_KEYS) and not any(
-                k in flat for k in _CLASSIFICATION_KEYS):
+        if any(k in flat for k in profile.summary_keys) and not any(
+                k in flat for k in profile.classification_keys):
             # 单页可能同时含汇总表与分类表，这里只按特征择一
             if any(k in flat for k in ("地块号", "土地坐落")):
                 plots.extend(_parse_summary(t))
-        if any(k in flat for k in _CLASSIFICATION_KEYS):
+        if any(k in flat for k in profile.classification_keys):
             for _c in _category_order(t):
                 if _c not in category_order:
                     category_order.append(_c)
-            classifications.extend(_parse_classification(t))
+            classifications.extend(_parse_classification(t, profile))
 
     # 🔴 各地类合计由**明细行累加**得出，**不抄源表的「合计」行**。
     #    实测源表的合计行有合并单元格把「旱地」吞了（页2 合计行旱地空白），
@@ -513,7 +557,9 @@ def parse_land_survey(path: str) -> Dict[str, Any]:
     return out
 
 
-def to_extracted_tables(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+def to_extracted_tables(parsed: Dict[str, Any],
+                        profile: LandSurveyProfile = DEFAULT_PROFILE
+                        ) -> List[Dict[str, Any]]:
     """把解析结果转成 `_extracted_tables` 认的表格格式（供组装器直接渲染）。
 
     **报告里的表就是勘测定界报告里的表**，因此：
@@ -554,7 +600,7 @@ def to_extracted_tables(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
             for t in (c.get("categories") or {}):
                 if t not in cats:
                     cats.append(t)
-        headers = ["被征（用）地单位", "权属类别", "面积总计(㎡)"] + [f"{t}(㎡)" for t in cats]
+        headers = [profile.owner_header, "权属类别", "面积总计(㎡)"] + [f"{t}(㎡)" for t in cats]
         rows = [[c.get("owner_unit", ""), c.get("ownership_type", ""),
                  _fmt(c.get("total_area_m2"))] +
                 [_fmt((c.get("categories") or {}).get(t)) for t in cats]
@@ -572,8 +618,9 @@ def to_extracted_tables(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 顺序编号：与**实际渲染位置**（第6章）一致 —— 原来是「表3-1/表3-2」，
     # 而组装器把这两张表渲染进第6章并重编成「表6-1」，正文引用对不上。
     for i, t in enumerate(out, 1):
-        t["_rendered_caption"] = (
-            f"表6-{i} {'勘测定界地块情况汇总表' if t['kind'] == 'land_summary' else '土地分类面积表'}")
+        _name = ("勘测定界地块情况汇总表" if t["kind"] == "land_summary"
+                 else profile.table_caption)
+        t["_rendered_caption"] = f"表6-{i} {_name}"
     return out
 
 
@@ -666,3 +713,8 @@ def collect_land_survey(state: dict) -> tuple:
         if parsed:
             return to_extracted_tables(parsed), parsed
     return [], {}
+
+
+def parse_temporary_land_survey(source_path: str):
+    """解析临时用地勘测定界报告（复垦业务）—— 共用引擎，只换表头方言。"""
+    return parse_land_survey(source_path, profile=RECLAMATION_PROFILE)

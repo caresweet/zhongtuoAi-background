@@ -13,6 +13,14 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple, Optional, Set
 
+# 只对稳评生效的检查名。复垦报告没有「支持率/户数/补偿」这类概念，
+# 且年份不该被钉死 —— 不加门控就会误报。
+STABILITY_ONLY_CHECKS: set[str] = {
+    "numeric_ranges",     # 「征地项目支持率应为 100%」「不应有反对率」
+    "data_validity",      # 「年份错误，应为 2026 年」等写死年份的判据
+    "required_materials",  # 营业执照/稳评平台备案等稳评材料清单
+}
+
 # ═══════════════════════════════════════════════════════════════
 # Centralized AI buzzword list — single source of truth
 # Import this from other files instead of duplicating
@@ -585,6 +593,7 @@ def full_guardrail_check(
     pdf_raw_text: str = "",
     fixed_assets: Optional[Dict[str, any]] = None,
     chapter_num: int = 0,
+    domain: str = "stability",
 ) -> Dict[str, any]:
     """Run all guardrail checks and return a comprehensive report.
 
@@ -603,14 +612,20 @@ def full_guardrail_check(
             "materials": [...],
         }
     """
+    def _gated(check_name: str, fn, *a, **kw):
+        """域独有检查：非稳评域一律不跑，返回空列表。"""
+        if check_name in STABILITY_ONLY_CHECKS and domain != "stability":
+            return []
+        return fn(*a, **kw)
+
     report = {
         "chapter": chapter_num,
         "passed": True,
         "total_issues": 0,
         "blocking": find_blocking_issues(markdown),
-        "data_validity": find_data_validity_issues(markdown),
+        "data_validity": _gated("data_validity", find_data_validity_issues, markdown),
         "fabricated": [],
-        "numeric_ranges": validate_numeric_ranges(markdown),
+        "numeric_ranges": _gated("numeric_ranges", validate_numeric_ranges, markdown),
         "regulations": find_hallucinated_regulations(markdown),
         "materials": [],
     }
@@ -619,7 +634,18 @@ def full_guardrail_check(
         report["fabricated"] = find_fabricated_data(markdown, filled_data, pdf_raw_text)
 
     if fixed_assets:
-        report["materials"] = check_required_materials(fixed_assets)
+        report["materials"] = _gated("required_materials",
+                                     check_required_materials, fixed_assets)
+
+    # 域自定义护栏（DomainConfig.guardrails 早已存在，此前无人读）
+    domain_issues = []
+    try:
+        from app.domains import get_domain
+        for rule in (get_domain(domain).guardrails or []):
+            if rule and rule in markdown:
+                domain_issues.append(f"[{domain}] 命中域护栏：{rule}")
+    except Exception:
+        pass
 
     # Count total issues
     report["total_issues"] = (
@@ -628,7 +654,8 @@ def full_guardrail_check(
         len(report["fabricated"]) +
         len(report["numeric_ranges"]) +
         len(report["regulations"]) +
-        len(report["materials"])
+        len(report["materials"]) +
+        len(domain_issues)
     )
 
     # Passed = no critical blocking or data validity issues

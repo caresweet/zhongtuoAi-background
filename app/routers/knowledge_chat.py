@@ -631,7 +631,8 @@ async def review_report(request: ReviewReportRequest):
             yield _sse("thinking", {"status":"reviewing","message":f"提取到{len(filled)}个关键字段，正在审核...","progress":30,"filled_data":filled})
 
             from app.validation.content_guardrails import full_guardrail_check
-            report = full_guardrail_check(markdown=text, filled_data=filled)
+            report = full_guardrail_check(markdown=text, filled_data=filled,
+                                          domain=request.domain or "stability")
             yield _sse("thinking", {"status":"reviewing","message":f"发现{report['total_issues']}个问题","progress":60})
 
             score = _review_score(report)
@@ -725,7 +726,8 @@ async def review_report_file(file: UploadFile = File(...), domain: str = "stabil
                 yield _sse("thinking", {"status":"reviewing","message":f"提取到{len(filled)}个关键字段，正在全面审核...","progress":25,"filled_data":filled})
 
                 from app.validation.content_guardrails import full_guardrail_check
-                report = full_guardrail_check(markdown=text, filled_data=filled)
+                report = full_guardrail_check(markdown=text, filled_data=filled,
+                                              domain=domain or "stability")
                 yield _sse("thinking", {"status":"reviewing","message":f"文本审核: {report['total_issues']}个问题","progress":50})
 
                 # Image review

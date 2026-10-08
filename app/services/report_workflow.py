@@ -101,7 +101,6 @@ def push_human_chapters(state: dict, chapters) -> list:
 
 # ── 流程耗时统计 ──────────────────────────────────────────────────────────────
 import time as _time_mod
-from app.agent.chapter_definitions import ALL_CHAPTERS
 from app.domains import domain_of_state
 
 def _mark(state: dict, name: str):
@@ -767,38 +766,22 @@ async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Node 3: build_dynamic_outline — LLM generates chapter structure
 # ═══════════════════════════════════════════════════════════════════════════════
-def _standard_outline() -> List[Dict[str, Any]]:
-    """按**十四章案卷结构**（参照件《白马湖…报告》）生成确定性大纲（结构由 chapter_definitions 决定）。"""
-    from app.agent.chapter_definitions import (
-        CHAPTER_DEFINITIONS, get_chapter_data_requirements, get_chapter_rag_query,
-        get_chapter_kind,
-    )
-    outline = []
-    for num in ALL_CHAPTERS:
-        d = CHAPTER_DEFINITIONS.get(num, {})
-        req = get_chapter_data_requirements(num)
-        deps = [k for k, _n, *_r in req.get("required", [])] + \
-               [k for k, _n in req.get("recommended", [])]
-        outline.append({
-            "chapter_no": str(num),
-            "title": d.get("title", f"第{num}章"),
-            "depend_on_data": deps,
-            "need_spec_tags": [s.split(" ", 1)[-1] for s in d.get("sections", [])],
-            "depends_on": req.get("depends_on_chapters", []),
-            "argument_note": "",
-            "kind": get_chapter_kind(num),
-            "raw_content": None, "review_score": None, "review_msg": None,
-            "retry_count": 0, "status": "pending",
-        })
-    return outline
+def _standard_outline(domain: str = "stability") -> List[Dict[str, Any]]:
+    """按**域的案卷结构**生成确定性大纲（结构由各域章节目录决定）。
+
+    稳评：十四章案卷结构（参照件《白马湖…报告》），逐字段与历史一致；
+    复垦：十章结构（`reclamation_definitions`）。域分发收口在 `chapter_catalog`。
+    """
+    from app.agent.chapter_catalog import standard_outline
+    return standard_outline(domain)
 
 
 async def node_build_dynamic_outline(state: ReportWorkflowState) -> ReportWorkflowState:
-    """构建十四章案卷大纲（确定性，保证与参照件结构一致）。"""
+    """构建案卷大纲（确定性，保证与参照件结构一致）。"""
     state["phase"] = WorkflowPhase.OUTLINE.value
     logs = state.setdefault("logs", [])
 
-    outline_list = _standard_outline()
+    outline_list = _standard_outline(domain_of_state(state))
     state["_outline"] = {"chapters": [
         {"num": int(c["chapter_no"]), "title": c["title"]} for c in outline_list
     ]}
@@ -818,17 +801,19 @@ async def node_outline_check(state: ReportWorkflowState) -> ReportWorkflowState:
     filled = state.get("filled_data",{})
     logs = state.setdefault("logs",[])
 
-    # 🔴 结构强制：大纲必须等于案卷模板的 12 章结构（确定性），任何偏差一律重置
-    from app.agent.chapter_definitions import TOTAL_CHAPTERS
+    # 🔴 结构强制：大纲必须等于**本域**案卷模板的章结构（确定性），任何偏差一律重置
+    from app.agent.chapter_catalog import all_chapters, total_chapters
+    _domain = domain_of_state(state)
+    _expected = all_chapters(_domain)
     nums = []
     for ch in outline_list:
         try:
             nums.append(int(ch.get("chapter_no", 0)))
         except (ValueError, TypeError):
             nums.append(0)
-    if nums != ALL_CHAPTERS:
-        logs.append(f"⚠️ 大纲结构与案卷模板不一致（{nums}），重置为标准 {TOTAL_CHAPTERS} 章结构")
-        outline_list = _standard_outline()
+    if nums != _expected:
+        logs.append(f"⚠️ 大纲结构与案卷模板不一致（{nums}），重置为标准 {total_chapters(_domain)} 章结构")
+        outline_list = _standard_outline(_domain)
         state["outline_list"] = outline_list
 
     for ch in outline_list:
@@ -1194,8 +1179,11 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
         return state
 
     # 🔴 模板章 / 表格章：确定性渲染，**不经 LLM**（保证与人工成品一致、杜绝编造）
-    from app.agent.chapter_definitions import get_chapter_kind, get_chapter_title as _ct
-    _kind = get_chapter_kind(ch_num)
+    #    章类型/标题一律**按域**取 —— 复垦第 3 章是叙述章（fact），
+    #    稳评第 3 章才是评审表（table）；按稳评取会把复垦第 3 章误当表格章跳过。
+    from app.agent.chapter_catalog import chapter_kind as _ck, chapter_title as _ct
+    _domain = domain_of_state(state)
+    _kind = _ck(_domain, ch_num)
 
     # 🔴 `table` / `attachment` 两类章由**组装器确定性渲染**（第3章=江苏省制式评审表、
     #    第14章=附件），根本不经 LLM。旧实现只跳 `template`，于是第3章被当普通章
@@ -1203,7 +1191,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     #    挑进重写名单 [1,3,4,6,8] 再重写一遍 —— 那段正文**根本不会进报告**，纯浪费。
     #    脚本路径（scripts/gen_full_report.py）一直是跳过的，这里补齐。
     if _kind in ("table", "attachment"):
-        logs.append(f"  📄 第{ch_num}章「{_ct(ch_num)}」由组装器渲染（{_kind}），跳过 LLM")
+        logs.append(f"  📄 第{ch_num}章「{_ct(_domain, ch_num)}」由组装器渲染（{_kind}），跳过 LLM")
         state["_chapter_idx"] = idx + 1
         state["_next_action"] = "generate" if idx + 1 < len(outline_list) else "quality_review"
         return state
@@ -1223,11 +1211,11 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             logger.warning(f"Ch{ch_num} 模板渲染失败，回退 LLM: {_te}")
         if _md and _md.strip():
             chapters = state.setdefault("chapters", {})
-            chapters[ch_num] = {"markdown": _md, "title": _ct(ch_num), "status": "template"}
+            chapters[ch_num] = {"markdown": _md, "title": _ct(_domain, ch_num), "status": "template"}
             state["chapters"] = chapters
             ch["raw_content"] = _md
             state["outline_list"] = outline_list
-            logs.append(f"  📄 第{ch_num}章「{_ct(ch_num)}」按模板渲染（{len(_md)}字，未经 LLM）")
+            logs.append(f"  📄 第{ch_num}章「{_ct(_domain, ch_num)}」按模板渲染（{len(_md)}字，未经 LLM）")
             state["_chapter_idx"] = idx + 1
             state["_next_action"] = "generate"
             return state
@@ -1266,7 +1254,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                                   previous_chapters=state.get("chapters", {}),
                                   feedback=feedback if feedback else None,
                                   outline_context=outline_context, state=state)
-    agent = get_chapter_agent(ch_num, llm_service=llm, domain=domain_of_state(state))
+    agent = get_chapter_agent(ch_num, llm_service=llm, domain=_domain)
     # 🔴 这里的 agent_state 以前只给「本章依赖子集」(`ch_data`)，比脚本路径
     #    （scripts/gen_full_report.py）少三样东西，界面产出因此系统性偏差：
     #      ① `filled_data` 给的是子集 → 章节 agent 读不到完整事实卡（预公告全文、
@@ -1282,7 +1270,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                        ("project_name", "location", "land_use", "doc_reference")),
                    "filled_data": filled,
                    "_chapter_data": ch_data,
-                   "_domain": domain_of_state(state), "_report_style": "jinhu",
+                   "_domain": _domain, "_report_style": "jinhu",
                    "current_chapter": ch_num, "chapters": {},
                    "_custom_prompt": prompt, "_use_custom_prompt": True,
                    "_uploaded_files": state.get("_uploaded_files", []),
@@ -1485,7 +1473,8 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         logger.warning(f"Quality review failed (non-critical): {e}")
         # 🔴 异常时不得视为通过——标记未通过，避免问题报告静默进最终报告
         state["_quality_audit"] = {"passed": False, "error": str(e)}
-        state["_quality_unfixed"] = ALL_CHAPTERS if state.get("chapters") else []
+        from app.agent.chapter_catalog import all_chapters
+        state["_quality_unfixed"] = all_chapters(domain_of_state(state)) if state.get("chapters") else []
 
     # 🔴 人工复核检查点：有人工队列未处理 → 中断等前端提交意见
     #   （ENABLE_HUMAN_REVIEW=false 时直接跳过，agent 自行生成，报告直接产出）

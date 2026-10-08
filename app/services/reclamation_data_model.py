@@ -76,9 +76,6 @@ class ReclamationDataModel:
     def get(self, name: str) -> TracedValue:
         return self._values[name]
 
-    def names(self) -> List[str]:
-        return list(self._values)
-
     # ── 求值 ────────────────────────────────────────────────
 
     def _eval(self, formula: str) -> float:
@@ -108,7 +105,7 @@ class ReclamationDataModel:
             if not tv.source and not tv.formula:
                 issues.append(f"「{name}」既无来源也无算法 —— 数字无出处")
                 continue
-            if tv.formula and tv.source is None:
+            if tv.formula:
                 if abs(tv.value - tv.result) > tol:
                     issues.append(
                         f"「{name}」算法与文中值不自洽："

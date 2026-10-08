@@ -1,7 +1,7 @@
 """数字三件套：可追溯；算法与结果不自洽要报出来。"""
 import pytest
 
-from app.services.reclamation_data_model import ReclamationDataModel, TracedValue
+from app.services.reclamation_data_model import ReclamationDataModel
 
 
 def test_input_value_carries_source():

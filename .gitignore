@@ -23,5 +23,8 @@ logs/
 kb_engine/output/
 seed_data/crawled_reports/
 
+# SDD（子代理驱动开发的中间产物：ledger / 简报 / 报告 / 审查包）
+.superpowers/
+
 # 系统文件
 .DS_Store

@@ -697,15 +697,13 @@ async def start_generation(
     templates = []  # Initialize before try block
 
     # Resolve and pin the report domain before any template/knowledge lookup.
+    # 走域注册表：explicit 命中已知域即用它，否则按关键词识别，最后回落默认域。
     user_msg = (request.initial_message or "").strip()
     explicit_intent = (request.domain or request.intent or "").strip()
-    try:
-        from app.domains import detect_domain, get_domain
-        domain_id = detect_domain(message=user_msg, explicit=explicit_intent or None)
-        domain_cfg = get_domain(domain_id)
-    except Exception:
-        domain_id = "bidding" if explicit_intent == "bidding" else "stability"
-        domain_cfg = None
+    from app.domains import get_domain, detect_domain
+
+    domain_id = detect_domain(message=user_msg, explicit=explicit_intent or None)
+    domain_cfg = get_domain(domain_id)      # 未知时自动回落默认域
 
     # Load template list from DB only for reference (available_templates)
     try:

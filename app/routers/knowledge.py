@@ -313,28 +313,24 @@ def classify_document(filename: str, file_type: str = "") -> str:
     return "other"
 
 
-# Domain inference: filename/type → report domain. Bidding docs form their own
-# domain; everything else defaults to stability (the original single domain).
-# In 阶段二 this delegates to the domain registry's classify_rules.
-_DOMAIN_KEYWORDS = {
-    "bidding": ["招标", "投标", "中标", "评标", "标书", "采购", "竞争性", "bid", "tender"],
-}
-
-
+# 域推断：文件名/文档类型 → 报告类型域。走域注册表（app.domains），
+# 每个已注册域（stability/bidding/reclamation…）都在此被识别；
+# 未命中任何关键词时回落 stability（默认域）。
 def infer_domain(filename: str, document_type: str = "") -> str:
-    """Infer the report domain for an uploaded document.
+    """从文件名/文档类型推断报告类型域。
 
-    Returns a domain id (e.g. "stability", "bidding"). Falls back to
-    "stability" so legacy uploads keep their original behavior.
+    优先走域注册表的关键词匹配（各域的 classify_keywords），
+    未命中时回落 stability —— 与既有行为一致。
     """
     if document_type == "bidding":
         return "bidding"
-    name_lower = (filename or "").lower()
-    for domain, keywords in _DOMAIN_KEYWORDS.items():
-        for kw in keywords:
-            if kw.lower() in name_lower:
-                return domain
-    return "stability"
+    if not filename:
+        return "stability"
+    from app.domains import detect_domain
+
+    # detect_domain 内部：非默认域的关键词优先，最后才轮到默认域；
+    # 其默认返回值就是 "stability"，故「未命中回落稳评」自动成立。
+    return detect_domain(message=filename)
 
 
 @router.post("/documents", response_model=ApiResponse)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Dict, List, Any, Optional
 
@@ -90,6 +91,9 @@ async def distill_skills(domain: str = "stability", limit: int = 50) -> Dict[str
         # LLM 蒸馏
         from app.services.llm_service import LLMService
         llm = LLMService()
+        # 蒸馏用非推理模型：deepseek-v4-pro 等推理模型会把输出预算耗在思考(reasoning_content)上，
+        # 导致最终 content 为空、无法解析 JSON。可用环境变量 DISTILL_MODEL 覆盖默认值。
+        llm.model = (os.environ.get("DISTILL_MODEL") or "deepseek-chat").strip()
         prompt = f"""你是社会稳定风险评估报告的资深审核专家。以下是多位人工专家对报告评估后提出的优化点和不足，请蒸馏成结构化的「审核 skill」。
 
 每条 skill 两种形式之一：
@@ -122,7 +126,12 @@ async def distill_skills(domain: str = "stability", limit: int = 50) -> Dict[str
 
 只输出 JSON，不要解释文字。"""
 
-        result = await llm.chat(messages=[{"role": "user", "content": prompt}], max_tokens=3000, temperature=0.2)
+        result = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=3000,
+            temperature=0.2,
+            response_format={"type": "json_object"},  # 🔴 强制 JSON 输出，避免模型返回叙述性文字
+        )
         content = result if isinstance(result, str) else (result.get("content", "") if isinstance(result, dict) else "")
 
         # 解析 JSON
@@ -156,8 +165,8 @@ async def distill_skills(domain: str = "stability", limit: int = 50) -> Dict[str
                     VALUES (:domain, :chapter_num, :skill_type, :rule_pattern, :rule_desc, :severity, :correction, :source_ids)
                 """), {
                     "domain": domain,
-                    "chapter_num": int(s.get("chapter", 0) or 0),
-                    "skill_type": s.get("skill_type", "text"),
+                    "chapter_num": _parse_chapter_num(s.get("chapter", 0)),
+                    "skill_type": _normalize_skill_type(s, pattern),
                     "rule_pattern": pattern,
                     "rule_desc": desc,
                     "severity": s.get("severity", "warning") or "warning",
@@ -175,35 +184,45 @@ async def distill_skills(domain: str = "stability", limit: int = 50) -> Dict[str
 
 
 def _is_duplicate_skill(desc: str, pattern: str, existing_descs: list, existing_patterns: list) -> bool:
-    """判断新蒸馏的 skill 是否与已有 skill 重复。
+    """判断新蒸馏的 skill 是否与已有 skill 重复（保守策略：宁可保留，不误杀新问题）。
 
     规则型：rule_pattern 相同或高度相似
-    文本型：rule_desc 包含/被包含于已有描述，或提取关键词重叠
+    文本型：相同小节号 + 内容关键词有交集，才算重复；
+            双方都无小节号时，内容关键词交集≥2 才算重复。
+    泛化词（应/禁止/不要/必须等）不作为判重依据，避免误杀不同问题。
     """
     if not desc and not pattern:
         return True  # 空 skill 直接跳过
 
-    # 规则型：pattern 相同
+    # 规则型：pattern 相同或互相包含
     if pattern:
         for ep in existing_patterns:
-            if pattern == ep or (pattern in ep or ep in pattern):
+            if ep and (pattern == ep or pattern in ep or ep in pattern):
                 return True
 
-    # 文本型：desc 关键词重叠（提取核心关键词判断）
-    import re as _re_dd
-    def _keywords(text: str) -> set:
-        # 提取"1.1 决策名称"中的小节号和小节名，以及核心词
-        kws = set()
-        for m in _re_dd.findall(r'(\d\.\d|\d+[-—]\d+|[一-龥]{2,6}名称|[一-龥]{2,6}单位|[一-龥]{2,6}数据|应|禁止)', text):
-            kws.add(m)
-        return kws
+    def _numbers(text: str) -> set:
+        return set(re.findall(r"\d\.\d+", text or ""))
 
-    new_kws = _keywords(desc)
-    if new_kws:
-        for ed in existing_descs:
-            ed_kws = _keywords(ed)
-            if new_kws & ed_kws:  # 关键词有重叠
-                return True
+    def _words(text: str) -> set:
+        # 有辨识度的内容词：小节名（含名称/单位/数据/表/图/照片/面积/满意度/调查/目的等）+ 具体错误词
+        return set(
+            re.findall(
+                r"[一-龥]{2,8}(?:名称|单位|数据|表|图|照片|面积|满意度|调查|目的|保障|评分|措施|时间|步骤|意见)|会议室|待补充|326342|供水|供电",
+                text or "",
+            )
+        )
+
+    n_new = _numbers(desc)
+    w_new = _words(desc)
+    for ed in existing_descs:
+        n_ed = _numbers(ed)
+        w_ed = _words(ed)
+        # 都有小节号：小节号相同 + 关键词有交集 → 重复
+        if n_new and n_ed and (n_new & n_ed) and (w_new & w_ed):
+            return True
+        # 都无小节号：内容关键词交集≥2 → 重复
+        if not n_new and not n_ed and len(w_new & w_ed) >= 2:
+            return True
     return False
 
 
@@ -297,6 +316,37 @@ async def auto_extract_high_freq_issues(domain: str = "stability", min_count: in
         return {"extracted": 0, "message": f"自动提炼失败: {e}"}
 
 
+def _parse_chapter_num(chapter: Any) -> int:
+    """把模型输出的章节号归一化为 int。
+
+    模型可能输出 3 / "3" / "第3章" / "第0章"（全局）。无法解析时回退 0（全局）。
+    """
+    if isinstance(chapter, (int, float)):
+        return int(chapter)
+    s = str(chapter or "").strip()
+    if not s:
+        return 0
+    m = re.search(r"(\d+)", s)
+    return int(m.group(1)) if m else 0
+
+
+def _normalize_skill_type(s: dict, pattern: str) -> str:
+    """把模型输出的 skill_type 归一化为系统识别的 rule / text。
+
+    LLM 常把问题类型（structure/format/data_error 等）误填进 skill_type。
+    规则：有可程序化检查的 rule_pattern → rule；否则 → text。
+    """
+    st = str(s.get("skill_type") or "").strip().lower()
+    if st == "rule":
+        return "rule"
+    if st == "text":
+        return "text"
+    if st == "user_requirement":
+        return "user_requirement"
+    # 其余一律按有无 pattern 归类
+    return "rule" if pattern else "text"
+
+
 def _parse_skills_json(content: str) -> List[Dict]:
     """解析 LLM 蒸馏出的 skill JSON。"""
     if not content:
@@ -316,7 +366,7 @@ def _parse_skills_json(content: str) -> List[Dict]:
 
 
 async def get_active_skills(domain: str = "stability") -> Dict[str, Any]:
-    """获取活跃的审核 skill（规则 + 文本）。"""
+    """获取活跃的审核 skill（规则 + 文本 + 用户要求）。"""
     try:
         from app.database.knowledge_db import async_session
         from sqlalchemy import text
@@ -330,6 +380,7 @@ async def get_active_skills(domain: str = "stability") -> Dict[str, Any]:
 
         rules = []
         texts = []
+        requirements = []  # 🔴 用户报告要求（无条件注入）
         for r in rows:
             if r.skill_type == "rule" and r.rule_pattern:
                 rules.append({
@@ -339,29 +390,116 @@ async def get_active_skills(domain: str = "stability") -> Dict[str, Any]:
                     "correction": r.correction or "",
                     "chapter": r.chapter_num or 0,
                 })
+            elif r.skill_type == "user_requirement" and (r.rule_desc or r.correction):
+                requirements.append({
+                    "id": r.id,
+                    "desc": r.rule_desc or "",
+                    "correction": r.correction or "",
+                    "chapter": r.chapter_num or 0,
+                })
             elif r.skill_type == "text" and (r.rule_desc or r.correction):
                 texts.append({
                     "desc": r.rule_desc or "",
                     "correction": r.correction or "",
                     "chapter": r.chapter_num or 0,
                 })
-        return {"rules": rules, "texts": texts, "total": len(rows)}
+        return {"rules": rules, "texts": texts, "requirements": requirements, "total": len(rows)}
     except Exception as e:
         logger.warning(f"get_active_skills failed: {e}")
-        return {"rules": [], "texts": [], "total": 0}
+        return {"rules": [], "texts": [], "requirements": [], "total": 0}
+
+
+async def get_user_requirements(domain: str = "stability") -> List[Dict[str, Any]]:
+    """获取用户报告要求（skill_type='user_requirement'，全局无条件注入）。"""
+    try:
+        from app.database.knowledge_db import async_session
+        from sqlalchemy import text
+        async with async_session() as db:
+            rows = (await db.execute(text("""
+                SELECT id, chapter_num, rule_desc, correction, severity
+                FROM review_skills
+                WHERE domain = :domain AND is_active = 1 AND skill_type = 'user_requirement'
+                ORDER BY id
+            """), {"domain": domain})).fetchall()
+        return [
+            {
+                "id": r.id, "chapter": r.chapter_num or 0,
+                "desc": r.rule_desc or "", "correction": r.correction or "",
+                "severity": r.severity or "error",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning(f"get_user_requirements failed: {e}")
+        return []
+
+
+async def add_user_requirement(requirement: str, domain: str = "stability",
+                               correction: str = "") -> Dict[str, Any]:
+    """新增一条用户报告要求（skill_type='user_requirement'，chapter=0 全局）。"""
+    if not requirement or not str(requirement).strip():
+        return {"added": 0, "message": "要求内容为空"}
+    try:
+        from app.database.knowledge_db import async_session
+        from sqlalchemy import text
+        async with async_session() as db:
+            # 去重：同领域已有相同描述则跳过
+            existing = (await db.execute(text("""
+                SELECT id FROM review_skills
+                WHERE domain = :domain AND is_active = 1
+                  AND skill_type = 'user_requirement' AND rule_desc = :desc
+            """), {"domain": domain, "desc": str(requirement).strip()})).fetchone()
+            if existing:
+                return {"added": 0, "id": existing.id, "message": "该要求已存在"}
+            result = await db.execute(text("""
+                INSERT INTO review_skills
+                (domain, chapter_num, skill_type, rule_pattern, rule_desc, severity, correction)
+                VALUES (:domain, 0, 'user_requirement', '', :desc, 'error', :corr)
+            """), {"domain": domain, "desc": str(requirement).strip(), "corr": correction or ""})
+            await db.commit()
+            return {"added": 1, "id": result.lastrowid, "message": "已添加要求"}
+    except Exception as e:
+        logger.warning(f"add_user_requirement failed: {e}")
+        return {"added": 0, "message": f"添加失败: {e}"}
+
+
+async def delete_user_requirement(skill_id: int, domain: str = "stability") -> Dict[str, Any]:
+    """删除一条用户报告要求（软删除 is_active=0）。"""
+    try:
+        from app.database.knowledge_db import async_session
+        from sqlalchemy import text
+        async with async_session() as db:
+            result = await db.execute(text("""
+                UPDATE review_skills SET is_active = 0
+                WHERE id = :id AND domain = :domain AND skill_type = 'user_requirement'
+            """), {"id": int(skill_id), "domain": domain})
+            await db.commit()
+            return {"deleted": result.rowcount, "message": "已删除" if result.rowcount else "未找到该要求"}
+    except Exception as e:
+        logger.warning(f"delete_user_requirement failed: {e}")
+        return {"deleted": 0, "message": f"删除失败: {e}"}
 
 
 async def get_skill_hints(domain: str = "stability") -> str:
-    """获取文本型 skill，格式化为生成 prompt 注入用的提示文本。"""
+    """获取文本型 skill + 用户要求，格式化为生成 prompt 注入用的提示文本。"""
     skills = await get_active_skills(domain)
+    parts = []
+    # 用户报告要求（无条件，最高优先）
+    reqs = skills.get("requirements", [])
+    if reqs:
+        lines = ["\n## 📋 用户报告要求（必须遵守）"]
+        for t in reqs[:8]:
+            lines.append(f"- {t.get('desc', '')}：{t.get('correction', '')}")
+        parts.append("\n".join(lines) + "\n")
+    # 专家反馈（文本型）
     texts = skills.get("texts", [])
-    if not texts:
-        return ""
-    lines = ["\n## ⚠️ 历史专家反馈（请务必避免）"]
-    for t in texts[:10]:
-        ch = f"第{t['chapter']}章 " if t.get("chapter") else ""
-        lines.append(f"- {ch}{t.get('desc', '')}：{t.get('correction', '')}")
-    return "\n".join(lines) + "\n"
+    if texts:
+        lines = ["\n## ⚠️ 历史专家反馈（请务必避免）"]
+        for t in texts[:10]:
+            ch = f"第{t['chapter']}章 " if t.get("chapter") else ""
+            lines.append(f"- {ch}{t.get('desc', '')}：{t.get('correction', '')}")
+        parts.append("\n".join(lines) + "\n")
+    return "\n".join(parts)
 
 
 async def verify_skill_effect(domain: str = "stability", full_text: str = "") -> Dict[str, Any]:

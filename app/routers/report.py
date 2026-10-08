@@ -8,15 +8,17 @@ import json
 import sys
 import os
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, List
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File, WebSocket, WebSocketDisconnect
+from typing import Dict, List
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.knowledge_db import get_knowledge_db
-from app.database.history_db import get_history_db
+from app.database.auth_db import get_auth_db
+from app.deps import get_current_user, is_staff
+from app.models.user import User
+
 from app.schemas.report import (
     StartGenerationRequest, StartGenerationResponse, ChatRequest,
     GenerationStatusResponse, ActionResponse,
@@ -37,6 +39,19 @@ from app.utils.sse import (
 )
 
 router = APIRouter(prefix="/api/v1/reports", tags=["报告生成"])
+
+# 🔴 WebSocket 路由必须挂在**不带 HTTP 鉴权依赖**的独立 router 上，不能复用上面这个。
+#    为什么：`main.py` 用 `include_router(report.router, dependencies=[Depends(get_current_user)])`
+#    装配，而 router 级 dependencies 会**同样套到 `@router.websocket` 上**。
+#    浏览器 WebSocket API **不支持自定义请求头**，握手时带不了 `Authorization`，
+#    于是 `get_current_user` 直接判 401，握手被拒 —— 前端 `onerror` 报
+#    「There was a bad response from the server」。实测直连后端就是 HTTP 401。
+#    WS 的鉴权改由 `authenticate_websocket()` 走 `?token=` query 参数自查（见下方 ws_chat），
+#    未带合法 token 的连接会被 `close(4001)`，**不等于放空鉴权**。
+#    ⚠️ 动这里要同步 `main.py` 的 `WS_ROUTERS`。
+ws_router = APIRouter(prefix="/api/v1/reports")
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,11 +91,6 @@ REPORT_MATERIAL_GUIDE = {
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session Management (compatible with existing report_service)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _ensure_graph():
-    """LangGraph removed — using ChapterOrchestrator instead."""
-    return None
 
 
 def _regex_extract_data(text: str) -> dict:
@@ -134,94 +144,28 @@ def _regex_extract_data(text: str) -> dict:
     return extracted
 
 
-def _extract_attachment_text(state: dict, att: str) -> bool:
-    """Extract text from any supported attachment (PDF/DOCX/DOC/TXT).
+def _has_real_data(state: dict, attachments: list | None = None) -> bool:
+    """会话里有没有**真材料**（不是用户敲进去的几个字）。
 
-    Returns True if text was successfully extracted.
+    🔴 这是「能不能生成」的门槛判据。原先只存在于**聊天**那条路里（内联一段），
+       而「🚀 开始生成报告」按钮走的是 `/workflow/start`，**完全不过这道门** ——
+       一个文件都不传也能一路跑完出报告，正文靠模型自由发挥。
+       现在两条路共用这一个定义，免得两处判据各自漂移。
     """
-    from app.services.file_service import file_service
-    try:
-        att_lower = att.lower()
-        text = None
-        if att_lower.endswith(".pdf"):
-            text = file_service.extract_pdf_text(att)
-        elif att_lower.endswith((".docx", ".doc")):
-            text = file_service.extract_docx_text(att)
-        elif att_lower.endswith((".txt", ".md")):
-            text = file_service.read_text_file(att)
-
-        if text and len(text.strip()) > 50:
-            text_cache = state.setdefault("_pdf_texts", {})
-            text_cache[att] = text[:30000]
-            return True
-        elif att_lower.endswith(".pdf"):
-            state.setdefault("_pdf_need_ocr", []).append(att)
-    except Exception:
-        if att.lower().endswith(".pdf"):
-            state.setdefault("_pdf_need_ocr", []).append(att)
-    return False
-
-
-async def _llm_extract_fields(pdf_text: str, llm) -> dict:
-    """Use LLM to extract required project fields from document text.
-
-    Regex can only match exact patterns; LLM understands context like
-    '洪拟征地公告' → project_name, org_name, location, area_mu, land_use.
-    """
-    # Truncate to avoid token limits — keep first 8000 chars per document section
-    sections = pdf_text.split("\n[")
-    trimmed = ""
-    for sec in sections:
-        if len(trimmed) > 12000:
-            break
-        trimmed += sec[:4000] + "\n"
-
-    prompt = f"""从以下征地项目资料中提取关键信息。返回纯JSON。
-
-## 文档内容
-{trimmed[:12000]}
-
-## 需要提取的字段
-- project_name: 项目名称（含文号，如"洪拟征告〔2026〕7号"）
-- org_name: 决策主体/征收责任单位（政府全称）
-- location: 征收土地位置（完整到村组）
-- area_mu: 征收面积（亩，纯数字）
-- land_use: 土地用途/规划用途
-- implement_unit: 稳评实施单位/第三方机构
-- doc_reference: 公告文号
-- compensation_standard: 征地补偿标准/区片综合地价
-- household_count: 涉及农户数
-- total_samples: 问卷调查样本数
-
-## 规则
-1. 如果找不到某字段，省略该key
-2. area_mu只返回数字
-3. location写完整到村组
-4. 返回严格JSON，不要有其他文字
-
-```json
-{{"project_name": "...", "org_name": "...", ...}}
-```"""
-
-    import json as _json, re as _re2, logging as _llog
-    try:
-        response = await llm.chat(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
-            temperature=0.1,
-        )
-        content = str(response) if response else ""
-        _llog.getLogger(__name__).info(f"LLM extraction response: {len(content)} chars")
-        # Extract JSON
-        json_match = _re2.search(r'\{[^{}]*\}', content, _re2.DOTALL)
-        if json_match:
-            result = _json.loads(json_match.group())
-            _llog.getLogger(__name__).info(f"LLM extracted fields: {list(result.keys())}")
-            return result
-        _llog.getLogger(__name__).warning(f"LLM extraction: no JSON in response: {content[:200]}")
-    except Exception as e:
-        _llog.getLogger(__name__).warning(f"LLM extraction call failed: {e}")
-    return {}
+    if not isinstance(state, dict):
+        return False
+    filled = state.get("filled_data") or {}
+    real_filled = {k: v for k, v in filled.items() if not str(k).startswith("_") and v}
+    summary = state.get("_project_material_summary") or {}
+    return bool(
+        len(real_filled) >= 1
+        or state.get("_pdf_texts")
+        or (summary.get("facts") or {})
+        or summary.get("completed_files", 0) > 0
+        or state.get("_project_materials")
+        or state.get("_uploaded_files")
+        or attachments  # 随本条消息一起发来的文件
+    )
 
 
 async def _analyze_session_attachments(state: dict, attachments: list[str]) -> dict:
@@ -250,6 +194,18 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     state["_project_material_summary"] = summary
 
     # 🔴 Extract authoritative data from PDF OCR text (user-provided data ALWAYS wins)
+    # 🔴 预公告解析要**跨材料挑最好的那一份**，不能「先到先得」：
+    #    勘测定界报告/座谈会记录里也常出现「根据《中华人民共和国…」这类残缺引用，
+    #    谁排前面谁就把 purpose_text 之类的字段占了（曾导致征收目的只剩 10 个字）。
+    _ann_keys = ("doc_reference", "org_name", "location", "publish_date",
+                 "announcement_title", "preamble_text", "legal_basis_cited",
+                 "purpose_text", "purpose_legal_basis", "scope_text",
+                 "notice_period_text", "notice_date", "notice_end_date",
+                 "work_arrangement_text", "work_scope", "other_matters_text",
+                 "contact_name", "contact_phone", "attachment_note",
+                 "map_plots", "map_scale", "map_date")
+    _ann_best: dict = {}
+    _ann_best_n = -1
     for item in existing_materials:
         txt = str(item.get('text_content', '') or '')
         if not txt:
@@ -266,21 +222,49 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
         if m: extracts['area_m2'] = m.group(1)
         m = _re_data.search(r'(\d+\.?\d*)\s*亩', txt)
         if m: extracts['area_mu'] = m.group(1)
-        # Location
-        m = _re_data.search(r'(?:朱坝|高良涧|黄码|淮高)\S{0,10}(?:街道|镇)\S{0,10}(?:社区|村)\S{0,10}(?:组|队)', txt)
-        if m: extracts['location'] = m.group(0)
-        # Document reference
-        m = _re_data.search(r'洪拟征告\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号', txt)
-        if m: extracts['doc_reference'] = m.group(0)
-        # Land use
-        m = _re_data.search(r'(?:用途|用于)[：:]*\s*(\S{2,30})', txt)
-        if m: extracts['land_use'] = m.group(1)
-        # Write as LOCKED data (prefix prevents LLM override)
+        # Location / 文号（🔴 通用：不写死「X街道/X镇」行政区划层级，不写死「拟征告」前缀，
+        #    权威来源＝用户上传的预公告逐字文本）
+        # 🔴 预公告**完整解析**：正文五个部分的段落都是有效内容（征收目的/征收范围/
+        #    公告期限/工作安排/其他事项），不能只取文号与位置。
+        from app.services.announcement_extract import (
+            extract_location, extract_doc_reference, parse_announcement,
+        )
+        _ann = parse_announcement(txt)
+        # 谁解析出的字段多，谁就是真正的预公告（后面统一写盘）
+        _n = sum(1 for _v in _ann.values() if _v)
+        if _n > _ann_best_n:
+            _ann_best, _ann_best_n = _ann, _n
+        if not _ann:
+            _loc = extract_location(txt)
+            if _loc:
+                extracts['location'] = _loc
+            _doc = extract_doc_reference(txt)
+            if _doc:
+                extracts['doc_reference'] = _doc
+        # Land use（要求冒号，避免在「土地用途 总面积」这种表头上误抓成"总面积"）
+        m = _re_data.search(r'(?:土地用途|用地性质|用途|用于)[：:]\s*(\S{2,20})', txt)
+        if m and m.group(1) not in ("总面积", "面积", "合计"):
+            extracts['land_use'] = m.group(1)
+        # 写进 filled_data，来源标 **material**
+        #
+        # 🔴 这里原来打的是 `_locked_{k}`，注释写「user-provided」—— **是错的**：
+        #    这些值是从公告 PDF 里**正则抓出来的**，不是用户填的。
+        #    `_locked_` 一打，后面**勘测定界的实测面积就再也覆盖不了它**，
+        #    于是报告里公告概数与实测数并存、两张表两个口径。
+        #    正确做法：来源记 `material`（`field_sources` 有优先级 user>material>ai>system），
+        #    `_locked_` 只留给**用户在界面填/确认过**的值（见 `resume_workflow`）。
         filled = state.setdefault("filled_data", {})
+        _written = []
         for k, v in extracts.items():
             if v and k not in filled:
                 filled[k] = str(v)
-                filled[f"_locked_{k}"] = True  # Mark as user-provided, not to be overridden
+                _written.append(k)
+        if _written:
+            try:
+                from app.services.field_sources import mark
+                mark(filled, "material", *_written)
+            except Exception:
+                pass
     state["_project_material_chunks"] = [
         {
             "source_path": item.get("source_path", ""),
@@ -303,24 +287,174 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     # 🔴 Propagate extracted facts to filled_data so downstream agents can use them
     facts = summary.get("facts", {})
     filled = state.setdefault("filled_data", {})
+    _fact_keys = []
     for key, value in facts.items():
         if value and not key.startswith("_"):
             filled[key] = value
+            _fact_keys.append(str(key))
+    # 🔴 来源=材料识别。这里是**材料摄入的总入口**，一处覆盖全部抽取字段。
+    try:
+        from app.services.field_sources import mark
+        mark(filled, "material", *_fact_keys)
+    except Exception:
+        pass
 
-    # 🔴 Store extracted images for image categorization in assembler
+    # 🔴 预公告：对**拼接全文**再解析一次，取「字段最全」的结果覆盖上面可能被残缺引用
+    #    占掉的字段（extract 逐份材料时预公告常常只是片段，facts 又会把结果盖回去）。
+    #    「更长者胜」——残缺值一律让位给完整值。
+    try:
+        from app.services.announcement_extract import parse_announcement as _pa
+        _full_txt = state.get("_pdf_raw_text") or ""
+        _ann_full = _pa(_full_txt) if _full_txt else {}
+        _ann_src = _ann_full if sum(1 for v in _ann_full.values() if v) >= _ann_best_n else _ann_best
+        for _k in _ann_keys:
+            _v = _ann_src.get(_k)
+            if _v and len(str(_v)) >= len(str(filled.get(_k) or "")):
+                filled[_k] = str(_v)
+                filled[f"_locked_{_k}"] = True
+                try:
+                    from app.services.field_sources import mark
+                    mark(filled, "material", _k)
+                except Exception:
+                    pass
+    except Exception as _ae:
+        logger.warning(f"预公告全文复核跳过: {_ae}")
+
+    # 🔴 稳评实施单位（责任单位 ≠ 实施单位，LLM 常把两者混为一谈）。
+    #    取**本报告所属公司**的单位名；没有公司就**留空**，报告里显示「待填写」——
+    #    绝不写死成我们自己的名字：外部用户的报告抬头不能被印成我们的。
+    if not filled.get("implement_unit"):
+        from app.services.company_service import load_company
+        _co = await load_company(state.get("_company_id"))
+        _unit = str((_co or {}).get("implement_unit") or "").strip()
+        if _unit:
+            filled["implement_unit"] = _unit
+            filled["_locked_implement_unit"] = True
+
+    # 🔴 抽取图（PDF 内嵌图）**不整体并入**——这是「报告 700 多页」的根因。
+    #    但**按类型限量的关键图**要进报告：预公告附图（位置示意图）、勘测定界图、盖章公告页。
     extracted_imgs = facts.get("_extracted_images", [])
     if extracted_imgs:
         filled["_extracted_images"] = extracted_imgs
-        # Also add to uploaded_files so _get_session_images picks them up
-        uploaded = state.setdefault("_uploaded_files", [])
-        for img in extracted_imgs:
-            if img not in uploaded:
-                uploaded.append(img)
+    try:
+        from app.services.pdf_key_images import collect_key_images
+        _key_imgs = collect_key_images(existing_materials)
+        if _key_imgs:
+            filled["_pdf_key_images"] = _key_imgs
+            # 位置示意图 / 勘测定界图 → 第3章（三）；盖章公告页 → 附件
+            _paths = [k["path"] for k in _key_imgs if k.get("chapter") == 6]
+            _appendix = [k["path"] for k in _key_imgs if k.get("chapter") == 0]
+            # 🔴 `_uploaded_files` 全程统一为 dict（含 original_name）——混入裸路径会
+            #    让去重失效、并让图片归属判断丢掉文件夹线索，最后全掉进附件。
+            if _paths:
+                state.setdefault("_uploaded_files", [])
+                _exist = {str(x.get("path") if isinstance(x, dict) else x)
+                          for x in state["_uploaded_files"]}
+                for p in _paths:
+                    if p not in _exist:
+                        state["_uploaded_files"].append(
+                            {"path": p, "original_name": os.path.basename(str(p))})
+                        _exist.add(p)
+            if _appendix:
+                state.setdefault("_appendix_files", [])
+                for p in _appendix:
+                    if p not in state["_appendix_files"]:
+                        state["_appendix_files"].append(p)
+            logger.info(f"PDF 关键图 {len(_key_imgs)} 张已接入（正文 {len(_paths)} / 附件 {len(_appendix)}）")
+    except Exception as _ke:
+        logger.warning(f"PDF 关键图提取跳过: {_ke}")
 
     # 🔴 Copy extracted tables for table_registry to use
-    extracted_tables = facts.get("_extracted_tables", [])
+    extracted_tables = list(facts.get("_extracted_tables", []) or [])
+    # 🔴 勘测定界报告：用专门解析器产出规范表格（表3-1 汇总表 + 土地分类面积表），
+    #    并在事实卡里补上 坐落/面积/用途/权属（比逐页残缺提取可靠）。
+    #    🔴 走 `collect_land_survey`（扫**上传清单**）而不是只扫 `existing_materials`：
+    #       勘测定界常常没被登记进 `_project_materials`（本会话 177 个上传里只登了 2 个），
+    #       只扫后者会漏；该函数内部还会把「相对 storage 的路径」还原成真实路径。
+    #       脚本路径（`scripts/gen_full_report.py`）调的是**同一个函数**，两条路不分叉。
+    try:
+        from app.services.land_survey_parser import collect_land_survey
+        _sur_tables, _sur = collect_land_survey(state)
+        if _sur:
+            extracted_tables.extend(_sur_tables)
+            # 🔴 **面积以勘测定界为准**（业主：「统一都直接使用勘测定界报告中的数据」）。
+            #    勘测定界是**实测**，公告里的是概数。原先是「只有 filled 为空才取勘测定界」，
+            #    而公告正则会先把值写进去 → 勘测定界永远排不上，报告里两张表两个口径。
+            #    ⚠️ 用户**在界面填过**的（`_confirmed_`）不动 —— 那才是权威。
+            try:
+                from app.services.field_sources import mark
+            except Exception:
+                mark = None
+
+            _m2 = _sur.get("area_m2")
+            if _m2 and not filled.get("_confirmed_area_m2"):
+                filled["area_m2"] = str(_m2)
+                # 勘测定界报告**只写平方米**，亩由系统换算（1 亩 = 666.67 ㎡）
+                try:
+                    filled["area_mu"] = f"{round(float(_m2) / 666.67, 4):g}"
+                except (TypeError, ValueError):
+                    pass
+                if mark:
+                    try: mark(filled, "material", "area_m2", "area_mu")
+                    except Exception: pass
+
+            for _k in ("location", "land_use", "boundary_points"):
+                _v = _sur.get(_k)
+                if _v and str(_v).strip() and not str(filled.get(_k, "")).strip():
+                    filled[_k] = str(_v)
+                    if mark:
+                        try: mark(filled, "material", _k)
+                        except Exception: pass
+            if _sur.get("owner_units"):
+                # 🔴 权属单位去重：`owner_units` 是**按二级地类逐行**给出的，
+                #    同一权属会出现多次（实测 2 个地块 → 6 条重复记录）。
+                #    不去重的话正文会写成「八里居委会集体、八里居委会汪庄组、
+                #    八里居委会朱庄组、八里居委会集体、…」这种复读。
+                _owners: list = []
+                for _x in _sur["owner_units"]:
+                    _s = str(_x or "").strip()
+                    if _s and _s not in _owners:
+                        _owners.append(_s)
+                filled["_land_owners"] = _owners
+                # 🔴 权属构成**文本**（第6章 1.5「涉及村组」/ 第10章合法性论证用）——
+                #    此前只存 list，全仓库没有任何读取点，等于解析了没人用。
+                _ow = "、".join(_owners)
+                if _ow:
+                    filled["land_ownership"] = _ow
+                    if mark:
+                        try: mark(filled, "material", "land_ownership")
+                        except Exception: pass
+            # 🔴 地类明细一律来自勘测定界（按源表第二级地类，**合计对得上**）
+            if _sur.get("by_category"):
+                filled["_land_by_category"] = _sur["by_category"]
+                # 🔴 地类构成**文本** —— 第6章 spec 的 data 依赖 `land_classification`，
+                #    而此前**全仓库无人写这个键**（勘测定界只写 `_land_by_category`），
+                #    第6章「涉及村组 + 地类构成」拿不到数据只能自圆其说。
+                _ct = "、".join(f"{k}{v}㎡" for k, v in _sur["by_category"].items()
+                                if str(k).strip())
+                if _ct:
+                    filled["land_classification"] = _ct
+                    if mark:
+                        try:
+                            mark(filled, "material", "land_classification", "land_ownership")
+                        except Exception:
+                            pass
+            if _sur.get("by_sub_category"):
+                filled["_land_by_sub_category"] = _sur["by_sub_category"]
+            logger.info(f"勘测定界已解析：{len(_sur.get('plots',[]))} 地块 / "
+                        f"{len(_sur.get('classifications',[]))} 权属 / 面积 {_sur.get('area_m2')}")
+    except Exception as _se:
+        logger.warning(f"勘测定界解析跳过: {_se}")
     if extracted_tables:
         filled["_extracted_tables"] = extracted_tables
+
+    # 🔴 用勘测定界表(表1-1)纠正被正则抓错的字段（按表头语义取值，不锁位置）：
+    #    land_use（治「总面积」误抓）、location（取【土地坐落】列）、project_name（由文号派生）
+    try:
+        from app.services.field_fixer import fix_fields_from_tables
+        fix_fields_from_tables(filled, extracted_tables)
+    except Exception:
+        pass
 
     # 🔴 Run deep material analysis — vision AI classification + OCR + data extraction
     try:
@@ -336,6 +470,44 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     except Exception as e:
         import logging as _log3
         _log3.getLogger(__name__).warning(f"Deep analysis skipped (non-critical): {e}")
+
+    # 🔴 材料字段**别名归一**：材料侧抽出来的键名（`responsible_unit` / `publish_date`）
+    #    与报告字段名（`org_name` / `notice_publish_date`）不是一套，弹窗的「缺失判断」
+    #    只认规范键 —— 归一键不补，材料里明明有的值照样会再问用户一遍。
+    try:
+        from app.services.field_resolver import canonicalize_material
+        _canon = canonicalize_material(filled)
+        if _canon:
+            state.setdefault("logs", []).append(
+                "🔗 材料字段已归一到报告字段：" + "、".join(_canon))
+    except Exception as _ce:
+        logger.warning(f"字段别名归一跳过: {_ce}")
+
+    # 🔴 **关键信息识别核验** —— 直接回答「用户到底有没有正确上传」：
+    #    已认出哪些关键信息（带值）、哪些没认到（生成时会逐项问）。
+    #    此前少传/传错时系统一声不吭，用户只能等生成到一半被弹窗追问才知道材料没传对。
+    try:
+        from app.services.material_ingestion_service import (
+            material_ingestion_service as _mis, KEY_RECOGNITION_FIELDS,
+        )
+        _rep = _mis.recognition_report(filled)
+        _rec = _rep.get("recognized", []) or []
+        _miss = _rep.get("missing", []) or []
+        _total = len(KEY_RECOGNITION_FIELDS)
+        if _rec:
+            _show = "、".join(f"{i['label']}＝{i['value']}" for i in _rec[:8])
+            state.setdefault("logs", []).append(
+                f"✅ 材料识别：已认出 {len(_rec)}/{_total} 项关键信息 —— {_show}"
+                + ("…" if len(_rec) > 8 else ""))
+        if _miss:
+            state.setdefault("logs", []).append(
+                "⚠️ 材料中未识别到（生成时会逐项询问，可提前补齐）："
+                + "、".join(i["label"] for i in _miss))
+        else:
+            state.setdefault("logs", []).append(f"✅ 材料识别：{_total} 项关键信息全部认到")
+        state["_recognition_report"] = _rep
+    except Exception as _re_:
+        logger.warning(f"识别核验报告生成跳过: {_re_}")
 
     return summary
 
@@ -455,9 +627,59 @@ async def auto_extract_skills(request: dict):
     return ApiResponse(message="自动提炼完成", data=result)
 
 
+# ═══════════════════════════════════════════════════════════════
+# 用户报告要求（skill_type='user_requirement'，无条件注入生成）
+# ═══════════════════════════════════════════════════════════════
+@router.get("/reviews/requirements", response_model=ApiResponse)
+async def get_requirements(domain: str = "stability"):
+    """获取用户对生成报告的要求列表。"""
+    from app.services import skill_service
+    reqs = await skill_service.get_user_requirements(domain)
+    return ApiResponse(message="用户报告要求", data={"requirements": reqs})
+
+
+@router.post("/reviews/requirements", response_model=ApiResponse)
+async def add_requirements(request: dict):
+    """新增用户对生成报告的要求。
+
+    request: {domain, requirements: [str]} 或 {domain, requirement: str, correction: str}
+    """
+    from app.services import skill_service
+    domain = str(request.get("domain", "stability") or "stability")
+    added_ids = []
+    count = 0
+    # 支持批量数组 + 单条两种形式
+    batch = request.get("requirements") or []
+    if not isinstance(batch, list):
+        batch = []
+    if request.get("requirement"):
+        batch.append(request.get("requirement"))
+    for item in batch:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        result = await skill_service.add_user_requirement(item, domain)
+        if result.get("added"):
+            count += 1
+            if result.get("id"):
+                added_ids.append(result["id"])
+    return ApiResponse(
+        message=f"已添加 {count} 条报告要求" if count else "无新要求（可能已存在）",
+        data={"added": count, "ids": added_ids},
+    )
+
+
+@router.delete("/reviews/requirements/{skill_id}", response_model=ApiResponse)
+async def delete_requirement(skill_id: int, domain: str = "stability"):
+    """删除一条用户报告要求（软删除）。"""
+    from app.services import skill_service
+    result = await skill_service.delete_user_requirement(skill_id, domain)
+    return ApiResponse(message=result.get("message", ""), data=result)
+
+
 @router.post("/generate/start", response_model=ApiResponse)
 async def start_generation(
     request: StartGenerationRequest,
+    user: User = Depends(get_current_user),
 ):
     """Initialize a new report generation session.
 
@@ -470,7 +692,7 @@ async def start_generation(
     # Chapter agents generate content from knowledge base RAG + user data.
     # Templates in DB are only used as formatting/style reference.
     template_id = 0
-    template_name = "内置10章标准结构（知识库综合生成）"
+    template_name = "内置十四章案卷标准结构（知识库综合生成）"
     template_path = ""
     templates = []  # Initialize before try block
 
@@ -514,9 +736,14 @@ async def start_generation(
         template_name=template_name,
         template_path=template_path,
         initial_message=request.initial_message,
+        # 🔴 报告归属必须在**建会话**时记下（后台任务里拿不到当前用户）
+        user_id=str(user.id),
+        company_id=user.company_id,
     )
     # Store report style preference
     session.state["_report_style"] = getattr(request, "style", None) or "jinhu"
+    # 🔴 公司归属：报告里的公司简介/编写单位/资质证书按它取。为空 → 全部「待填写」。
+    session.state["_company_id"] = user.company_id
 
     # Initialize state with new AgentState — report_title starts empty,
     # will be collected from user in first interaction
@@ -624,6 +851,7 @@ async def start_generation(
 async def chat_with_agent(
     session_id: str,
     request: ChatRequest,
+        user: User = Depends(get_current_user),
 ):
     """SSE streaming endpoint for chapter generation and user feedback.
 
@@ -633,7 +861,7 @@ async def chat_with_agent(
 
     The response is an SSE stream with chapter content.
     """
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     user_message = request.message
     attachments = getattr(request, 'attachments', None) or []
 
@@ -693,7 +921,6 @@ async def chat_with_agent(
                             yield sse_thinking("已收到大纲修改意见。")
                         else:
                             # 🔴 User provided data — parse into filled_data so it's used
-                            import re as _re_parse
                             cn_aliases = {
                                 "org_name": ["责任单位", "决策单位", "征收主体", "征收单位"],
                                 "implement_unit": ["实施单位", "稳评单位", "评估单位"],
@@ -1046,17 +1273,7 @@ async def chat_with_agent(
                             real_filled = {k: v for k, v in session.state.get("filled_data", {}).items()
                                           if not k.startswith("_")}
                             material_summary = session.state.get("_project_material_summary", {})
-                            materials = session.state.get("_project_materials", [])
-                            uploaded = session.state.get("_uploaded_files", [])
-                            has_real_data = (
-                                len(real_filled) >= 1
-                                or bool(session.state.get("_pdf_texts"))
-                                or bool((material_summary.get("facts") or {}))
-                                or material_summary.get("completed_files", 0) > 0
-                                or len(materials) > 0
-                                or len(uploaded) > 0
-                                or len(attachments) > 0  # Files sent with this message
-                            )
+                            has_real_data = _has_real_data(session.state, attachments)
 
                             if has_real_data:
                                 missing = material_summary.get("missing_fields") or []
@@ -1205,16 +1422,8 @@ async def chat_with_agent(
                 if not bg_task.done():
                     bg_task.cancel()
 
-            # Clean up uploaded files
-            uploaded = state.pop("_uploaded_files", [])
-            for item in uploaded:
-                fpath = item.get("path", item) if isinstance(item, dict) else item
-                try:
-                    file_service.delete_file(fpath)
-                except Exception:
-                    pass
-            if uploaded:
-                logger.info(f"Cleaned up {len(uploaded)} files after SSE disconnect")
+            # 保留用户上传原件：连接断开 ≠ 删除资料（原件供后续重新生成/审计复用）
+            logger.info("SSE disconnect: user uploads kept")
 
             return  # Don't yield after disconnect — client is gone
 
@@ -1225,16 +1434,8 @@ async def chat_with_agent(
             logger.error(f"Chat error: {type(e).__name__}: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
 
-            # Clean up orphaned uploaded files on error
-            uploaded = session.state.pop("_uploaded_files", [])
-            for item in uploaded:
-                fpath = item.get("path", item) if isinstance(item, dict) else item
-                try:
-                    file_service.delete_file(fpath)
-                except Exception:
-                    pass
-            if uploaded:
-                logger.info(f"Cleaned up {len(uploaded)} uploaded files after error")
+            # 保留用户上传原件：处理出错不回滚删除，避免资料丢失
+            logger.error("Chat error: user uploads kept for retry")
 
             yield sse_message(
                 f"抱歉，处理您的消息时遇到了问题（{type(e).__name__}: {str(e)[:150]}）。请重新发送。\n\n"
@@ -1253,28 +1454,15 @@ async def chat_with_agent(
     )
 
 
-async def _drain_queue(queue: asyncio.Queue):
-    """Async generator that yields all items from an asyncio.Queue as SSE event strings."""
-    while True:
-        try:
-            item = queue.get_nowait()
-            event_type = item.get("event", "message")
-            data = item.get("data", {})
-            yield sse_event(event_type, data)
-            queue.task_done()
-        except asyncio.QueueEmpty:
-            break
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Status & Management Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 @router.get("/generate/{session_id}/status", response_model=ApiResponse)
-async def get_generation_status(session_id: str):
+async def get_generation_status(session_id: str, user: User = Depends(get_current_user)):
     """Get current generation status with chapter progress."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     state = session.state
 
     chapters_summary = {}
@@ -1354,9 +1542,9 @@ async def get_generation_status(session_id: str):
 
 
 @router.get("/generate/{session_id}/chapters", response_model=ApiResponse)
-async def get_chapters(session_id: str):
+async def get_chapters(session_id: str, user: User = Depends(get_current_user)):
     """Get all chapter contents and statuses."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     state = session.state
 
     chapters_data = {}
@@ -1380,17 +1568,17 @@ async def get_chapters(session_id: str):
 
 
 @router.get("/generate/{session_id}/conversation", response_model=ApiResponse)
-async def get_conversation(session_id: str):
+async def get_conversation(session_id: str, user: User = Depends(get_current_user)):
     """Get full conversation history."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     messages = report_service.get_conversation(session)
     return ApiResponse(data=messages)
 
 
 @router.post("/generate/{session_id}/skip", response_model=ApiResponse)
-async def skip_current(session_id: str):
+async def skip_current(session_id: str, user: User = Depends(get_current_user)):
     """Skip the current chapter (mark as approved without changes)."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     chapter_num = session.state.get("current_chapter", 1)
 
     if chapter_num in session.state.get("chapters", {}):
@@ -1420,9 +1608,9 @@ async def skip_current(session_id: str):
 
 
 @router.post("/generate/{session_id}/retry", response_model=ApiResponse)
-async def retry_generation(session_id: str):
+async def retry_generation(session_id: str, user: User = Depends(get_current_user)):
     """Retry the current chapter generation."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     session.state["error_message"] = None
     chapter_num = session.state.get("current_chapter", 1)
 
@@ -1437,12 +1625,12 @@ async def retry_generation(session_id: str):
 
 
 @router.post("/generate/{session_id}/cancel", response_model=ApiResponse)
-async def cancel_generation(session_id: str):
+async def cancel_generation(session_id: str, user: User = Depends(get_current_user)):
     """Cancel the running generation — stops workflow, OCR, and cleans up."""
     import logging
     _log = logging.getLogger(__name__)
 
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     state = session.state
 
     # 1. Set cancellation flags
@@ -1480,18 +1668,10 @@ async def cancel_generation(session_id: str):
     if action_event and hasattr(action_event, 'set'):
         action_event.set()
 
-    # 5. Clean up temp files
+    # 5. Clean up temp files only —— 用户上传原件一律保留（取消 ≠ 删资料，
+    #    否则再次生成/编辑时现场照片等材料将永久丢失）
     file_service.cleanup_temp(session_id)
-
-    uploaded = state.pop("_uploaded_files", [])
-    for item in uploaded:
-        fpath = item.get("path", item) if isinstance(item, dict) else item
-        try:
-            file_service.delete_file(fpath)
-        except Exception:
-            pass
-    if uploaded:
-        _log.info(f"Cleaned up {len(uploaded)} files for cancelled session {session_id}")
+    _log.info(f"Cancelled session {session_id}: temp cleaned, user uploads kept")
 
     # 6. Clean up RAG session collection
     try:
@@ -1515,9 +1695,9 @@ async def cancel_generation(session_id: str):
 
 
 @router.post("/generate/{session_id}/validate", response_model=ApiResponse)
-async def validate_report_format(session_id: str):
+async def validate_report_format(session_id: str, user: User = Depends(get_current_user)):
     """Validate the generated report's format against DB32/T4013-2021 standards."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     output_path = session.state.get("output_path", "")
 
     if not output_path:
@@ -1612,23 +1792,59 @@ async def _bg_extract_pdf(session, rel_path: str, original_name: str):
         _lg.warning(f"PDF extraction failed for '{original_name}': {e}")
 
 
+async def _bg_questionnaire(session):
+    """后台：解析座谈会问卷（第9章表9-1/9-2、附件2、评分支持率的数据源）。
+
+    🔴 触发点在**资料上传时**，不是在生成期间 —— 视觉解析约 10 分钟且吃 TPM，
+        放到生成期间会和逐章 LLM 抢额度、把生成拖慢。
+        之前这条路是界面上的一个「📊 解析座谈会问卷」按钮，已删除：它正是
+        「问卷数据：未解析」永远停在那儿的来源（判据 `find_symposium_pdf` 恒返回空）。
+    命中缓存（`storage/questionnaire_cache`，按 PDF 指纹）时秒回，不重复烧 token。
+    """
+    import logging as _log
+    _lg = _log.getLogger(__name__)
+    from app.services.ws_manager import ws_manager
+    sid = session.state.get("session_id", "")
+    try:
+        from app.services.survey_data import ensure_questionnaire_result
+        res = await ensure_questionnaire_result(session.state)
+        if res and res.get("total_samples"):
+            session.state["_questionnaire_result"] = res
+            report_service._save_sessions()
+            await ws_manager.send(sid, "log", {
+                "message": f"📊 座谈会问卷已解析：{res['total_samples']} 份 / "
+                           f"支持率 {res.get('support_rate', 0)}%"})
+            _lg.info(f"[问卷解析] 完成，{res['total_samples']} 份")
+    except Exception as e:
+        _lg.warning(f"[问卷解析] 后台解析失败（不影响生成）: {e}")
+
+
 @router.post("/generate/{session_id}/upload", response_model=ApiResponse)
 async def upload_attachment(
     session_id: str,
     file: UploadFile = File(...),
+        user: User = Depends(get_current_user),
 ):
     import logging as _ulog
     _ul = _ulog.getLogger(__name__)
     _ul.info(f"[UPLOAD] 收到文件: {file.filename} ({file.content_type}), session={session_id[:12]}")
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     result = await file_service.save_attachment(file)
     _ul.info(f"[UPLOAD] 保存完成: {result['relative_path']} ({result.get('size_bytes',0)} bytes)")
 
     # Track file in session state
     uploaded_files = session.state.setdefault("_uploaded_files", [])
+    # 🔴 浏览器上传文件夹时 filename 是相对路径（如「公示照片4/微信图片_x.jpg」）——
+    #    把**文件夹名并入文件名**，保住「公示/现场/座谈/专家评审」这类分类线索；
+    #    否则存储名是 uuid，正文图片归属判断全落空、图片只能全塞附件。
+    _orig = str(result.get("original_name") or result["relative_path"].split("/")[-1])
+    _orig = _orig.replace("\\", "/")
+    if "/" in _orig:
+        _parts = [x for x in _orig.split("/") if x and x not in (".", "..")]
+        _orig = "_".join(_parts[-2:]) if len(_parts) >= 2 else _parts[-1]
     uploaded_files.append({
         "path": result["relative_path"],
-        "original_name": result.get("original_name", result["relative_path"].split("/")[-1]),
+        "original_name": _orig,
         "file_type": result.get("file_type", "image")
     })
     session.state = session.state
@@ -1656,6 +1872,11 @@ async def upload_attachment(
             _pdf_task = _bg_asyncio.create_task(_bg_extract_pdf(session, rel_path, result['original_name']))
             _bg_tasks = session.state.setdefault("_bg_tasks", [])
             _bg_tasks.append(_pdf_task)
+            # 🔴 座谈会/问卷扫描件 → 后台解析问卷统计（第9章表9-1/9-2、附件2、评分支持率）
+            from app.services.survey_data import looks_like_symposium_pdf
+            if looks_like_symposium_pdf(_orig):
+                _q_task = _bg_asyncio.create_task(_bg_questionnaire(session))
+                _bg_tasks.append(_q_task)
         except Exception as e:
             _ul.warning(f"Text extraction failed for {result['original_name']}: {e}")
 
@@ -1672,28 +1893,28 @@ async def upload_attachment(
 
 
 @router.get("/generate/{session_id}/messages", response_model=ApiResponse)
-async def get_session_messages(session_id: str):
+async def get_session_messages(session_id: str, user: User = Depends(get_current_user)):
     """Get conversation messages for a session (restore on page refresh)."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     messages = session.state.get("messages", [])
     return ApiResponse(data={"messages": messages, "session_id": session_id})
 
 
 @router.get("/generate/{session_id}/materials", response_model=ApiResponse)
-async def get_material_summary(session_id: str):
+async def get_material_summary(session_id: str, user: User = Depends(get_current_user)):
     """Get analysis summary for uploaded project materials."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     return ApiResponse(data=session.state.get("_project_material_summary", {}))
 
 
 @router.get("/generate/{session_id}/quality", response_model=ApiResponse)
-async def get_quality_report(session_id: str):
+async def get_quality_report(session_id: str, user: User = Depends(get_current_user)):
     """Get T1-T4 quality validation report for the generated report.
 
     Returns the four-dimensional quality score (结构完整性/内容充实度/格式规范性/数据准确性)
     with detailed checks and recommendations.
     """
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     state = session.state
 
     # Check if we have a cached quality report from generation
@@ -1731,10 +1952,154 @@ async def get_quality_report(session_id: str):
         raise HTTPException(status_code=500, detail=f"质量评分失败: {str(e)}")
 
 
+def _jsonable(obj, _depth: int = 0):
+    """把会话 state 转成可 JSON 化的结构（脚本走 HTTP 取数要用）。
+
+    `state` 里混着 Path / set / datetime / 自定义对象 —— 直接返回会让 FastAPI
+    序列化失败。这里递归降级：认不出的类型一律 `str()`，**不丢键**。
+    """
+    import datetime as _dt
+    from pathlib import Path as _P
+    if _depth > 12:
+        return str(obj)
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (_dt.datetime, _dt.date)):
+        return obj.isoformat()
+    if isinstance(obj, _P):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return [_jsonable(x, _depth + 1) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(x, _depth + 1) for x in obj]
+    try:
+        import json as _j
+        _j.dumps(obj)
+        return obj
+    except Exception:
+        return str(obj)
+
+
+@router.get("/generate/{session_id}/state", response_model=ApiResponse)
+async def get_session_state(session_id: str, user: User = Depends(get_current_user)):
+    """🔴 **给脚本用的会话状态读取口**（`gen_full_report.py` 等）。
+
+    为什么需要：脚本原来读自己那份 `storage/tmp/review_state.pkl`，与界面会话是
+    **两份互不同步的状态** —— 实测用户在界面弹窗里填的 15 个日期，生成时全丢，
+    报告里印的还是材料识别出来的旧日期。改成按 `session_id` 从服务器取，
+    界面与脚本共用同一份事实源。
+
+    返回整个 state（含 `_` 开头的键 —— `_uploaded_files` / `_extracted_tables`
+    这些脚本要用），只做 JSON 降级，不裁剪。
+    """
+    session = report_service.get_session_for_user(session_id, user)
+    return ApiResponse(data={"session_id": session_id,
+                             "state": _jsonable(dict(session.state or {}))})
+
+
+@router.get("/generate/{session_id}/recognition", response_model=ApiResponse)
+async def get_recognition_report(session_id: str, user: User = Depends(get_current_user)):
+    """🔴 **上传核验**：材料里认到了哪些关键信息、还缺哪些 —— 回给前端弹通知。
+
+    为什么单独开一个口：日志面板（`log-panel`）只对**内部人员**可见，
+    外部用户上传完材料**看不到任何识别结果**，少传/传错时只能等生成到一半
+    被弹窗逐项追问。这个接口把「到底有没有正确上传」直接答给用户。
+
+    取值优先级：用户自己填/确认的值 > 材料识别值（与正文取值口径一致）。
+    """
+    session = report_service.get_session_for_user(session_id, user)
+    st = dict(session.state or {})
+
+    from app.services.material_ingestion_service import (
+        material_ingestion_service as _mis, KEY_RECOGNITION_FIELDS,
+    )
+    src: dict = {}
+    for k, v in (st.get("_project_material_facts") or {}).items():
+        if v not in (None, "", [], {}):
+            src[k] = v
+    for k, v in (st.get("filled_data") or {}).items():
+        if not str(k).startswith("_") and v not in (None, "", [], {}):
+            src.setdefault(k, v)
+
+    rep = _mis.recognition_report(src)
+    return ApiResponse(message="识别核验完成", data={
+        "recognized": rep.get("recognized", []),
+        "missing": rep.get("missing", []),
+        "total": len(KEY_RECOGNITION_FIELDS),
+        "uploaded_files": len((st.get("_uploaded_files") or [])),
+        "material_files": len((st.get("_project_materials") or [])),
+    })
+
+
+@router.get("/generate/{session_id}/gaps", response_model=ApiResponse)
+async def get_session_gaps(session_id: str, user: User = Depends(get_current_user)):
+    """缺口清单 —— 「这章缺什么、为什么缺」，供前端显示「待补充 N 项」。
+
+    来源是 `app/services/gap_detector.py`：既包括各章 agent 上报的缺数据，
+    也包括**遁词检测**（正文用「以…为准」把缺口圆过去的地方）。
+    🔴 缺口只在**批注与这份清单**里暴露，**不写进正文** ——
+       正文留占位符违反硬约束（成稿中不得出现【待补充】/【待填写】）。
+    """
+    session = report_service.get_session_for_user(session_id, user)
+    raw = (session.state or {}).get("_chapter_gaps") or {}
+    gaps = {}
+    for k, v in raw.items():
+        try:
+            gaps[int(k)] = v
+        except (ValueError, TypeError):
+            continue
+    items = [dict(g, chapter=ch) for ch in sorted(gaps) for g in (gaps[ch] or [])]
+    return ApiResponse(data={
+        "session_id": session_id,
+        "total": len(items),
+        "by_chapter": {str(ch): len(gaps[ch] or []) for ch in sorted(gaps)},
+        "warnings": sum(1 for g in items if g.get("severity") == "warn"),
+        "items": _jsonable(items),
+    })
+
+
+@router.post("/generate/{session_id}/state", response_model=ApiResponse)
+async def put_session_state(session_id: str, request: dict = Body(...), user: User = Depends(get_current_user)):
+    """🔴 **给脚本用的会话状态写回口** —— 生成完写回**同一个界面会话**。
+
+    `filled_data` 做**浅合并**（脚本新算出来的键覆盖旧值，没给到的键保留 ——
+    不能整块替换，否则会把用户在界面填的 `_locked_*` 冲掉）；
+    其他键（chapters / output_path / generated_sections…）直接覆盖。
+    """
+    session = report_service.get_session_for_user(session_id, user)
+    incoming = (request or {}).get("state") or {}
+    # 🔴 JSON 往返会把 `chapters` / `_extracted_tables` / `_chapter_image_map`
+    #    的**整数键变成字符串**，直接落进 state 会让 `sorted(chapters.keys())`
+    #    与 `chapters.get(6)` 全部失效（实测崩在 master_orchestrator）。
+    from app.services.session_io import normalize_int_keys
+    normalize_int_keys(incoming)
+
+    fd_in = incoming.get("filled_data") or {}
+    if isinstance(fd_in, dict) and fd_in:
+        fd = session.state.setdefault("filled_data", {})
+        # 🔴 用户填/确认过的键（`_locked_<key>`）**不许被脚本覆盖** ——
+        #    「用户填的 > 材料识别 > 模板默认」这条优先级规则在这里强制。
+        _locked = {k[len("_locked_"):] for k in fd if k.startswith("_locked_") and fd.get(k)}
+        _kept = {k: v for k, v in fd_in.items() if k in _locked}
+        fd.update({k: v for k, v in fd_in.items() if k not in _locked})
+        for k, v in _kept.items():
+            logging.getLogger(__name__).info(f"[会话状态] 保留界面填入的 {k}={v}（脚本值被忽略）")
+
+    for k, v in incoming.items():
+        if k != "filled_data":
+            session.state[k] = v
+
+    report_service._save_sessions()
+    await report_service.archive_filled_data(session)
+    return ApiResponse(message="会话状态已更新", data={"session_id": session_id})
+
+
 @router.get("/generate/{session_id}/fields", response_model=ApiResponse)
-async def get_template_fields(session_id: str):
+async def get_template_fields(session_id: str, user: User = Depends(get_current_user)):
     """Get classified template fields (A/B/C/D/E) from the product skill analysis."""
-    session = report_service.get_session(session_id)
+    session = report_service.get_session_for_user(session_id, user)
     state = session.state
 
     template_path = state.get("template_path", "")
@@ -1773,7 +2138,7 @@ async def get_template_fields(session_id: str):
 # ═══════════════════════════════════════════════════════
 
 @router.post("/generate/{session_id}/chapter/confirm", response_model=ApiResponse)
-async def confirm_chapter(session_id: str, request: dict):
+async def confirm_chapter(session_id: str, request: dict, user: User = Depends(get_current_user)):
     """Confirm/revise/skip a generated chapter during chapter-by-chapter generation.
 
     Request body:
@@ -1795,7 +2160,7 @@ async def confirm_chapter(session_id: str, request: dict):
         raise HTTPException(status_code=400, detail="revision_text is required for revise action")
 
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1808,7 +2173,7 @@ async def confirm_chapter(session_id: str, request: dict):
 
 
 @router.post("/generate/{session_id}/chapter/generate", response_model=ApiResponse)
-async def generate_chapter(session_id: str, request: dict):
+async def generate_chapter(session_id: str, request: dict, user: User = Depends(get_current_user)):
     """Manually trigger generation of a specific chapter (SSE streaming).
 
     Request body: {"chapter": 1}
@@ -1818,7 +2183,7 @@ async def generate_chapter(session_id: str, request: dict):
         raise HTTPException(status_code=400, detail="chapter must be 1-50")
 
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1861,13 +2226,13 @@ async def generate_chapter(session_id: str, request: dict):
 
 
 @router.get("/generate/{session_id}/chapter/{chapter_num}", response_model=ApiResponse)
-async def get_chapter(session_id: str, chapter_num: int):
+async def get_chapter(session_id: str, chapter_num: int, user: User = Depends(get_current_user)):
     """Get the status and content of a specific chapter."""
     if chapter_num < 1 or chapter_num > 10:
         raise HTTPException(status_code=400, detail="chapter_num must be 1-10")
 
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1877,10 +2242,10 @@ async def get_chapter(session_id: str, chapter_num: int):
 
 
 @router.get("/generate/{session_id}/chapters/all", response_model=ApiResponse)
-async def get_all_chapters(session_id: str):
+async def get_all_chapters(session_id: str, user: User = Depends(get_current_user)):
     """Get the status of all 10 chapters."""
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1890,7 +2255,7 @@ async def get_all_chapters(session_id: str):
 
 
 @router.post("/generate/{session_id}/missing-data", response_model=ApiResponse)
-async def submit_missing_data(session_id: str, request: dict):
+async def submit_missing_data(session_id: str, request: dict, user: User = Depends(get_current_user)):
     """Submit missing data for a chapter during chapter generation.
 
     Request body:
@@ -1908,7 +2273,7 @@ async def submit_missing_data(session_id: str, request: dict):
         raise HTTPException(status_code=400, detail="data is required")
 
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1948,6 +2313,18 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
     _shared_logs = list(state.get("_workflow_logs", [])) if state.get("_is_resume") else []
     state["_workflow_logs"] = _shared_logs
 
+    # 🔴 新一轮开始：**清掉上一轮的结果标记**。
+    #    `output_path` 不清的话，`/workflow/status` 会一直拿它当「本轮已完成」：
+    #      · `phase` 虽然被 `paused` 分支挡住，但
+    #      · `step_statuses["assembly"]` 只要 output 非空就报 `done` ——
+    #        前端进度条据此 `_maxPct = 100`。
+    #    实测现象就是业主说的「用户没填写完弹窗，进度条就已经 100% 了」。
+    state["output_path"] = ""
+    state["report_id"] = None
+    state["_gaps"] = []
+    state["step_statuses"] = {"analysis": "done" if state.get("_is_resume") else "running",
+                              "generation": "pending", "assembly": "pending"}
+
     async def _progress_cb(phase, steps):
         state["phase"] = phase; state["step_statuses"] = steps; session.state = state
         # Add log entry for each phase change
@@ -1957,12 +2334,20 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             _shared_logs.append(labels[phase])
         cur = steps.get("current_chapter", 0)
         if cur > 0:
-            msg = f"  ✅ 已完成 {cur}/10 章"
+            from app.agent.chapter_definitions import TOTAL_CHAPTERS
+            msg = f"  ✅ 已完成 {cur}/{TOTAL_CHAPTERS} 章"
             if msg not in _shared_logs: _shared_logs.append(msg)
         try:
             await ws_manager.send(sid, "step_progress", {"step": phase, "status": "running", "step_statuses": steps})
             if cur > 0:
-                await ws_manager.send(sid, "chapter_progress", {"current": cur, "total": 10, "status": "generating"})
+                # 🔴 `total` 必须是 **TOTAL_CHAPTERS（14）**，不能写死 10 ——
+                #    前端进度条按 `10 + (cur/total)*75` 算，写死 10 的话
+                #    第 10 章就跑到 85%，剩下 4 章进度条纹丝不动
+                #    （业主反馈的「进度条与实际报告完成不符」）。
+                #    上一行刚 import 了 TOTAL_CHAPTERS，这里却写死 —— 抄漏了。
+                await ws_manager.send(sid, "chapter_progress",
+                                      {"current": cur, "total": TOTAL_CHAPTERS,
+                                       "status": "generating"})
         except: pass
     set_workflow_progress_callback(_progress_cb)
 
@@ -2018,14 +2403,50 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             # Handle interrupt (pause)
             interrupt_data = wf_state.get("_interrupt")
             if interrupt_data:
-                if isinstance(interrupt_data, dict) and interrupt_data.get("type") == "missing_data":
+                # 🔴🔴 **中断时必须把工作流状态合并回会话**。
+                #     完成分支（下面）有这段同步，**中断分支原先没有** ——
+                #     后果是节点刚写进 `wf_state` 的东西全丢：最典型的就是
+                #     「用户跳过弹窗后打的 `_confirmed_` 标记」。
+                #     resume 时 `_run_workflow_bg` 从 `session.state` 重新起步，
+                #     标记没了 → 同一批字段再问一遍 → **弹窗无限重弹**（实测卡死过）。
+                try:
+                    _wf_filled = (wf_state or {}).get("filled_data") or {}
+                    if _wf_filled:
+                        _sess_filled = state.setdefault("filled_data", {})
+                        _sess_filled.update(_wf_filled)     # 工作流的更**新**，以它为准
+                except Exception as _me:
+                    _log.warning(f"[WORKFLOW] 中断时状态合并失败（不影响暂停）: {_me}")
+                # 🔴 `data_inquiry`（数据核对）与 `missing_data`（缺字段）**走同一套前端弹窗** ——
+                #    两者都渲染 `missing_fields`。之前 `data_inquiry` 掉进下面的 `else`，
+                #    既不设 `_workflow_paused` 也不设 `phase` → `/workflow/status` 不返回 paused
+                #    → 前端两个轮询器都不会命中 → **「发现数据不合理就暂停问用户」这个功能
+                #    从来没在界面上出现过**（后端逻辑一直是完整的，白写了）。
+                if isinstance(interrupt_data, dict) and interrupt_data.get("type") in ("missing_data", "data_inquiry"):
+                    _fields = interrupt_data.get("missing_fields") or []
                     state["_workflow_paused"] = True
-                    state["_missing_fields"] = interrupt_data.get("missing_fields", [])
+                    state["_missing_fields"] = _fields
                     state["phase"] = "paused"
-                    _shared_logs.append(f"⏸️ 缺少 {len(interrupt_data.get('missing_fields',[]))} 项基本信息，请补充后继续")
+                    _what = "数据核对" if interrupt_data.get("type") == "data_inquiry" else "基本信息"
+                    _shared_logs.append(f"⏸️ {len(_fields)} 项{_what}待确认，请核对后继续")
                     # 🔴 Save state for resume — including unique thread_id for checkpoint
                     state["_workflow_logs"] = wf_state.get("logs", _shared_logs)
                     state["_wf_thread_id"] = wf_state.get("_thread_id", "")
+                    session.state = state
+                    return
+                elif isinstance(interrupt_data, dict) and interrupt_data.get("type") == "gap_review":
+                    # 🔴 生成后缺口核对：正文里 agent 用遁词圆过去的那些地方，请用户补真实内容。
+                    #    也翻译成 `missing_fields` —— 前端那块弹窗**同一套**就能渲染，
+                    #    不用新增组件、不用改 schema（`key` 用 `_gap_<章>_<序号>`，
+                    #    `label` 是缺口描述，`used_in` 是原句）。
+                    _gaps = interrupt_data.get("missing_fields") or interrupt_data.get("gaps") or []
+                    state["_workflow_paused"] = True
+                    state["_workflow_running"] = False
+                    state["phase"] = "paused"
+                    state["_missing_fields"] = _gaps
+                    state["_gaps"] = _gaps
+                    state["_wf_thread_id"] = wf_state.get("_thread_id", "")
+                    state["_workflow_logs"] = wf_state.get("logs", _shared_logs)
+                    _shared_logs.append(f"⏸️ 正文有 {len(_gaps)} 处缺少素材支撑，请补充或确认保持")
                     session.state = state
                     return
                 elif isinstance(interrupt_data, dict) and interrupt_data.get("type") == "human_review":
@@ -2109,32 +2530,40 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             except: pass
 
         except Exception as e:
-            _log.error(f"[WORKFLOW] Pipeline failed: {e}")
-            _shared_logs.append(f"❌ 生成失败: {e}")
-            import traceback
-            _shared_logs.append(traceback.format_exc())
+            # 🔴 异常原文与堆栈**只进后端日志文件**（`logs/backend.log`），
+            #    **绝不进 `_workflow_logs`** —— 那个字段会原样出现在接口响应里，
+            #    前端还会把它渲染到界面上：里面有文件路径、调用栈、SQL 片段，
+            #    等于把内部实现摊给用户看。业主口径：「不给用户看运行日志」。
+            _log.exception(f"[WORKFLOW] Pipeline failed: {e}")
+            _shared_logs.append("❌ 生成失败，请稍后重试；若反复失败请联系管理员（详细日志已记录）")
             state["_workflow_running"] = False
             state["phase"] = "error"
+            state["_workflow_logs"] = _shared_logs
             session.state = state
             try:
-                await ws_manager.send(sid, "step_progress", {"step": "error", "status": "error", "message": str(e)})
+                await ws_manager.send(sid, "step_progress", {
+                    "step": "error", "status": "error",
+                    "message": "生成失败，请稍后重试"})
             except: pass
     except Exception as e:
+        _log.exception(f"[WORKFLOW] fatal: {e}")
         state["_workflow_running"] = False; state["phase"] = "error"
-        state["_workflow_logs"] = [f"Error: {e}"]
-        try: await ws_manager.send(sid, "step_progress", {"step": "error", "status": "error", "message": str(e)})
+        state["_workflow_logs"] = ["❌ 生成失败，请稍后重试（详细日志已记录）"]
+        try:
+            await ws_manager.send(sid, "step_progress", {
+                "step": "error", "status": "error", "message": "生成失败，请稍后重试"})
         except: pass
 
 
 @router.post("/generate/{session_id}/workflow/start", response_model=ApiResponse)
-async def start_workflow(session_id: str, request: WorkflowStartRequest):
+async def start_workflow(session_id: str, request: WorkflowStartRequest, user: User = Depends(get_current_user)):
     """Start the LangGraph report generation workflow.
 
     If required data is missing, pauses and returns missing_fields list.
     Frontend should display a form for each missing field.
     """
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2146,12 +2575,23 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest):
     if state.get("_workflow_paused"):
         raise HTTPException(status_code=409, detail="工作流已暂停，请补充信息后继续，无需重新开始")
 
+    # 🔴 资料门槛：一个材料都没有时**不让生成**。
+    #    之前这条路完全没有门槛 —— 0 个文件也能跑完并出 Word，正文全靠模型自由发挥
+    #    （第11/13章的风险清单与化解措施甚至完全不问用户）。门槛判据与聊天路径共用
+    #     `_has_real_data`，避免两处漂移。
+    if not _has_real_data(state):
+        raise HTTPException(
+            status_code=400,
+            detail="还没有可用的项目资料，请先在「② 上传资料文档」上传项目的"
+                   "预公告、勘测定界报告、座谈会记录等材料后再生成。",
+        )
+
     # 🔴 Reset analysis flags: always run fresh analysis for each generation
     state["_analysis_done"] = False
     state["_analysis_running"] = False
     state["_is_resume"] = False
 
-    from app.services.report_workflow import workflow_runner, WorkflowPhase, set_workflow_progress_callback
+    from app.services.report_workflow import workflow_runner, set_workflow_progress_callback
 
     materials_dir = request.materials_dir or ""
     project_context = request.project_context or ""
@@ -2160,6 +2600,19 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest):
     # Take snapshot
     sid = session_id
     uploaded = list(state.get("_uploaded_files", []) or [])
+
+    # 🔴 用户勾选的报告人员 → 前置「稳评工作组人员及分工」与培训证书取图
+    _sel = [str(x).strip() for x in (request.selected_personnel or []) if str(x).strip()]
+    state["selected_personnel"] = _sel
+    if _sel and isinstance(state.get("filled_data"), dict):
+        state["filled_data"]["_selected_personnel"] = _sel
+
+    # 🔴 证书页与工作组**分开选**（最多 3 人）→ 前置「公司资质证书」区贴哪几张人员证书
+    _cert_sel = [str(x).strip() for x in (getattr(request, "selected_cert_personnel", None) or [])
+                 if str(x).strip()][:3]
+    state["selected_cert_personnel"] = _cert_sel
+    if _cert_sel and isinstance(state.get("filled_data"), dict):
+        state["filled_data"]["_selected_cert_personnel"] = _cert_sel
 
     # Init step tracking + auto-fill known project data from 稳评资料
     state["phase"] = "generating"
@@ -2179,10 +2632,10 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest):
 
 
 @router.post("/generate/{session_id}/workflow/resume", response_model=ApiResponse)
-async def resume_workflow(session_id: str, request: WorkflowResumeRequest):
+async def resume_workflow(session_id: str, request: WorkflowResumeRequest, user: User = Depends(get_current_user)):
     """Resume the workflow with user-provided data — continues from pause, not restart."""
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2191,13 +2644,73 @@ async def resume_workflow(session_id: str, request: WorkflowResumeRequest):
     filled = state.setdefault("filled_data", {})
 
     # Merge user data into filled_data
+    # 🔴 用户在弹窗里提交的值：① 记来源 `user`（优先级最高，后续材料/AI 都盖不掉）；
+    #    ② 打 `_confirmed_` —— 表示**用户看过并确认过**，与 `_locked_` 不是一回事
+    #    （`_locked_` 还承担「别覆盖我」的旧含义，材料解析也会打，判不了「看过没有」）。
+    _user_keys = []
     for key, value in (user_responses or {}).items():
+        # 🔴 `_` 开头的键（如内部哨兵 `__skip__`）不进事实卡
+        if str(key).startswith("_"):
+            continue
         if value and str(value).strip():
             filled[key] = str(value).strip()
+            _user_keys.append(str(key))
+    if _user_keys:
+        try:
+            from app.services.field_sources import mark, mark_confirmed
+            mark(filled, "user", *_user_keys)
+            mark_confirmed(filled, *_user_keys)
+        except Exception as _fse:
+            logging.getLogger(__name__).warning(f"来源标记失败（不影响生成）: {_fse}")
+
+    # 🔴🔴 **用户跳过的字段必须在「这里」打 `_confirmed_`** —— 这是唯一能存下来的地方。
+    #     为什么不能在节点里打：`interrupt()` 抛出时，**节点内那之后的所有写入都会丢**
+    #     （`workflow_runner.start` 收到 `__interrupt__` 事件就直接 break，
+    #      `final_state` 是**上一个完成节点**的 state，不含中断节点刚写的东西）。
+    #     不打标记的后果：下次重跑 `_missing_for` 发现这批字段还是空 → 再弹一次
+    #     → 用户再跳过 → **无限重弹**（实测端到端卡死在第7章那 10 个日期上）。
+    #     router 是状态的所有者，只有它写的能落到 `session.state`。
+    try:
+        _asked = [f.get("key") for f in (state.get("_missing_fields") or []) if f.get("key")]
+        _skipped = [k for k in _asked if k not in (user_responses or {})]
+        if _skipped:
+            from app.services.field_sources import mark_confirmed as _mc
+            _mc(filled, *_skipped)
+            logging.getLogger(__name__).info(
+                f"[HITL] 用户跳过 {len(_skipped)} 项 → 已标记不再追问: {_skipped[:8]}")
+    except Exception as _ske:
+        logging.getLogger(__name__).warning(f"跳过标记失败（不影响生成）: {_ske}")
+
+    # 🔴 **填即归档**：用户一提交就把 filled_data 落进 history_reports.db。
+    #    会话只有 24 小时生命（`_SESSION_MAX_AGE_HOURS`），原来只有「生成完成」才写库 ——
+    #    用户填完、隔天回来，会话没了、值也没了。这里落一笔，过期也不怕。
+    try:
+        await report_service.archive_filled_data(session)
+    except Exception as _ae:
+        logging.getLogger(__name__).warning(f"填写归档失败（不影响生成）: {_ae}")
+    # 🔴 同时**立刻落盘会话文件**：`sessions.json` 只在若干事件点才写，
+    #    实测用户在 10:35 填的值，会话文件还停在 10:17 —— 这中间任何一次重启
+    #    （开发用 `uvicorn --reload`，改一行代码就重启）都会把填写内容丢掉。
+    try:
+        report_service._save_sessions()
+    except Exception as _se:
+        logging.getLogger(__name__).warning(f"会话落盘失败（不影响生成）: {_se}")
 
     state["_missing_fields"] = []
     state["_workflow_paused"] = False
     state["_is_resume"] = True  # 🔴 Mark as resume so pipeline skips data check + reuses outline
+    # 🔴🔴 **空 resume 值会让 LangGraph 死循环** —— 这不是我们的 bug，是它的：
+    #     `Command(resume={})` 被当成「没有恢复值」，`interrupt()` 于是在 resume 时
+    #     **再次抛出**，节点永远走不到中断之后的代码 → **同一个弹窗无限重弹**。
+    #     实测（离线最小复现）：
+    #        resume={}                → ❌ 又中断，死循环
+    #        resume={'x': 1}          → ✅ 正常继续
+    #        resume={'__skip__': True}→ ✅ 正常继续
+    #     前端「跳过」按钮送的是 `{'__skip__': '1'}`（见 `AssistantView.skipMissing`）——
+    #     那正是本条要防的哨兵。这里再兜一层：**任何调用方**送空对象也不再卡死。
+    if isinstance(user_responses, dict) and not user_responses:
+        user_responses = {"__skip__": True}
+        logging.getLogger(__name__).info("[HITL] 用户未填任何内容 → 用哨兵值恢复（避免 LangGraph 空值死循环）")
     state["_pending_responses"] = user_responses  # 🔴 For LangGraph Command(resume=...)
     # 🔴 人工干预闭环：把前端提交的 human_items/human_queue 带进 LangGraph 恢复载荷，
     #    使 node_quality_review 的 interrupt 返回后能读回人工意见并驱动重写。
@@ -2226,10 +2739,17 @@ async def resume_workflow(session_id: str, request: WorkflowResumeRequest):
 
 
 @router.get("/generate/{session_id}/workflow/status", response_model=ApiResponse)
-async def workflow_status(session_id: str):
+async def workflow_status(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    _db=Depends(get_auth_db),
+):
     """Get current workflow status — merges session state with subprocess result file."""
+    import logging
+    _log = logging.getLogger(__name__)
+
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
         state = session.state
     except Exception:
         return ApiResponse(message="Session not found", data={"phase": "idle"})
@@ -2246,14 +2766,15 @@ async def workflow_status(session_id: str):
     result_file = _Path(f"/tmp/report_result_{session_id}.json")
     subprocess_output = ""
     subprocess_error = ""
-    if result_file.exists():
+    # 🔴 **只在「没在跑、也没暂停」时才认这个结果文件**。
+    #    该文件在本轮开始/结束时都没有人清理，一旦存在就会让每一次轮询都判「已完成」，
+    #    用户表现为「弹窗还没填完，进度条已经 100%」。
+    #    另外这里**不再从 GET 里改 state** —— 读接口改状态是上一轮残留值的来源之一。
+    if result_file.exists() and not running and not paused:
         try:
             sp_data = _json.loads(result_file.read_text())
             if sp_data.get("status") == "completed":
                 subprocess_output = sp_data.get("output_path", "")
-                state["output_path"] = subprocess_output
-                state["phase"] = "complete"
-                state["status"] = "completed"
             elif sp_data.get("status") == "error":
                 subprocess_error = sp_data.get("message", "未知错误")
         except Exception:
@@ -2280,25 +2801,41 @@ async def workflow_status(session_id: str):
 
     output = subprocess_output or state.get("output_path", "")
 
+    # 🔴 「组装完成」的**唯一**判据：有产物 **且** 没在跑 **且** 没暂停。
+    #    以前漏了 `not running`，于是**上一轮遗留的 output_path** 会在新一轮
+    #    运行/暂停期间把 assembly 报成 done —— 前端进度条直接跳 100%，
+    #    而用户还在填「待补充信息」弹窗（业主：「弹窗还没提完就已经 100%」）。
+    #    产物真正的落点见 `node_assemble_final_report`（report_workflow.py）。
+    _assembly_done = bool(output) and not paused and not running
+
     # 🔴 Derive step statuses from actual state
     step_statuses = {"analysis": "pending", "generation": "pending", "assembly": "pending"}
     if state.get("_analysis_done"):
         step_statuses["analysis"] = "done"
         step_statuses["generation"] = "running" if running else "done"
-    if output:
+    if _assembly_done:
         step_statuses["analysis"] = "done"
         step_statuses["generation"] = "done"
         step_statuses["assembly"] = "done"
+    elif paused:
+        step_statuses["analysis"] = "done"
+        step_statuses["generation"] = "done"
+        step_statuses["assembly"] = "pending"
     elif not running and state.get("_analysis_done"):
         step_statuses["assembly"] = "running"
     # Override with explicit values if set
+    # 🔴 但**产线没完成时不许被覆盖成 done** —— state 里可能残留上一轮的
+    #    `{analysis:done, generation:done, assembly:done}`，那会绕过上面的守卫。
     explicit = state.get("step_statuses", {})
     if explicit:
+        if not _assembly_done:
+            explicit = {k: v for k, v in explicit.items()
+                        if not (k == "assembly" and v == "done")}
         step_statuses.update(explicit)
 
-    # Verify download file actually exists
+    # Verify download file actually exists — 同样只在真正完成时才给下载链接
     download_url = ""
-    if output:
+    if _assembly_done and output:
         abs_path = settings.STORAGE_DIR / output
         if abs_path.exists():
             download_url = f"/api/v1/files/{output}"
@@ -2310,7 +2847,10 @@ async def workflow_status(session_id: str):
     elif paused:
         # 🔴 区分：人工复核暂停 vs 缺数据暂停
         phase = "human_review" if state.get("human_queue") else "paused"
-    elif output:
+    elif _assembly_done:
+        # 🔴 用 `_assembly_done` 而不是裸 `output`：后面那个含有「上一轮遗留的
+        #    output_path」，会在**正在跑**的时候把 phase 报成 complete
+        #    （注意这个分支在 `elif running` 之前，一旦命中就再也走不到 generating）。
         running = False
         phase = "complete"
     elif running:
@@ -2337,9 +2877,15 @@ async def workflow_status(session_id: str):
         human_queue=human_queue,
         human_items=human_items,
         chapter_audits=chapter_audits,
-        logs=state.get("_workflow_logs", []) or (wf_state.get("logs", []) if wf_state else []),
+        # 🔴 **运行日志只发给内部人员**（业主：「上线不给用户看运行日志」）。
+        #    前端那边也有同样的判断（面板 `v-if="authStore.isStaff"`），
+        #    但只藏 UI 挡不住直接调接口的人 —— 这里才是真正的口子。
+        logs=(state.get("_workflow_logs", []) or (wf_state.get("logs", []) if wf_state else []))
+             if await is_staff(user, _db) else [],
         step_statuses=step_statuses,
-        output_path=output,
+        # 🔴 未真正完成时**不回传产物路径** —— 这个字段会被前端当成「可以了」的信号，
+        #    回传上一轮遗留值就等于告诉前端「已经生成好」（进度条直接跳满）。
+        output_path=output if _assembly_done else "",
         download_url=download_url,
     )
     return ApiResponse(data=status_data.model_dump())
@@ -2350,7 +2896,7 @@ async def workflow_status(session_id: str):
 # ═══════════════════════════════════════════════════════
 
 @router.post("/pipeline/run", response_model=ApiResponse)
-async def run_pipeline(request: dict):
+async def run_pipeline(request: dict, user: User = Depends(get_current_user)):
     """Run the 8-phase report generation pipeline.
 
     Request body:
@@ -2383,7 +2929,14 @@ async def run_pipeline(request: dict):
 
     # Create a session for tracking
     try:
-        session = report_service.create_session(session_id)
+        # 🔴 原来写的是 `create_session(session_id)` —— 那个位置是 `template_id`，
+        #    而且 create_session 内部会**重新生成** session_id，传进去的值直接被丢弃。
+        #    这里改成按关键字传，免得再被误读成别的参数。
+        session = report_service.create_session(
+            template_id=0, template_name="", template_path="", initial_message="",
+            user_id=str(user.id), company_id=user.company_id,
+        )
+        session_id = session.session_id
     except Exception:
         session = None
 
@@ -2414,10 +2967,10 @@ async def run_pipeline(request: dict):
 
 
 @router.get("/pipeline/status/{session_id}", response_model=ApiResponse)
-async def get_pipeline_status(session_id: str):
+async def get_pipeline_status(session_id: str, user: User = Depends(get_current_user)):
     """Get pipeline status for a session."""
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
         state = session.state
         return ApiResponse(
             message="Pipeline status",
@@ -2475,7 +3028,7 @@ async def list_report_styles():
 
 
 @router.post("/generate/{session_id}/generate")
-async def generate_report_direct(session_id: str):
+async def generate_report_direct(session_id: str, user: User = Depends(get_current_user)):
     """Trigger report generation via subprocess (isolated from uvicorn event loop).
 
     Frontend polls GET /status for progress.
@@ -2483,7 +3036,7 @@ async def generate_report_direct(session_id: str):
     import subprocess, os
 
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except HTTPException:
         raise HTTPException(status_code=404, detail="会话不存在或已过期")
 
@@ -2519,7 +3072,7 @@ async def generate_report_direct(session_id: str):
 # WebSocket Chat Endpoint — replaces SSE for reliable bidirectional comm
 # ═══════════════════════════════════════════════════════════
 
-@router.websocket("/ws/{session_id}")
+@ws_router.websocket("/ws/{session_id}")
 async def ws_chat(websocket: WebSocket, session_id: str):
     """WebSocket chat endpoint — full-duplex, auto-reconnect, token streaming."""
     from app.services.ws_manager import ws_manager
@@ -2528,10 +3081,22 @@ async def ws_chat(websocket: WebSocket, session_id: str):
     _ws_logger = _ws_logging.getLogger(__name__)
     import asyncio as _asyncio
 
+    # 🔴 WS 认证必须在 `accept()` **之前**，而且要在**取会话之前**：
+    #    先 close 会直接拒绝握手；先认证则未登录者连「这个 session 存不存在」
+    #    都问不出来。token 走 query 参数（浏览器不能给 WebSocket 设请求头）。
+    from app.deps import (
+        authenticate_websocket, WS_CLOSE_UNAUTHORIZED, WS_CLOSE_SESSION_NOT_FOUND,
+    )
+    _ws_user = await authenticate_websocket(websocket)
+    if _ws_user is None:
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="未登录或登录已过期")
+        return
+
     try:
-        session = report_service.get_session(session_id)
+        # 归属校验：别人的会话一律按「不存在」处理（不泄露 id 是否存在）
+        session = report_service.get_session_for_user(session_id, _ws_user)
     except HTTPException:
-        await websocket.close(code=4004, reason="Session not found")
+        await websocket.close(code=WS_CLOSE_SESSION_NOT_FOUND, reason="Session not found")
         return
 
     await ws_manager.connect(session_id, websocket)
@@ -2683,7 +3248,7 @@ async def ws_chat(websocket: WebSocket, session_id: str):
                         data_context += "\n如果数据已齐全，请主动建议用户回复「生成报告」开始编写。"
 
                     system_prompt = (
-                        "你是社会稳定风险评估报告编制助手，服务于江苏众拓项目代理咨询有限公司。\n"
+                        "你是社会稳定风险评估报告编制助手。\n"
                         "你的职责：引导用户提供项目信息，解答稳评相关问题。\n"
                         "如果用户发送了文件或图片，请确认已收到并简要说明文件内容。\n"
                         "风格：专业但友好，简洁直接，不说废话。\n"
@@ -2731,10 +3296,10 @@ async def ws_chat(websocket: WebSocket, session_id: str):
 # ═══════════════════════════════════════════════════════════════
 
 @router.get("/generate/{session_id}/human-queue", response_model=ApiResponse)
-async def get_human_queue(session_id: str):
+async def get_human_queue(session_id: str, user: User = Depends(get_current_user)):
     """① 获取待人工复核章节列表（Skill 违规 + 人工干预状态）。"""
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2769,7 +3334,7 @@ async def get_human_queue(session_id: str):
 
 
 @router.post("/generate/{session_id}/human/opinion", response_model=ApiResponse)
-async def submit_human_opinion(session_id: str, request: dict):
+async def submit_human_opinion(session_id: str, request: dict, user: User = Depends(get_current_user)):
     """② 提交人工修改想法 / 审批放行标记。
 
     body:
@@ -2784,7 +3349,7 @@ async def submit_human_opinion(session_id: str, request: dict):
     模式2b (approve)：人工审批放行 → 跳过后续所有 AI 审核重写
     """
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2834,14 +3399,14 @@ async def submit_human_opinion(session_id: str, request: dict):
 
 
 @router.post("/generate/{session_id}/human/rewrite", response_model=ApiResponse)
-async def trigger_human_ai_rewrite(session_id: str, request: dict):
+async def trigger_human_ai_rewrite(session_id: str, request: dict, user: User = Depends(get_current_user)):
     """③ 触发 AI 携人工意见重写排队章节（模式1）。
 
     只挑「有 human_opinion 且未 human_approved / 未 human_override」的章节重写。
     复用现有 resume 后台任务：把 human_items 作为 LangGraph 恢复载荷。
     """
     try:
-        session = report_service.get_session(session_id)
+        session = report_service.get_session_for_user(session_id, user)
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 

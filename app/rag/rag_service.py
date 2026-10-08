@@ -136,12 +136,19 @@ class RAGService:
 
         general_items = cache.get(key)
         if general_items is None:
-            # 🔴 纯向量检索（query_by_collection 按 domain 物理隔离）。
-            # 不用 retrieve_hybrid——其 BM25 索引跨 domain，会破坏物理隔离。
-            general_items = await self.retriever.retrieve_general_for_chapter(
-                chapter_number=chapter_number, project_context=project_context,
-                n_results=n_results, domain=domain,
+            # 🔴 内容类型库检索（kb_* 集合）：按章节→内容类型，取回该类型范文正文。
+            # 若类型库为空（本机未重建）则回退到旧 knowledge_base 检索。
+            type_items = await self.retriever.retrieve_by_kb_type(
+                chapter_number, project_context=project_context,
+                main_results=8, alt_results=3,
             )
+            if type_items:
+                general_items = type_items
+            else:
+                general_items = await self.retriever.retrieve_general_for_chapter(
+                    chapter_number=chapter_number, project_context=project_context,
+                    n_results=n_results, domain=domain,
+                )
             cache.put(key, general_items, domain=domain or "any", chapter=chapter_number)
 
         # Session (project) material — 永远 live 检索（session collection 天然隔离）

@@ -82,7 +82,7 @@ def test_dedup_same_issue():
     """同一章同一类型只报一条（去重）。"""
     facts = build_project_facts({'area_mu': '489.51'})
     issues = check_chapters_against_facts(
-        {1: {'markdown': '面积500亩，另有300亩。'}}, facts)
+        {1: {'markdown': '本次拟征收总面积500亩，另有总面积300亩。'}}, facts)
     area_issues = [i for i in issues if i['type'] == 'area_mismatch']
     assert len(area_issues) == 1
 

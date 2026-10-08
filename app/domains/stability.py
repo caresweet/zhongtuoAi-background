@@ -27,7 +27,7 @@ def build_stability_config() -> DomainConfig:
         identity_prompt=SYSTEM_PROMPT,
         rag_domain="stability",
         pipeline="chapter_by_chapter",
-        company_name="",
+        company_name="江苏众拓项目代理咨询有限公司",
         classify_keywords=[
             "稳评", "社会稳定", "风险评估", "征收", "征地", "拆迁", "补偿",
         ],

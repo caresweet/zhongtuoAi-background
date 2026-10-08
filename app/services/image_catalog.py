@@ -29,26 +29,43 @@ def _image_fingerprint(path: str) -> str:
 
 
 # Chapter image requirements: what each chapter needs
-# 🔴 权威规范（DB32/T4013-2021 十章结构，依据官方稳评模板图片位置）：
-#   - 位置示意图 → 第1章「决策基本情况」的三级标题「决策地理位置」，图注「决策地理位置」
-#   - 风险评估流程图 → 第2章「评估过程」的「评估步骤」，图注「本决策风险评估流程图」
-#   - 公示照片 → 第3章「各利益相关者对决策事项的反映」的「风险调查过程」
-#   - 现场勘查照片 → 第3章「各利益相关者对决策事项的反映」的「实地勘察」（只取2张作示例）
-#   - 现场座谈会照片 → 第3章「各利益相关者对决策事项的反映」的「座谈会介绍」
-#   - 网络舆情搜索截图 → 第3章「网络媒体舆论意见」
-#   - 工业单元控制性详细规划图 → 第4章「四性分析」
+# 🔴 参照件《白马湖农场2号风电项目社会稳定风险评估报告》十四章结构：
+#   - 位置示意图 / 勘测定界图 → 第6章「项目基本情况」6.1 项目概况
+#   - 社会稳定风险评估流程图 → 第7章「稳评工作方案」7.2 评估方法
+#   - 公示照片 / 现场勘察照片 / 座谈会照片 → 第8章「稳评方法与过程」8.4 风险调查过程
+#   - 网络舆情搜索截图 / 专家评审意见 → 第9章「各利益相关者对项目的反映」9.2 各方意见汇总情况
 #   - 其余图片（红线图/公告/勘测定界/预审意见/法人证明/签到表/问卷表/评审照片/评审签到/评审意见）
 #     全部进附件（见 APPENDIX_IMAGE_CATEGORIES）
 CHAPTER_IMAGE_SPECS = {
-    1: [{"type": "map", "label": "决策地理位置", "min": 0, "max": 1, "keywords": ["位置", "地理位置", "红线", "地图", "勘测定界", "宗地"]}],
-    2: [{"type": "flowchart", "label": "本决策风险评估流程图", "min": 0, "max": 1, "keywords": ["流程", "评估流程", "流程图", "步骤"]}],
-    3: [
-        {"type": "announcement", "label": "公示照片", "min": 0, "max": 3, "keywords": ["公示", "公告栏", "张贴"]},
-        {"type": "photo", "label": "现场勘查照片", "min": 0, "max": 2, "keywords": ["现场", "勘查", "勘察", "踏勘", "地块", "临时用地"]},
-        {"type": "meeting", "label": "现场座谈会照片", "min": 0, "max": 3, "keywords": ["座谈", "开会", "村民", "会议", "群众"]},
-        {"type": "sentiment", "label": "网络舆情搜索截图", "min": 0, "max": 1, "keywords": ["舆情", "搜索", "截图", "网络", "媒体"]},
+    # 第6章 项目基本情况（6.1 项目概况）
+    6: [
+        {"type": "map", "label": "项目位置示意图", "min": 0, "max": 2,
+         "keywords": ["位置", "地理位置", "红线", "地图", "宗地", "示意"]},
+        {"type": "survey_map", "label": "项目用地勘测定界图", "min": 0, "max": 2,
+         "keywords": ["勘测定界图", "勘界图", "定界图", "勘测定界"]},
+        {"type": "planning", "label": "控制性详细规划图", "min": 0, "max": 1,
+         "keywords": ["控制性详细规划", "规划图", "工业单元", "详细规划"]},
     ],
-    4: [{"type": "planning", "label": "控制性详细规划图", "min": 0, "max": 1, "keywords": ["控制性详细规划", "规划图", "工业单元", "HZ03", "详细规划"]}],
+    # 第7章 稳评工作方案（7.2 评估方法 → 流程图）
+    7: [{"type": "flowchart", "label": "社会稳定风险评估流程图", "min": 0, "max": 1,
+         "keywords": ["流程", "评估流程", "流程图", "步骤"]}],
+    # 第8章 稳评方法与过程（8.4 风险调查过程）
+    8: [
+        {"type": "announcement", "label": "公示照片", "min": 0, "max": 4,
+         "keywords": ["公示", "公告栏", "张贴"]},
+        {"type": "photo", "label": "现场勘察照片", "min": 0, "max": 4,
+         "keywords": ["现场", "勘查", "勘察", "踏勘", "地块", "临时用地"]},
+        {"type": "meeting", "label": "群众座谈会照片", "min": 0, "max": 3,
+         "keywords": ["座谈", "开会", "村民", "会议", "群众"]},
+    ],
+    # 第9章 各利益相关者对项目的反映（9.2 各方意见汇总情况 → 网络媒体舆论意见）
+    # 🔴 只放「网络舆情搜索截图」。专家评审会照片 / 专家评审意见是**附件**材料
+    #    （人工成品案卷的附件6、附件8），放进正文明细章就是同一张图出现两次
+    #    （业主：注意图片不要重复）。
+    9: [
+        {"type": "sentiment", "label": "网络舆情搜索截图", "min": 0, "max": 3,
+         "keywords": ["舆情", "搜索", "截图", "网络", "媒体", "百度"]},
+    ],
 }
 
 # 🔴 附件图片分类（权威规范：其余图片按此进附件）
@@ -68,13 +85,18 @@ APPENDIX_IMAGE_CATEGORIES = [
 # 🔴 文件夹名/文件名 → 正文章节 的确定性绑定（治「图片放错」）。
 # 顺序即优先级：先匹配到的生效。
 FOLDER_CHAPTER_HINTS = [
-    (['位置', '地理位置', '红线', '勘测定界', '宗地', '地图'], 1),
-    (['流程', '评估流程', '流程图'], 2),
-    (['公示', '公告栏', '张贴'], 3),
-    (['现场', '勘查', '勘察', '踏勘', '地块', '临时用地'], 3),
-    (['座谈', '开会', '村民', '会议', '群众'], 3),
-    (['舆情', '搜索', '截图', '网络'], 3),
-    (['控制性详细规划', '规划图', '工业单元', 'HZ03', '详细规划'], 4),
+    # 第6章 项目基本情况（6.1 项目概况）
+    (['位置', '地理位置', '红线', '勘测定界', '宗地', '地图', '勘界'], 6),
+    (['控制性详细规划', '规划图', '工业单元', '详细规划'], 6),
+    # 第7章 稳评工作方案（7.2 评估方法 → 流程图）
+    (['流程', '评估流程', '流程图'], 7),
+    # 第8章 稳评方法与过程（8.4 风险调查过程）
+    (['公示', '公告栏', '张贴'], 8),
+    (['现场', '勘查', '勘察', '踏勘', '地块', '临时用地'], 8),
+    (['座谈', '开会', '村民', '会议', '群众'], 8),
+    # 第9章 各利益相关者对项目的反映（9.2 各方意见汇总情况）
+    (['舆情', '搜索', '截图', '网络'], 9),
+    (['专家评审', '评审会', '专家意见', '综合意见', '评审签到'], 9),
 ]
 
 
@@ -90,6 +112,131 @@ def _classify_chapter_hint(name: str, folder_hint: str = "") -> Optional[int]:
         if any(k in combined for k in keywords):
             return ch
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔴 项目材料图片 → (正文章节, 类别, 图注标签) 的**确定性**绑定
+# ═══════════════════════════════════════════════════════════════════════════════
+# 人工成品案卷（`稳评报告222/…案卷--最终.docx`）是版式与归属的唯一基准：
+#   正文（四）风险调查过程 = 1.现场公示 / 2.实地勘察 / 3.座谈会 / （五）网络舆情搜索截图
+#   其余材料（公告、勘测定界报告、签到表、问卷、专家评审件）**只进附件**。
+#
+# 🔴 为什么不用「关键词打分 + 配额竞争」：材料文件夹名本身就是最可靠的语义标签
+#    （`公示照片4/`、`临时用地现场照片/`、`村民开会现场/`…），按文件夹判定是确定性的，
+#    而按文件名猜测会把「座谈会签到表」当成「调查表」塞进正文——实测就是这么错的。
+#
+# 顺序即优先级：先专后泛，先匹配到的生效。
+# (匹配词, 章节号或 None, category, 图注标签)
+MATERIAL_IMAGE_RULES = [
+    # ── 专家评审签到表（案卷附件7）：文件夹是「稳评专家意见扫描」，但内容不是意见 ──
+    (['专家意见扫描_签到', '评审签到表', '专家签到'],  None, 'cert',        '专家评审签到表'),
+    # ── 签到表：只进附件，绝不进正文 ──
+    (['签到表'],                                    None, 'cert',         '签到表'),
+    # ── 第8章 风险调查过程 ──
+    (['公示照片', '公示栏', '张贴'],                  8,    'announcement', '公示照片'),
+    (['临时用地现场照片', '地块现状', '勘察照片'],      8,    'photo',        '现场勘察照片'),
+    (['村民开会现场', '开会现场'],                    8,    'meeting',      '群众座谈会照片'),
+    # 🔴 业主口径（2026-09-20）：「现场景色照片就是走访照片」——
+    #   🔴 「现场走访照片」必须**有人**（业主 2026-09-21：「现场走访照片也是要有人的」）。
+    #      材料里 6 张有人像的照片全是会议室，只能按来源文件夹分成两组、互不重样：
+    #        「群众开会照片」→ 现场走访调查；「村民开会现场」→ 座谈会。
+    (['群众开会照片'],                              8,    'meeting',      '现场走访照片'),
+    (['座谈会照片'],                                8,    'meeting',      '群众座谈会照片'),
+    (['稳评问卷调查表', '问卷调查', '调查问卷', '问卷'], 8,    'survey',       '调查表'),
+    # ── 第6章 项目基本情况（3.项目地理位置）──
+    (['位置图11', '位置示意图', '拟征地位置'],        6,    'map',          '项目位置示意图'),
+    (['勘测定界图', '勘界图', '定界图'],               None, 'survey_map',   '勘测定界报告'),
+    # ── 第9章 网络媒体舆论意见 ──
+    (['百度', '舆情', '搜索', '信息公开', '政府网站'],  9,    'sentiment',    '网络舆情搜索截图'),
+    # 🔴 素材文件夹「图片-稳评（报告中」里除位置图外都是搜索截图（百度搜索、政府网站），
+    #    文件名叫 `22.jpg` 这类纯数字，只能靠文件夹兜底。必须排在位置图规则**之后**。
+    (['图片-稳评（报告中'],                          9,    'sentiment',    '网络舆情搜索截图'),
+    # ── 专家评审件：只进附件（案卷附件6/7/8）──
+    (['专家评审会照片', '评审会照片'],                 None, 'review',       '专家评审会照片'),
+    (['综合意见', '专家意见', '评审意见'],             None, 'opinion',      '专家评审意见'),
+]
+
+
+def _basename_text(name: str, folder_hint: str = "") -> str:
+    """用于材料规则匹配的文本：**最后一级文件夹名 + 文件名**。
+
+    🔴 不能用整条路径：`/Users/mac/Downloads/稳评资料/公示照片4/xx.png` 里的
+       `稳评资料` 会把所有图都带上「稳评」，反而干扰判定。
+    """
+    last = ""
+    if folder_hint:
+        parts = [p for p in str(folder_hint).replace('\\', '/').split('/') if p]
+        if parts:
+            last = parts[-1]
+    return f"{last} {name or ''}".lower()
+
+
+def _match_material_rule(name: str, folder_hint: str = ""):
+    """材料图片 → (chapter_hint, category, label)；识别不出返回 (None, "", "")。"""
+    t = _basename_text(name, folder_hint)
+    for kws, ch, cat, label in MATERIAL_IMAGE_RULES:
+        if any(k in t for k in kws):
+            return (ch, cat, label)
+    return (None, "", "")
+
+
+# 🔴 PDF 抽取页命名：
+#   `pdf_<文档名>_page<N>.png`      —— 整页渲染（含印章、版式，最完整）
+#   `pdf_<文档名>_p<N>_img<K>.<ext>` —— 该页内嵌位图
+# 同一页的两者是**同一内容的两版**，同时进附件就是「第1页附图 / 第1页」并排重复。
+_PDF_PAGE_RE = re.compile(r'^pdf_(.+?)_page(\d+)\.\w+$', re.I)
+_PDF_EMBED_RE = re.compile(r'^pdf_(.+?)_p(\d+)_img\d*\.\w+$', re.I)
+
+
+def _pdf_page_of(name: str):
+    """→ (文档名, 页码, 是否整页渲染) 或 None。"""
+    n = str(name or '')
+    m = _PDF_PAGE_RE.match(n)
+    if m:
+        return (m.group(1), int(m.group(2)), True)
+    m = _PDF_EMBED_RE.match(n)
+    if m:
+        return (m.group(1), int(m.group(2)), False)
+    return None
+
+
+def _pdf_stem_key(stem: str) -> str:
+    """PDF 文档名归一化 —— 同一份 PDF 可能被抽过多次，文件名只差一个 hash 后缀
+    或把 〔〕 换成了下划线（`洪拟征告〔2026〕7号` vs `洪拟征告_2026_7号`），
+    不归一化就会把同一页判成两页，附件里出现「第1页 / 第1页」两份。"""
+    s = re.sub(r'_[0-9a-f]{6,}$', '', str(stem or ''), flags=re.I)
+    return re.sub(r'[^0-9a-z一-鿿]+', '', s.lower())
+
+
+def _pdf_page_rule(stem: str, page: int):
+    """PDF 页 → (章节号, category, 图注标签)。
+
+    🔴 「群众座谈会扫描.pdf」前 2 页是**座谈会签到表**，第 3 页起才是**稳评问卷调查表**
+       —— 人工成品案卷附件「4.座谈会签到表 2 张 / 5.稳评问卷调查表 52 张」正好是这个切分。
+       旧实现按文件名把整本都判成「调查表」，正文「现场走访调查」小节于是贴了两张签到表。
+    """
+    s = str(stem or '')
+    if '位置示意图' in s:
+        return (None, 'map', '拟征地位置示意图')
+    if any(k in s for k in ('座谈', '会议', '纪要')):
+        # 群众座谈会扫描件的固定装订顺序（江苏稳评案卷）：
+        #   第 1–2 页 座谈会签到表 → 第 3–4 页 部门审批表 → 第 5 页起 稳评问卷调查表
+        # 🔴 正文「现场走访调查」小节要的「调查表」是**问卷**那一档，不能拿签到表或
+        #    审批表充数（实测就是把签到表当调查表贴了两张）。
+        if page <= 2:
+            return (None, 'cert', '座谈会签到表')
+        if page <= 4:
+            return (None, 'survey', '部门审批表')
+        return (8, 'survey', '调查表')
+    if any(k in s for k in ('问卷', '调查')):
+        return (8, 'survey', '调查表')
+    if any(k in s for k in ('公告', '预公告', '征告')):
+        return (None, 'announcement', '拟征地公告')
+    if any(k in s for k in ('勘测', '测定界', '定界')):
+        return (None, 'survey_map', '勘测定界报告')
+    if any(k in s for k in ('评审', '专家', '意见')):
+        return (None, 'opinion', '专家评审意见')
+    return (None, '', '')
 
 
 
@@ -145,6 +292,17 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             if path:
                 all_paths.append({"path": path, "original_name": item.get("original_name", os.path.basename(path))})
 
+    # 🔴 先扫一遍**全部**文件名，记下「哪些 PDF 页已有整页渲染」。
+    #    同一页的整页渲染与内嵌位图是同一内容的两个版本，同时进附件就是重复图；
+    #    这里只保留整页渲染（含印章与版式，是完整原件）。
+    _rendered_pages = set()
+    for _it in all_paths:
+        _nm = _it if isinstance(_it, str) else _it.get("original_name") or os.path.basename(_it.get("path", ""))
+        _pp = _pdf_page_of(os.path.basename(str(_nm)))
+        if _pp and _pp[2]:
+            _rendered_pages.add((_pdf_stem_key(_pp[0]), _pp[1]))
+    _seen_pages = set()   # 已收过的 (文档, 页码)：同一份 PDF 被抽多次只留一份
+
     # Classify each image
     for item in all_paths:
         if isinstance(item, str):
@@ -164,9 +322,12 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             else:
                 continue
 
-        if name.startswith('pdf_') and ('_full' in name or '_page' in name):
-            continue  # 整页渲染（OCR用），不是报告图片材料
-        if '勘测定界' in name:
+        # OCR 整页渲染排除（_full）；保留 公告/勘测定界/座谈会/问卷 的 _page 渲染
+        # 作为附件扫描图（这些页本身即材料原件，如勘测定界页、盖章公告页）。
+        if name.startswith('pdf_') and '_full' in name:
+            continue
+        if name.startswith('pdf_') and '_page' in name and not any(
+                k in name for k in ('勘测定界', '预公告', '座谈会', '问卷', '调查')):
             continue
 
         # 🔴 过滤噪音：模板提取产物/公司资质，不是项目图片材料
@@ -180,6 +341,22 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         if name.startswith('stability_cert_'):
             continue
 
+        # 🔴 同一 PDF 页已有整页渲染 → 丢掉内嵌位图版（否则附件出现「第N页附图 / 第N页」重复）；
+        #    整页渲染与内嵌位图同时存在时**优先整页渲染**，所以这里连渲染件也要排在前面登记。
+        _pp = _pdf_page_of(name)
+        if _pp:
+            _pkey = (_pdf_stem_key(_pp[0]), _pp[1])
+            if _pkey in _seen_pages:
+                continue
+            if not _pp[2] and _pkey in _rendered_pages:
+                # 🔴 这一页已有整页渲染 —— 丢掉内嵌位图版，**但不能登记 seen**：
+                #    登记了后面那张整页渲染也会被当成重复一并丢掉，附件直接少一页。
+                continue
+            _seen_pages.add(_pkey)
+        # 🔴 抽取器另存的「关键图」（pdf_X_<说明>.png）与整页渲染同源重复，一并丢掉
+        if name.startswith('pdf_') and _pp is None:
+            continue
+
         # Extract folder context from path
         folder_hint = ""
         if '/' in path or '\\' in path:
@@ -187,29 +364,34 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             folder_hint = '/'.join(parts[:-1])  # All folder parts as context
 
         # ── Classification priority ──
-        # 1. AI vision classification (highest confidence)
-        ai_cat = ai_lookup.get(path, "")
-        # 2. Folder + filename classification
-        file_cat = _classify_filename(name, folder_hint)
-
-        # Use AI classification if available and more specific than filename
-        if ai_cat and ai_cat != "other":
-            cat = ai_cat
+        # ① 材料规则 / PDF 页规则 —— 确定性判定，优先级最高
+        _rule_label = ""
+        if _pp:
+            chapter_hint, cat, _rule_label = _pdf_page_rule(_pp[0], _pp[1])
         else:
-            cat = file_cat
+            chapter_hint, cat, _rule_label = _match_material_rule(name, folder_hint)
 
-        # 🔴 PDF-embedded images from known doc types → override category
-        if name.startswith('pdf_座谈会') and '_img' in name:
-            cat = "survey"  # Meeting sign-in sheets, survey forms
-        elif name.startswith('pdf_洪拟征告') and '_img' in name:
-            cat = "announcement"  # Announcement embedded images
-        elif name.startswith('pdf_0-勘测') and '_img' in name:
-            cat = "map"  # Survey report embedded images
+        # ② 规则没识别出来，才退回原来的「AI 视觉分类 + 文件名关键词」
+        if not cat:
+            ai_cat = ai_lookup.get(path, "")
+            file_cat = _classify_filename(name, folder_hint)
+            cat = ai_cat if (ai_cat and ai_cat != "other") else file_cat
 
-        display_name = _clean_display_name(name, cat)
+            # 🔴 文件名给出了**更具体**的类型时，不让 AI 的粗分类覆盖它。
+            #    （视觉模型一律把地图类判成 "map"，会把「勘测定界图」和「位置示意图」
+            #      混成一类，两类图互相挤配额，勘测定界图就被挤去附件了。）
+            _nl = name.lower()
+            if any(k in _nl for k in ('勘测定界图', '勘界图', '定界图', '界址点图')):
+                cat = "survey_map"
+            elif any(k in _nl for k in ('流程图', '评估流程')):
+                cat = "flowchart"
+
+            chapter_hint = _classify_chapter_hint(name, folder_hint)
+
+        display_name = _rule_label or _clean_display_name(name, cat)
 
         # Check folder structure for better display name
-        if '/' in path or '稳评' in path:
+        if not _rule_label and ('/' in path or '稳评' in path):
             parts = path.replace('\\', '/').split('/')
             for part in parts:
                 if any(kw in part for kw in ['公示', '评审', '座谈', '现场', '勘测', '公告', '走访', '问卷']):
@@ -221,16 +403,18 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         if fp and any(c.get('fingerprint') == fp for c in catalog):
             continue
 
-        # 🔴 文件夹名 → 章节 确定性绑定（治「放错」）
-        chapter_hint = _classify_chapter_hint(name, folder_hint)
-
         catalog.append({
             "path": path,
             "name": name,
             "category": cat,
             "display_name": display_name,
+            "rule_label": _rule_label,
             "fingerprint": fp,
             "chapter_hint": chapter_hint,
+            # 🔴 材料规则命中却判定「只进附件」的图（公告、勘测定界报告、签到表…）
+            #    必须**钉死**，不许被第二遍的「类别竞争」再抢进正文 ——
+            #    实测勘测定界报告的前两页被判成第6章的「勘测定界图」塞进了正文。
+            "pinned": bool(_rule_label),
         })
 
     # 🔴 Match to chapters with global dedup (each image used at most ONCE)
@@ -247,7 +431,21 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         specs = CHAPTER_IMAGE_SPECS[hint]
         # 优先挂到能匹配 category 的 spec；匹配不上就用第一个 spec 的 label
         matched = next((s for s in specs if s["type"] == img["category"]), None)
-        label = matched["label"] if matched else specs[0]["label"]
+        if img.get("rule_label"):
+            # 🔴 材料规则已经给出了确定性的图注标签（公示照片 / 调查表 / 网络舆情搜索截图…），
+            #    直接用，不再按类别猜 —— 猜的结果就是把「座谈会签到表」标成「调查表」。
+            label = img["rule_label"]
+        elif matched:
+            label = matched["label"]
+        else:
+            # 🔴 类别在本书没有对应规格时，别一律套 specs[0] 的标签——
+            #    否则「位置示意图」和「公告附图」会重名（图1-1/图1-2 同名）。
+            _FALLBACK = {"announcement": "拟征收土地位置示意图（公告附图）",
+                         "photo": "现场调查照片", "meeting": "群众座谈会照片",
+                         "review": "专家评审会照片", "opinion": "专家评审意见",
+                         "survey": "调查表", "map": "拟征收地块位置示意图",
+                         "survey_map": "拟征收地块勘测定界图"}
+            label = _FALLBACK.get(img["category"]) or specs[0]["label"]
         # 不超过该 spec 的 max
         existing_of_label = sum(1 for x in ch_images if x["label"] == label)
         max_of_label = (matched or specs[0]).get("max", 3)
@@ -273,7 +471,8 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                 continue
             # Find matching images NOT already used in another chapter
             available = [img for img in catalog
-                         if img["path"] not in used_paths and not img.get("chapter_hint") and (
+                         if img["path"] not in used_paths and not img.get("chapter_hint")
+                         and not img.get("pinned") and (
                              img["category"] == spec["type"] or
                              (spec["type"] == "meeting" and img["category"] in ("photo", "review")) or
                              (spec["type"] == "photo" and img["category"] in ("photo", "other"))  # 🔴 Allow "other" as photo fallback
@@ -338,6 +537,10 @@ def _classify_filename(name: str, folder_hint: str = "") -> str:
         return "photo"
 
     # ── Specific keywords (check most specific first) ──
+    # 🔴 勘测定界图单列一类：它是「勘测定界报告的附图」，
+    #    与「位置示意图/红线图」是两种图，都要挂第1章 1.5，不能互相挤配额。
+    if any(k in nl for k in ['勘测定界图', '勘界图', '定界图', '界址点图']):
+        return "survey_map"
     # Maps / diagrams — very specific patterns
     if any(k in nl for k in ['红线图', '位置图', '规划图', '地形图', '宗地图', '勘测定界', '示意', '百度', '高德', '卫星图', '谷歌']):
         return "map"
@@ -410,26 +613,6 @@ def _clean_display_name(name: str, category: str = "") -> str:
     return clean if clean else CAT_LABELS.get(category, name)
 
 
-def get_chapter_image_guide(chapter_num: int, catalog: Dict) -> str:
-    """Generate a prompt guide for the chapter agent about available images."""
-    ch_images = catalog.get("by_chapter", {}).get(chapter_num, [])
-    if not ch_images:
-        specs = CHAPTER_IMAGE_SPECS.get(chapter_num, [])
-        needed = [f"{s['label']}({s['type']})" for s in specs]
-        return f"⚠️ 本章需要以下图片但用户未提供：{', '.join(needed)}。请在正文中标注【需补充：图片类型】"
-
-    lines = ["## 📸 本章可用图片（请在正文对应位置插入标记）"]
-    seen = set()
-    for img in ch_images:
-        label = img["label"]
-        name = img["name"]
-        path = img.get("path", "")
-        # Include path so assembler can resolve the image directly
-        marker = f"![{label}：{name}]({path})"
-        if marker not in seen:
-            lines.append(f"- {marker}")
-            seen.add(marker)
-    return "\n".join(lines)
 
 
 def get_missing_images_prompt(catalog: Dict) -> str:

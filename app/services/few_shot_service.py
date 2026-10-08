@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Dict, List, Any, Optional, Tuple
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
 
@@ -213,15 +214,18 @@ class FewShotService:
             return ""
 
         # Build a regex to find the chapter boundaries
-        titles = ["拟征收决策基本概况", "评估过程、方法和依据", "社会稳定风险因素调查",
-                  "决策综合分析", "风险因素识别", "措施前风险等级研判",
-                  "风险防范与化解措施", "措施后风险等级评估", "评估结论与建议", "应急预案"]
-
-        if chapter_num < 1 or chapter_num > 10:
+        # 🔴 章节标题一律取自 chapter_definitions（唯一事实源），不在此另存一份
+        try:
+            from app.agent.chapter_definitions import (
+                ALL_CHAPTERS, get_chapter_title)
+            titles = [get_chapter_title(n) for n in ALL_CHAPTERS]
+            if int(chapter_num) not in ALL_CHAPTERS:
+                return ""
+            idx = ALL_CHAPTERS.index(int(chapter_num))
+            current_title = titles[idx]
+            next_title = titles[idx + 1] if idx + 1 < len(titles) else None
+        except Exception:
             return ""
-
-        current_title = titles[chapter_num - 1]
-        next_title = titles[chapter_num] if chapter_num < 10 else None
 
         # Find current chapter start
         start_pattern = rf'(?:##\s*{re.escape(current_title)}|第\s*{chapter_num}\s*章\s*{re.escape(current_title)})'
@@ -272,7 +276,7 @@ async def refresh_few_shot_cache(project_info: Dict[str, Any], domain: str = "st
     project_hash = f"{project_info.get('location','')}|{project_info.get('area_mu','')}|{project_info.get('land_use','')}"
     if _few_shot_cache["project_hash"] == project_hash and _t.time() - _few_shot_cache["updated"] < 3600:
         return  # Already cached for this project
-    for ch in range(1, 11):
+    for ch in ALL_CHAPTERS:
         matches = await svc.find_best_matches(project_info, chapter_num=ch, domain=domain, top_k=2)
         if matches:
             _few_shot_cache["examples"][ch] = matches
@@ -307,16 +311,28 @@ def get_few_shot_with_skills(chapter_num: int, domain: str = "stability") -> str
         if db_path.exists():
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
+            # 🔴 用户报告要求（无条件注入，所有章节都要遵守）
+            user_rows = conn.execute(
+                "SELECT rule_desc, correction FROM review_skills "
+                "WHERE is_active=1 AND skill_type='user_requirement' ORDER BY id LIMIT 6",
+            ).fetchall()
+            # 专家反馈（text 型，按章节）
             rows = conn.execute(
                 "SELECT rule_desc, correction FROM review_skills WHERE is_active=1 AND skill_type='text' "
                 "AND (chapter_num=0 OR chapter_num=?) ORDER BY id LIMIT 8",
                 (chapter_num,),
             ).fetchall()
             conn.close()
+            hint_lines = []
+            if user_rows:
+                hint_lines.append("\n## 📋 用户报告要求（必须遵守）")
+                for r in user_rows:
+                    hint_lines.append(f"- {r['rule_desc']}：{r['correction']}")
             if rows:
-                hint_lines = ["\n## ⚠️ 专家反馈要求（范文参考前，先遵守这些）"]
+                hint_lines.append("\n## ⚠️ 专家反馈要求（范文参考前，先遵守这些）")
                 for r in rows:
                     hint_lines.append(f"- {r['rule_desc']}：{r['correction']}")
+            if hint_lines:
                 skill_hint = "\n".join(hint_lines) + "\n"
                 if few_shot:
                     return skill_hint + "\n" + few_shot

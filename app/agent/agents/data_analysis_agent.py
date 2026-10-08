@@ -13,8 +13,26 @@ import logging
 from typing import Dict, List, Any
 
 from .base_agent import BaseAgent
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
+
+
+def _build_chapter_requirements() -> dict:
+    """由 chapter_definitions 派生「章 → 标题/必填字段」，并挂上本章的字段提取正则。"""
+    from app.agent.chapter_definitions import (
+        ALL_CHAPTERS, get_chapter_title, get_chapter_data_requirements)
+    out: Dict[int, dict] = {}
+    for n in ALL_CHAPTERS:
+        req = get_chapter_data_requirements(n)
+        required = [k for k, *_ in (req.get("required") or [])]
+        out[n] = {
+            "title": get_chapter_title(n),
+            "required": required,
+            "rag_dependent": not required,
+            "field_patterns": DataAnalysisAgent._FIELD_PATTERNS.get(n, {}),
+        }
+    return out
 
 
 class DataAnalysisAgent(BaseAgent):
@@ -24,111 +42,48 @@ class DataAnalysisAgent(BaseAgent):
     description = "解析用户提供的PDF/图片/文字资料，提取每章所需数据，检查数据完整性"
     covered_steps = [0]
 
-    # Per-chapter data requirements with chapter-specific field patterns
-    CHAPTER_REQUIREMENTS = {
-        1: {
-            "title": "拟征收决策基本概况",
-            "required": ["report_title", "location", "area_m2"],
-            "field_patterns": {
-                "report_title": [
-                    r'([^\s]{2,8}[告发字]\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号)',
-                    r'(?:项目名称|决策名称|报告标题)[：:]\s*(.+?)(?:\n|$)',
-                ],
-                "doc_reference": [
-                    r'([^\s]{2,8}[告发字]\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号)',
-                ],
-                "location": [
-                    r'(?:位于|坐落|位置)[：:]?\s*(.{5,100}?)(?:。|\n)',
-                ],
-                "area_m2": [
-                    r'(\d{5,7})\s*(?:平方米|㎡)',
-                    r'(?:总面积|面积|合计)\s*[：:]*\s*(\d{5,7})',
-                    r'(?:地块|用地).{0,5}面积[^\d]*(\d{5,7})',
-                ],
-                "area_mu": [r'(\d+\.?\d*)\s*亩'],
-                "household_count": [r'(?:涉及|共涉及|征收涉及)[^\d]*(\d+)\s*(?:户|农户)'],
-                "population_count": [r'(?:涉及|被征地|安置)[^\d]{0,5}(\d+)\s*(?:人|人口)'],
-                "org_name": [
-                    r'(?:责任单位|决策单位|征收主体|征收单位|实施单位)[：:]\s*(\S{2,30})',
-                    r'(淮安\S{0,10}(?:人民政府|管理委员会|街道办事处))',
-                ],
-                "implement_unit": [r'江苏众拓项目代理咨询有限公司'],
-                "land_use": [r'(?:用途|地类)[：:]?\s*(\S{2,20})'],
-                "compensation_standard": [r'(?:补偿标准|综合补偿)[^\d]*(\d[\d,.]*)\s*(?:元|万元)'],
-                "total_compensation": [r'(?:征地补偿|补偿总额|总补偿|征地总费用)[^\d]*(\d[\d,.]*)\s*(?:元|万元)'],
-                "compensation_doc_id": [r'([^\s]{2,8}[发字]\s*〔?\d{4}〕?\s*\d+\s*号)'],
-                "red_line_map": [r'(?:红线图|征收范围图|勘测定界图|用地红线|征地红线|附图)'],
-                "funding": [r'(?:资金|投资)[：:]?\s*(\d[\d,.]*)\s*(?:万元|亿元)'],
-                "earliest_date": [r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日'],
-            },
-        },
+    # 🔴 每章「字段提取正则」（真正的能力）。标题与必填字段**一律从
+    #    chapter_definitions 派生**（见 _build_chapter_requirements），此处不再重复维护，
+    #    避免章节结构一变这里就成了第二份过期的真相。
+    _FIELD_PATTERNS: Dict[int, Dict[str, List[str]]] = {
+        # 第2章 编制依据
         2: {
-            "title": "评估过程、方法和依据",
-            "required": [],
-            "rag_dependent": True,
-            "field_patterns": {
-                "legal_basis_docs": [
-                    r'DB32/T4013',
-                    r'(?:土地管理法|征收条例|补偿条例|突发事件应对法|社会稳定风险评估)',
-                    r'(?:依据|根据|按照)[^。]{0,30}(?:法律|法规|条例|办法|标准|规范)',
-                ],
-            },
+            "legal_basis_docs": [
+                r'DB32/T4013',
+                r'(?:土地管理法|征收条例|补偿条例|突发事件应对法|社会稳定风险评估)',
+                r'(?:依据|根据|按照)[^。]{0,30}(?:法律|法规|条例|办法|标准|规范)',
+            ],
         },
-        3: {
-            "title": "社会稳定风险因素调查",
-            "required": [],
-            "field_patterns": {
-                "total_samples": [
-                    r'(?:发放问卷|回收问卷|调查|走访)[^。]{0,15}(\d+)\s*(?:份|人|户)',
-                    r'(?:共|共计|总计)\s*(\d+)\s*(?:份|人|户)',
-                ],
-                "support_count": [r'(\d+)\s*(?:人|份)\s*(?:支持|赞成|同意)'],
-                "oppose_count": [r'(\d+)\s*(?:人|份)\s*(?:反对|不同意)'],
-                "support_rate": [r'(\d{2,3}\.?\d*)\s*%\s*(?:支持|赞成|同意)'],
-                "stakeholder_demands": [r'(?:主要|群众).{0,10}(?:诉求|意见|要求)[：:]?\s*(.+?)(?:\n|。|$)'],
-                "sample_coverage_rate": [r'(\d+\.?\d*)\s*%\s*(?:样本|抽样|覆盖)'],
-                "survey_method": [
-                    r'(?:入户走访|实地走访|现场访谈|座谈会|听证会)[^。]{0,30}',
-                    r'(?:参会|参加|出席).{0,10}(\d+)\s*(?:人|名)',
-                ],
-            },
-        },
-        4: {
-            "title": "决策综合分析",
-            "required": [],
-            "rag_dependent": True,
-        },
-        5: {
-            "title": "风险因素识别与初始等级表",
-            "required": [],
-            "rag_dependent": True,
-        },
+        # 第6章 项目基本情况
         6: {
-            "title": "措施前风险等级研判",
-            "required": [],
-            "rag_dependent": True,
+            "land_use": [r'(?:用途|地类)[：:]?\s*(\S{2,20})'],
+            "compensation_standard": [r'(?:补偿标准|综合补偿)[^\d]*(\d[\d,.]*)\s*(?:元|万元)'],
+            "total_compensation": [r'(?:征地补偿|补偿总额|总补偿|征地总费用)[^\d]*(\d[\d,.]*)\s*(?:元|万元)'],
+            "compensation_doc_id": [r'([^\s]{2,8}[发字]\s*〔?\d{4}〕?\s*\d+\s*号)'],
+            "red_line_map": [r'(?:红线图|征收范围图|勘测定界图|用地红线|征地红线|附图)'],
+            "funding": [r'(?:资金|投资)[：:]?\s*(\d[\d,.]*)\s*(?:万元|亿元)'],
+            "earliest_date": [r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日'],
         },
-        7: {
-            "title": "风险防范与化解措施",
-            "required": [],
-            "rag_dependent": True,
-        },
-        8: {
-            "title": "措施后风险等级评估",
-            "required": [],
-            "rag_dependent": True,
-        },
+        # 第9章 各利益相关者对项目的反映
         9: {
-            "title": "评估结论与建议",
-            "required": [],
-            "rag_dependent": True,
-        },
-        10: {
-            "title": "应急预案",
-            "required": [],
-            "rag_dependent": True,
+            "total_samples": [
+                r'(?:发放问卷|回收问卷|调查|走访)[^。]{0,15}(\d+)\s*(?:份|人|户)',
+                r'(?:共|共计|总计)\s*(\d+)\s*(?:份|人|户)',
+            ],
+            "support_count": [r'(\d+)\s*(?:人|份)\s*(?:支持|赞成|同意)'],
+            "oppose_count": [r'(\d+)\s*(?:人|份)\s*(?:反对|不同意)'],
+            "support_rate": [r'(\d{2,3}\.?\d*)\s*%\s*(?:支持|赞成|同意)'],
+            "stakeholder_demands": [r'(?:主要|群众).{0,10}(?:诉求|意见|要求)[：:]?\s*(.+?)(?:\n|。|$)'],
+            "sample_coverage_rate": [r'(\d+\.?\d*)\s*%\s*(?:样本|抽样|覆盖)'],
+            "survey_method": [
+                r'(?:入户走访|实地走访|现场访谈|座谈会|听证会)[^。]{0,30}',
+                r'(?:参会|参加|出席).{0,10}(\d+)\s*(?:人|名)',
+            ],
         },
     }
+
+    # 运行时可读的「章 → 需求」表（标题/必填字段派生自唯一事实源）
+    CHAPTER_REQUIREMENTS: Dict[int, dict] = {}
 
     async def think(self, state: dict) -> Dict[str, Any]:
         pdf_count = len(state.get("_pdf_texts", {}))
@@ -180,7 +135,7 @@ class DataAnalysisAgent(BaseAgent):
         chapter_missing = {}
         llm_tasks = []  # (ch_num, task) for chapters needing LLM enhancement
 
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             req = self.CHAPTER_REQUIREMENTS.get(ch_num, {})
             ch_data, missing = self._extract_chapter_data(ch_num, req, raw_data, state)
             chapter_data[ch_num] = ch_data
@@ -801,7 +756,7 @@ class DataAnalysisAgent(BaseAgent):
             "|------|------|----------|--------|",
         ]
 
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             req = self.CHAPTER_REQUIREMENTS.get(ch_num, {})
             missing = chapter_missing.get(ch_num, [])
             data_count = len(chapter_data.get(ch_num, {}))
@@ -826,7 +781,7 @@ class DataAnalysisAgent(BaseAgent):
         lines.append("---")
         lines.append("")
         lines.append("## 逐章详情\n")
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             req = self.CHAPTER_REQUIREMENTS.get(ch_num, {})
             title = req.get("title", f"第{ch_num}章")
             ch_data = chapter_data.get(ch_num, {})
@@ -870,7 +825,7 @@ class DataAnalysisAgent(BaseAgent):
                         "data_count": len(chapter_data.get(ch_num, {})),
                         "missing": chapter_missing.get(ch_num, []),
                     }
-                    for ch_num in range(1, 11)
+                    for ch_num in ALL_CHAPTERS
                 ],
             },
         })
@@ -880,3 +835,7 @@ class DataAnalysisAgent(BaseAgent):
             "event": "phase_change",
             "data": {"phase": "analysis_review", "message": "请确认资料分析结果"},
         })
+
+
+# 🔴 类定义完成后填充（标题/必填字段派生自 chapter_definitions，不在此重复维护）
+DataAnalysisAgent.CHAPTER_REQUIREMENTS = _build_chapter_requirements()

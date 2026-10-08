@@ -24,6 +24,7 @@ from app.validation.content_guardrails import (
     check_required_materials,
     AI_BUZZWORDS,
 )
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
 
@@ -40,38 +41,19 @@ class QualityReviewAgent(BaseAgent):
     description = "合并审核所有章节和表格数据，检查格式一致性与数据准确性，发现问题自动触发重写"
     covered_steps = [16]
 
-    # Minimum word counts per chapter
-    MIN_WORDS = {
-        1: 300, 2: 300, 3: 400, 4: 600, 5: 300,
-        6: 300, 7: 500, 8: 300, 9: 400, 10: 600,
-    }
+    # 🔴 字数下限 / 必需表格 / 必需关键词：全部从 chapter_definitions 派生（单一事实源）
+    from app.agent.chapter_definitions import (
+        CHAPTER_DEFINITIONS as _CD, CHAPTER_FORMAT_RULES as _CFR,
+    )
 
-    # Expected tables per chapter (from CHAPTER_DEFINITIONS)
-    EXPECTED_TABLES = {
-        1: [],
-        2: [],
-        3: [],
-        4: [],
-        5: [],  # 金湖模板：第5章有表格但由LLM自然生成
-        6: [],
-        7: [],
-        8: [],
-        9: [],
-        10: [],  # 金湖模板第10章无表格
-    }
+    MIN_WORDS = {n: d.get("min_words", 300) for n, d in _CD.items()}
 
-    # Critical patterns that MUST be present per chapter
+    # Expected tables per chapter (from CHAPTER_DEFINITIONS.key_tables)
+    EXPECTED_TABLES = {n: d.get("key_tables", []) for n, d in _CD.items()}
+
+    # Critical patterns that MUST be present per chapter（由 CHAPTER_FORMAT_RULES.must_contain 派生）
     REQUIRED_PATTERNS = {
-        1: [r"决策名称", r"责任单位", r"实施单位", r"(?:征收|项目).*(?:位置|坐落|位于)"],
-        2: [r"评估过程", r"评估方法", r"对照表法|实地考察法|问卷调查法"],
-        3: [r"问卷调查", r"(?:公众|部门)意见", r"(?:公示|公告)"],
-        4: [r"合法性分析", r"合理性分析", r"可行性分析", r"可控性分析"],
-        5: [r"风险因素", r"(?:发生概率|影响程度)", r"初始.*等级"],
-        6: [r"措施前", r"量化.*(?:评分|打分|指标)", r"DB32"],
-        7: [r"防范.*化解|化解.*措施", r"责任主体", r"完成时限"],
-        8: [r"措施后", r"(?:前后|措施.*对比).*(?:对比|得分)"],  # 风险下降 is nice-to-have, not required
-        9: [r"评估结论", r"低风险", r"工作建议"],
-        10: [r"应急预案", r"组织领导", r"(?:预警预防|现场处置)"],
+        n: list(r.get("must_contain", [])) for n, r in _CFR.items()
     }
 
     # Patterns that should NOT appear
@@ -109,9 +91,6 @@ class QualityReviewAgent(BaseAgent):
         (r'(?<!\d)0\s*户(?!\d)', '户数异常：0户'),
         (r'(?<!\d)0\s*%\s*(?:支持|反对)', '支持率/反对率异常：0%'),
         (r'补偿标准[：:]\s*0', '补偿标准异常：0'),
-        (r'2024年(?!\d)', '年份错误：2024（应为2026）'),
-        (r'2025年(?!\d)', '年份错误：2025（应为2026）'),
-        (r'2027年(?!\d)', '年份错误：2027（应为2026）'),
     ]
 
     # Max regeneration loops per chapter
@@ -145,13 +124,6 @@ class QualityReviewAgent(BaseAgent):
         (r'夯实基础', '打好基础'),
         (r'提供了坚强保障', '提供了保障'),
         (r'形成强大合力', '形成合力'),
-    ]
-
-    # 🔴 年份错误替换（报告年度统一为 2026）
-    YEAR_REPLACEMENTS = [
-        (r'2024年', '2026年'),
-        (r'2025年', '2026年'),
-        (r'2027年', '2026年'),
     ]
 
     async def think(self, state: dict) -> Dict[str, Any]:
@@ -217,7 +189,7 @@ class QualityReviewAgent(BaseAgent):
         # ═══════════════════════════════════════════════════════════
         # Step 2: Per-chapter format + content checks
         # ═══════════════════════════════════════════════════════════
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -333,7 +305,7 @@ class QualityReviewAgent(BaseAgent):
             if isinstance(pdf_texts, dict):
                 pdf_raw_text = " ".join(str(v)[:5000] for v in pdf_texts.values() if v)
 
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -467,7 +439,7 @@ class QualityReviewAgent(BaseAgent):
                 fixed_count += 1
 
         # Re-check for remaining 【待补充】 after fixes
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             ch_data = chapters.get(ch_num, {})
             if isinstance(ch_data, dict):
                 md = ch_data.get("markdown", "")
@@ -567,7 +539,7 @@ class QualityReviewAgent(BaseAgent):
         total_words = 0
         extracted_values = {}
 
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -706,7 +678,6 @@ class QualityReviewAgent(BaseAgent):
         """Run all cross-chapter consistency checks."""
         issues = []
         issues.extend(self._check_area_consistency(state, merged_data))
-        issues.extend(self._check_date_consistency(state))
         issues.extend(self._check_risk_score_consistency(state))
         issues.extend(self._check_org_consistency(state))
         issues.extend(self._check_project_name_consistency(state, merged_data))
@@ -734,34 +705,6 @@ class QualityReviewAgent(BaseAgent):
                     "message": f"面积数据不一致：{area_m2}㎡ ≈ {expected_mu}亩，但报告出现{area_mu}亩",
                     "suggestion": "manual_fix",
                 })
-
-        return issues
-
-    def _check_date_consistency(self, state: dict) -> List[Dict]:
-        """Check dates are consistent (公告期限7天 from April 13, 2026)."""
-        issues = []
-        chapters = state.get("chapters", {})
-
-        wrong_dates = [
-            (r'12天', '公告期限应为7天'),
-            (r'4月13日至4月24日', '公告期限应为4月13日-4月19日（7天）'),
-            (r'2026年[67]月', '日期月份错误，应为2026年4月'),
-        ]
-
-        for ch_num, ch_data in chapters.items():
-            if not isinstance(ch_data, dict):
-                continue
-            md = ch_data.get("markdown", "")
-            for pattern, msg in wrong_dates:
-                if re.search(pattern, md):
-                    issues.append({
-                        "chapter": ch_num,
-                        "type": "date_error",
-                        "severity": "critical",
-                        "message": f"第{ch_num}章：{msg}",
-                        "suggestion": "auto_fix",
-                        "pattern": pattern,
-                    })
 
         return issues
 
@@ -908,10 +851,19 @@ class QualityReviewAgent(BaseAgent):
         return issues
 
     def _check_org_consistency(self, state: dict) -> List[Dict]:
-        """Check implementing unit is consistently 江苏众拓."""
+        """检查「稳评实施单位」是否一致 —— 基准取**本报告所属公司**。
+
+        🔴 原先基准写死成江苏众拓，多租户下会**误报**：外部用户写自己的公司名
+           （比如「南京××咨询有限公司」）会被判成「单位错误」并被自动改写。
+           现在基准取 `filled_data.implement_unit`（该值在字段校验阶段已按公司填好）；
+           没有基准（外部用户还没填公司）就**不检查**。
+        """
+        correct = str(((state.get("filled_data") or {}).get("implement_unit")) or "").strip()
+        if not correct:
+            return []
+
         issues = []
         chapters = state.get("chapters", {})
-        correct = "江苏众拓项目代理咨询有限公司"
         wrong_cities = [
             "南京", "北京", "上海", "苏州", "无锡", "常州", "南通",
             "徐州", "扬州", "镇江", "泰州", "盐城", "连云港", "宿迁",
@@ -1211,7 +1163,7 @@ class QualityReviewAgent(BaseAgent):
             f"## 各章摘要\n"
         )
 
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             summary = chapter_summaries.get(ch_num, {})
             review_prompt += (
                 f"第{ch_num}章「{summary.get('title', '')}」："
@@ -1573,20 +1525,12 @@ class QualityReviewAgent(BaseAgent):
             new_md = re.sub(r'```json\s*[\s\S]*?```', '', new_md)
             fixed = new_md != markdown
 
-        elif issue_type == "date_error":
-            replacements = {
-                '12天': '7天',
-                '4月13日至4月24日': '4月13日至4月19日',
-                '2026年6月': '2026年4月',
-                '2026年7月': '2026年4月',
-            }
-            pattern = issue.get("pattern", "")
-            if pattern in replacements:
-                new_md = re.sub(pattern, replacements[pattern], new_md)
-                fixed = new_md != markdown
-
         elif issue_type == "org_name_error":
-            correct = "江苏众拓项目代理咨询有限公司"
+            # 🔴 基准取**本报告所属公司**，不再是写死的江苏众拓 ——
+            #    否则会把外部用户自己公司的名字「自动改正」成我们的。
+            correct = str(((state.get("filled_data") or {}).get("implement_unit")) or "").strip()
+            if not correct:
+                return False
             for city in ["南京", "北京", "上海", "苏州", "无锡"]:
                 new_md = re.sub(
                     rf'{city}[项目代理咨询有限公司|咨询有限公司]*',
@@ -1612,9 +1556,6 @@ class QualityReviewAgent(BaseAgent):
             # 🔴 口语化/AI味 + 年份错误自动修复
             # 口语化词替换成规范公文表达
             for pattern, replacement in self.STYLE_REPLACEMENTS:
-                new_md = re.sub(pattern, replacement, new_md)
-            # 年份错误统一为 2026
-            for pattern, replacement in self.YEAR_REPLACEMENTS:
                 new_md = re.sub(pattern, replacement, new_md)
             fixed = new_md != markdown
 

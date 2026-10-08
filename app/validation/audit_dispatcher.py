@@ -28,7 +28,7 @@ AI_REWRITE_TYPES: Set[str] = {
     "word_count", "missing_content", "missing_pattern",
     "style_or_data_issue", "score_out_of_range", "score_inconsistency",
     "hallucinated_regulation", "expert_skill_violation", "empty_section",
-    "over_description", "duplicate_heading", "date_error",
+    "over_description", "duplicate_heading",
     "support_rate_inconsistency", "oppose_rate_nonzero",
     "data_validity", "invalid_range", "missing_reference",
     "missing_table", "table_incomplete", "table_format",

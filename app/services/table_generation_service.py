@@ -137,15 +137,26 @@ class TableGenerationService:
         # Extract survey stats from all available sources
         stats = survey_stats or cls._extract_public_survey_stats(state)
 
+        # 🔴 题面照抄《稳评问卷调查表》表格第一列原文（唯一事实源），
+        #    不得概括改写（业主评审要求统计表题目与实际发放问卷逐字一致）。
+        try:
+            from app.services.questionnaire_parser import PUBLIC_QUESTION_TEXTS as _QTEXT
+        except Exception:
+            _QTEXT = {
+                "identity": "您是", "age": "您的年龄", "occupation": "您的职业",
+                "awareness": "您是否了解本决策", "attitude": "对该决策是否支持",
+                "resolution": "您会采取何种方式解决诉求",
+            }
+
         # Build rows with evidence annotations
         rows = []
         data_source_notes = []
 
         # ── Section 1: Respondent Identity ──
-        identity_question = "请问您是？"
+        identity_question = _QTEXT.get("identity", "您是")
         identity_options = [
             ("本地居民", stats.identity_groups.get("本地居民", 0)),
-            ("租住本地", stats.identity_groups.get("租住本地", 0)),
+            ("租住本区", stats.identity_groups.get("租住本区", 0)),
             ("附近上班", stats.identity_groups.get("附近上班", 0)),
             ("路过", stats.identity_groups.get("路过", 0)),
         ]
@@ -154,20 +165,24 @@ class TableGenerationService:
             rows.append([identity_question, opt, str(count), pct])
 
         # ── Section 2: Age Distribution ──
-        age_question = "请问您的年龄是？"
+        age_question = _QTEXT.get("age", "您的年龄")
+        # 🔴 年龄选项**照抄问卷印刷体**：原件印的是「16～35」「36～55」「56 以上」（无「岁」）。
+        #    实测写死「16～35岁」会让表与问卷原件不一致（业主逐字核对会挑刺）。
+        #    取数键同时兼容旧数据形态；数据入口侧 `canon_public_groups` 已统一归一。
+        _ag = stats.age_groups or {}
         age_options = [
-            ("16~35岁", stats.age_groups.get("16~35", 0)),
-            ("36~55岁", stats.age_groups.get("36~55", 0)),
-            ("56岁以上", stats.age_groups.get("56以上", 0)),
+            ("16～35", _ag.get("16～35", _ag.get("16~35", 0))),
+            ("36～55", _ag.get("36～55", _ag.get("36~55", 0))),
+            ("56 以上", _ag.get("56 以上", _ag.get("56以上", 0))),
         ]
         for opt, count in age_options:
             pct = f"{count / max(stats.total_samples, 1) * 100:.2f}%" if stats.total_samples > 0 else "[待分析]"
             rows.append([age_question, opt, str(count), pct])
 
         # ── Section 3: Occupation ──
-        occ_question = "请问您的职业是？"
+        occ_question = _QTEXT.get("occupation", "您的职业")
         occ_options = [
-            ("机关事业单位", stats.occupation_groups.get("机关事业", 0)),
+            ("机关事业", stats.occupation_groups.get("机关事业", 0)),
             ("企业", stats.occupation_groups.get("企业", 0)),
             ("待业", stats.occupation_groups.get("待业", 0)),
             ("其他", stats.occupation_groups.get("其他", 0)),
@@ -177,20 +192,23 @@ class TableGenerationService:
             rows.append([occ_question, opt, str(count), pct])
 
         # ── Section 4: Awareness ──
-        awareness_q = "您对本决策的了解程度是？"
-        for opt, count in stats.awareness_levels.items():
+        awareness_q = _QTEXT.get("awareness", "您是否了解本决策")
+        for opt in ["了解", "不了解"]:
+            count = stats.awareness_levels.get(opt, 0)
             pct = f"{count / max(stats.total_samples, 1) * 100:.2f}%" if stats.total_samples > 0 else "[待分析]"
             rows.append([awareness_q, opt, str(count), pct])
 
         # ── Section 5: Attitude ──
-        attitude_q = "您对本决策实施的基本态度是？"
-        for opt, count in stats.attitude_options.items():
+        attitude_q = _QTEXT.get("attitude", "对该决策是否支持")
+        for opt in ["支持", "无所谓", "有条件支持", "反对", "强烈反对"]:
+            count = stats.attitude_options.get(opt, 0)
             pct = f"{count / max(stats.total_samples, 1) * 100:.2f}%" if stats.total_samples > 0 else "[待分析]"
             rows.append([attitude_q, opt, str(count), pct])
 
         # ── Section 6: Resolution Method ──
-        resolution_q = "如果您有诉求，会采取何种方式解决？"
-        for opt, count in stats.resolution_methods.items():
+        resolution_q = _QTEXT.get("resolution", "您会采取何种方式解决诉求")
+        for opt in ["调解", "诉讼", "正常反映", "其他"]:
+            count = stats.resolution_methods.get(opt, 0)
             pct = f"{count / max(stats.total_samples, 1) * 100:.2f}%" if stats.total_samples > 0 else "[待分析]"
             rows.append([resolution_q, opt, str(count), pct])
 
@@ -207,12 +225,13 @@ class TableGenerationService:
 
         return {
             "caption": "表3-1 公众意见调查分析表",
-            "headers": ["调查内容", "选项", "人数（人）", "比例（%）"],
+            "headers": ["调查内容", "选项", "个数", "比例"],
             "rows": rows,
             "summary": summary,
             "data_source": "；".join(data_source_notes),
             "total_samples": stats.total_samples,
             "support_rate": stats.support_rate,
+            "merge_first_col": True,  # 🔴 第一列题目纵向合并（模板样式）
         }
 
     # ═══════════════════════════════════════════════════════════════════
@@ -239,34 +258,44 @@ class TableGenerationService:
         generated = state.get("generated_sections", {})
         survey_analysis = generated.get("survey_analysis", {})
 
+        # 🔴 题面照抄《…（部门）问卷调查表》题干原文（唯一事实源 DEPT_QUESTION_TEXTS），
+        #    不得概括改写（业主评审要求统计表题目与实际发放问卷逐字一致）。
+        try:
+            from app.services.questionnaire_parser import DEPT_QUESTION_TEXTS as _DQTEXT
+        except Exception:
+            _DQTEXT = {}
+        location = cls._extract_location(state)
+
+        def _dq(key: str, fallback: str) -> str:
+            return str(_DQTEXT.get(key) or fallback).replace("{location}", location)
+
         rows = []
         data_source_notes = []
         total = max(stats.total_units, 1)
 
         # ── Section 1: Decision Awareness ──
-        q1 = "贵单位对本决策的了解程度如何？"
+        q1 = _dq("awareness", "贵单位对本决策的了解程度如何？（单选）")
         for opt in ["了解", "了解一些", "不了解"]:
             count = stats.awareness.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
             rows.append([q1, opt, str(count), pct])
 
         # ── Section 2: Publicity Satisfaction ──
-        q2 = "贵单位对政府的征地宣传、公示等工作是否满意？"
+        q2 = _dq("publicity_satisfaction", "贵单位对政府的征地宣传、公示等工作是否满意？（单选）")
         for opt in ["很满意", "满意", "基本满意", "不满意"]:
             count = stats.publicity_satisfaction.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
             rows.append([q2, opt, str(count), pct])
 
         # ── Section 3: Policy Understanding ──
-        location = cls._extract_location(state)
-        q3 = f"贵单位对{location}补偿安置政策的了解程度？"
+        q3 = _dq("policy_understanding", "贵单位对{location}征地补偿安置政策了解？（单选）")
         for opt in ["了解", "了解一些", "不了解"]:
             count = stats.policy_understanding.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
             rows.append([q3, opt, str(count), pct])
 
         # ── Section 4: Main Concerns ──
-        q4 = "贵单位所关心的决策主要事项是？（可多选）"
+        q4 = _dq("concerns", "贵单位所关心的决策主要事项是？（多选）")
         concern_opts = [
             ("征地用途", "征地用途"),
             ("征地范围", "征地范围"),
@@ -280,21 +309,21 @@ class TableGenerationService:
             rows.append([q4, opt_label, str(count), pct])
 
         # ── Section 5: Risk Level Assessment ──
-        q5 = "贵单位或部门认为本决策实施的社会稳定风险等级是？"
+        q5 = _dq("risk_assessment", "贵单位或部门认为本决策实施的社会稳定风险等级是？（单选）")
         for opt in ["高风险", "中风险", "低风险"]:
             count = stats.risk_assessment.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
             rows.append([q5, opt, str(count), pct])
 
         # ── Section 6: Stability Confidence ──
-        q6 = "在本决策实施全过程中，贵单位或部门对内部保持稳定是否有信心？"
+        q6 = _dq("stability_confidence", "在本决策实施全过程中，贵单位或部门对内部保持稳定是否有信心？（单选）")
         for opt in ["有信心", "在上级党委政府的支持下比较有信心", "不确定", "无信心"]:
             count = stats.stability_confidence.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
             rows.append([q6, opt, str(count), pct])
 
         # ── Section 7: Support Attitude ──
-        q7 = "贵单位对本决策实施的基本态度是？"
+        q7 = _dq("support_attitude", "贵单位对本决策实施的基本态度是？（单选）")
         for opt in ["支持", "无所谓", "反对"]:
             count = stats.support_attitude.get(opt, 0)
             pct = f"{count / total * 100:.1f}%" if stats.total_units > 0 else "[待分析]"
@@ -311,12 +340,13 @@ class TableGenerationService:
         summary = cls._build_dept_survey_summary(stats)
 
         return {
-            "caption": "表3-3 部门意见调查分析表",
-            "headers": ["调查内容", "选项", "个数（个）", "比例（%）"],
+            "caption": "表3-2 部门意见调查分析表",
+            "headers": ["调查内容", "选项", "个数", "比例"],
             "rows": rows,
             "summary": summary,
             "data_source": "；".join(data_source_notes),
             "total_units": stats.total_units,
+            "merge_first_col": True,  # 🔴 第一列题目纵向合并（模板样式）
         }
 
     # ═══════════════════════════════════════════════════════════════════
@@ -975,17 +1005,19 @@ class TableGenerationService:
         generated = state.get("generated_sections", {})
         survey_analysis = generated.get("survey_analysis", {})
 
-        if isinstance(survey_analysis, dict):
+        # 🔴 优先读取已核验部门问卷（survey_data.dept_survey_analysis）
+        dept_data = generated.get("dept_survey_analysis", {}) or {}
+        if not dept_data and isinstance(survey_analysis, dict):
             dept_data = survey_analysis.get("department_survey", {}) or survey_analysis.get("单位问卷", {})
-            if dept_data:
-                stats.total_units = dept_data.get("total_units", 0) or dept_data.get("单位总数", 0)
-                stats.awareness = dept_data.get("awareness", {}) or dept_data.get("了解程度", {})
-                stats.publicity_satisfaction = dept_data.get("publicity_satisfaction", {}) or dept_data.get("宣传满意度", {})
-                stats.policy_understanding = dept_data.get("policy_understanding", {}) or dept_data.get("政策了解", {})
-                stats.concerns = dept_data.get("concerns", {}) or dept_data.get("关注事项", {})
-                stats.risk_assessment = dept_data.get("risk_assessment", {}) or dept_data.get("风险评估", {})
-                stats.stability_confidence = dept_data.get("stability_confidence", {}) or dept_data.get("稳定信心", {})
-                stats.support_attitude = dept_data.get("support_attitude", {}) or dept_data.get("支持态度", {})
+        if dept_data:
+            stats.total_units = dept_data.get("total_units", 0) or dept_data.get("单位总数", 0)
+            stats.awareness = dept_data.get("awareness", {}) or dept_data.get("了解程度", {})
+            stats.publicity_satisfaction = dept_data.get("publicity_satisfaction", {}) or dept_data.get("宣传满意度", {})
+            stats.policy_understanding = dept_data.get("policy_understanding", {}) or dept_data.get("政策了解", {})
+            stats.concerns = dept_data.get("concerns", {}) or dept_data.get("关注事项", {})
+            stats.risk_assessment = dept_data.get("risk_assessment", {}) or dept_data.get("风险评估", {})
+            stats.stability_confidence = dept_data.get("stability_confidence", {}) or dept_data.get("稳定信心", {})
+            stats.support_attitude = dept_data.get("support_attitude", {}) or dept_data.get("支持态度", {})
 
         return stats
 
@@ -1107,67 +1139,3 @@ class TableGenerationService:
 # LLM-Enhanced Table Generation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class LLMTableGenerator:
-    """Uses LLM + RAG to enhance table generation with professional context.
-
-    When survey data is incomplete or needs professional interpretation,
-    this generator queries the knowledge base and uses LLM reasoning to
-    produce evidence-backed table content.
-    """
-
-    @staticmethod
-    async def enhance_survey_table(
-        table_data: Dict[str, Any],
-        state: dict,
-        llm_service=None,
-    ) -> Dict[str, Any]:
-        """Enhance survey table with LLM analysis of survey images and RAG context.
-
-        Args:
-            table_data: Raw table data from TableGenerationService
-            state: Agent state with RAG context
-            llm_service: LLM service instance
-
-        Returns:
-            Enhanced table data with LLM-generated analysis
-        """
-        if llm_service is None:
-            return table_data
-
-        # Check if we need LLM enhancement
-        rows = table_data.get("rows", [])
-        has_empty = any("[待分析]" in str(cell) for row in rows for cell in row)
-
-        if not has_empty:
-            return table_data
-
-        # Build prompt for LLM
-        caption = table_data.get("caption", "")
-        rag_context = state.get("last_rag_results", {})
-
-        prompt = f"""你是社会稳定风险评估专家。请根据以下信息完善调查分析表格。
-
-表格类型：{caption}
-当前状态：部分数据标注为[待分析]，需要基于知识库和历史报告进行专业推断。
-
-知识库参考：
-{rag_context}
-
-要求：
-1. 对于标注[待分析]的单元格，基于知识库中同类项目的典型数据给出合理估计值
-2. 在表格末尾添加注释说明哪些数据是估算的
-3. 保持数据内部一致性（如：支持率+反对率+无所谓=100%）
-4. 标注数据来源为"基于知识库同类项目估计"
-
-请以JSON格式返回完善后的表格数据。"""
-
-        try:
-            response = await llm_service.chat(prompt)
-            # Parse LLM response and merge with original data
-            # (Implementation depends on LLM response format)
-            table_data["llm_enhanced"] = True
-            table_data["llm_note"] = "部分数据由AI基于知识库同类项目推断，仅供参考"
-        except Exception as e:
-            logger.warning(f"LLM table enhancement failed: {e}")
-
-        return table_data

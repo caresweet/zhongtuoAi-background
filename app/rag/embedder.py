@@ -25,15 +25,11 @@ class EmbedderService:
         api_key: Optional[str] = None,
     ):
         from app.config import settings as _settings
-        self.api_url = api_url or os.getenv(
-            "EMBEDDING_API_URL",
-            _settings.LLM_BASE_URL or _settings.EMBEDDING_API_URL or ""
-        )
-        self.model = model or os.getenv("EMBEDDING_MODEL", _settings.EMBEDDING_MODEL)
-        self.api_key = api_key or os.getenv(
-            "EMBEDDING_API_KEY",
-            _settings.ANTHROPIC_API_KEY or ""
-        )
+        # 🔴 优先 settings.EMBEDDING_*（.env 已注入），不要回退到 LLM_BASE_URL/ANTHROPIC
+        # （deepseek 无 /embeddings，会导致 404 + 每次降级 fallback）。
+        self.api_url = api_url or os.getenv("EMBEDDING_API_URL") or _settings.EMBEDDING_API_URL or ""
+        self.model = model or os.getenv("EMBEDDING_MODEL") or _settings.EMBEDDING_MODEL or "text-embedding-3-large"
+        self.api_key = api_key or os.getenv("EMBEDDING_API_KEY") or _settings.EMBEDDING_API_KEY or ""
         self.dimensions: Optional[int] = None
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:

@@ -16,6 +16,9 @@ __pycache__/
 data/
 storage/
 
+# 运行日志（排查问题用，不进版本库）
+logs/
+
 # 生成物
 kb_engine/output/
 seed_data/crawled_reports/

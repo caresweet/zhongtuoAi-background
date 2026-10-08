@@ -16,6 +16,10 @@ import io
 import base64
 import asyncio
 from pathlib import Path
+
+# 🔴 磁盘缓存版本号：提取逻辑升级（如新增图片提取）时递增，
+# 使旧的（extracted_images 为空等）缓存自动失效，避免返回过期结果。
+CACHE_VERSION = 3
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -48,33 +52,23 @@ class PDFDocumentData:
 
 # ── OCR Prompt Templates ──
 
-ANNOUNCEMENT_OCR_PROMPT = """请精确提取这份征收土地预公告的所有文字内容。
+ANNOUNCEMENT_OCR_PROMPT = """请**逐字**提取这份征收土地预公告的**全部文字**（OCR 转写，禁止摘要、禁止省略、禁止概括）。
 
-这是一份官方政府公告，请提取：
-1. 公告标题和文号
-2. 征收目的（完整段落）
-3. 征收范围（完整段落，包含所有村组名称）
-4. 土地面积和地类
-5. 公示时间和期限
-6. 责任单位名称
-7. 联系人、联系电话
-8. 公告发布日期
-9. 所有落款和盖章信息
-10. 公告编号
+🔴 第一要务：`full_text` 必须是公告**全文逐字转写**——标题、文号、正文每一段、征收范围里的所有村组名称、面积地类数字、公示期限、责任单位、联系人电话、发布日期、落款与盖章文字，**一字不漏**照抄。找不到的不写，绝不编造。
 
-请以JSON格式输出：
+请以 JSON 输出，**`full_text` 放在最前面**（避免被截断）：
 {
+  "full_text": "公告完整文字内容（逐字逐行，不省略、不概括）",
   "title": "公告标题",
   "doc_ref": "文号",
   "purpose": "征收目的完整段落",
   "scope": "征收范围完整段落",
-  "area": "面积信息",
-  "land_types": "地类信息",
+  "area": "面积信息（原文照抄，无则写「未列明」）",
+  "land_types": "地类信息（原文照抄，无则写「未列明」）",
   "announcement_period": "公示期限",
   "responsible_unit": "责任单位",
   "contact": "联系方式",
-  "publish_date": "发布日期",
-  "full_text": "公告完整文字内容（逐行）"
+  "publish_date": "发布日期"
 }"""
 
 SURVEY_REPORT_OCR_PROMPT = """请精确提取这份勘测定界报告的表格数据。
@@ -88,8 +82,9 @@ SURVEY_REPORT_OCR_PROMPT = """请精确提取这份勘测定界报告的表格�
 6. 土地分类面积表中的各权属单位及其面积数据
 7. 勘测定界单位名称
 
-输出JSON：
+输出JSON（`full_text` 放最前，必须逐字全文）：
 {
+  "full_text": "报告完整文字（逐字，含表格文字）",
   "plot_number": "",
   "location": "",
   "land_use": "",
@@ -113,8 +108,9 @@ MEETING_OCR_PROMPT = """请提取这份座谈会记录/签到表的内容。
    - 支持率、反对率、知晓率（百分比数值）
    - 各选项的人数分布
 
-输出JSON：
+输出JSON（`full_text` 放最前，必须逐字全文）：
 {
+  "full_text": "座谈会记录/签到表完整文字（逐字，不省略）",
   "meeting_date": "",
   "meeting_location": "",
   "attendees": "",
@@ -129,13 +125,13 @@ MEETING_OCR_PROMPT = """请提取这份座谈会记录/签到表的内容。
   "awareness_rate": "知晓率（无则空）"
 }"""
 
-GENERAL_OCR_PROMPT = """请精确提取这份文档的所有文字内容。
+GENERAL_OCR_PROMPT = """请**逐字**提取这份文档的**全部文字**（OCR 转写，禁止摘要、禁止省略）。
 
-识别文档类型，提取所有文字信息。如果是表格，提取表格数据。
-输出JSON：
+🔴 `full_text` 必须是**逐字全文**，放在最前面（避免被截断）；识别文档类型并抽取关键信息，抽不到不编造。
+输出 JSON：
 {
+  "full_text": "完整文字内容（逐字逐行，不省略）",
   "document_type": "文档类型",
-  "full_text": "完整文字内容",
   "key_info": {"关键词": "值"}
 }"""
 
@@ -175,7 +171,7 @@ class PDFDataExtractor:
             return ""
 
     def _load_disk_cache(self, pdf_path: str) -> Optional[PDFDocumentData]:
-        """从磁盘加载 OCR 缓存。"""
+        """从磁盘加载 OCR 缓存。缓存带版本号，版本不符（代码升级）视为未命中。"""
         dk = self._disk_cache_key(pdf_path)
         if not dk:
             return None
@@ -185,12 +181,23 @@ class PDFDataExtractor:
         try:
             import pickle
             with open(cache_file, 'rb') as f:
-                return pickle.load(f)
+                payload = pickle.load(f)
+            # 旧格式（无版本号，直接是 PDFDocumentData）→ 视为版本不符，重新提取
+            if isinstance(payload, tuple) and len(payload) == 2 and payload[0] == CACHE_VERSION:
+                data = payload[1]
+                # 🔴 缓存命中但图片为空 → 重新提取图片（旧缓存常见，升级后自动补）
+                if isinstance(data, PDFDocumentData) and not data.extracted_images:
+                    try:
+                        data.extracted_images = self._extract_images_from_pdf(pdf_path, data.document_type)
+                    except Exception:
+                        pass
+                return data
+            return None
         except Exception:
             return None
 
     def _save_disk_cache(self, pdf_path: str, data: PDFDocumentData):
-        """把 OCR 结果保存到磁盘。"""
+        """把 OCR 结果保存到磁盘（带版本号）。"""
         dk = self._disk_cache_key(pdf_path)
         if not dk:
             return
@@ -198,7 +205,7 @@ class PDFDataExtractor:
             import pickle
             cache_file = self._cache_dir() / f"{dk}.pkl"
             with open(cache_file, 'wb') as f:
-                pickle.dump(data, f)
+                pickle.dump((CACHE_VERSION, data), f)
             print(f"    💾 OCR 缓存已保存: {cache_file.name}")
         except Exception:
             pass
@@ -237,8 +244,20 @@ class PDFDataExtractor:
         # 🔴 磁盘缓存：跨 session 持久化，同文件直接复用
         disk_cached = self._load_disk_cache(pdf_path)
         if disk_cached is not None:
-            print(f"    💿 OCR 缓存命中: {Path(pdf_path).name}")
-            return disk_cached
+            # 🔴 图片提取是本地廉价操作（PyMuPDF 渲染，无 LLM），
+            # 每次缓存命中都刷新 extracted_images，杜绝"缓存里残留旧/空图片结果"。
+            # 只有贵的 OCR 文本才值得被缓存复用。
+            try:
+                disk_cached.extracted_images = self._extract_images_from_pdf(pdf_path, disk_cached.document_type)
+            except Exception:
+                pass
+            # 🔴 若缓存是"无 LLM 时保存的降级结果"（扫描页 OCR 为空），
+            # 而现在有 LLM → 丢弃缓存，走完整 OCR 流程，避免一直拿空文本。
+            if self._is_degraded(disk_cached):
+                print(f"    ⚠️ 缓存为无LLM时保存（扫描页OCR为空），重新OCR: {Path(pdf_path).name}")
+            else:
+                print(f"    💿 OCR 缓存命中: {Path(pdf_path).name}")
+                return disk_cached
         # 🔴 内存缓存（同 session 内）
         cache_key = f"{pdf_path}:{_os.path.getmtime(pdf_path) if _os.path.exists(pdf_path) else 0}"
         if cache_key in self._cache:
@@ -289,8 +308,16 @@ class PDFDataExtractor:
             _log_ocr.getLogger(__name__).info(
                 f"Starting concurrent OCR for {len(ocr_tasks)} scanned pages..."
             )
+            # 🔴 并发限制 + 单页超时：防止大批量扫描页（如54页）无上限并发打挂视觉网关，
+            # 或单个页面请求挂起导致整批 gather 永远不返回（生成卡住）。
+            ocr_sem = asyncio.Semaphore(4)
+            async def _ocr_one(pdf_path, pn, doc_type, sem):
+                async with sem:
+                    return await asyncio.wait_for(
+                        self._ocr_page(pdf_path, pn, doc_type), timeout=120.0
+                    )
             ocr_results = await asyncio.gather(
-                *[self._ocr_page(pdf_path, pn, doc_data.document_type) for pn, _ in ocr_tasks],
+                *[_ocr_one(pdf_path, pn, doc_data.document_type, ocr_sem) for pn, _ in ocr_tasks],
                 return_exceptions=True,
             )
             for (page_num, page_data), ocr_text in zip(ocr_tasks, ocr_results):
@@ -339,8 +366,31 @@ class PDFDataExtractor:
 
         # 🔴 Cache result（内存 + 磁盘）
         self._cache[cache_key] = doc_data
-        self._save_disk_cache(pdf_path, doc_data)
+        # 🔴 降级结果（无 LLM 时扫描页 OCR 为空）不落盘，
+        # 避免污染后续带 LLM 的调用（拿不到真实 OCR 文本）。
+        if not self._is_degraded(doc_data):
+            self._save_disk_cache(pdf_path, doc_data)
+        else:
+            print(f"    ⚠️ 无LLM扫描页OCR为空，跳过磁盘缓存（避免污染）: {Path(pdf_path).name}")
         return doc_data
+
+    def _is_degraded(self, doc) -> bool:
+        """判断提取结果是否"降级"：存在扫描页但 OCR 文本为空。
+
+        多发生在保存时无 LLM 服务可用（扫描页无法 OCR），
+        这样的结果不应写入磁盘缓存复用。
+        """
+        if not isinstance(doc, PDFDocumentData) or not doc.pages:
+            return False
+        scanned = [p for p in doc.pages if getattr(p, "is_scanned", False)]
+        if not scanned:
+            return False
+        # 🔴 OCR 结果为空 → 降级；或 OCR 结果是 JSON 摘要块（而非逐字全文）→ 也算降级，
+        #    让新 prompt（full_text 在前、要求逐字全文）重新 OCR，避免 JSON 摘要进报告。
+        def _bad(t):
+            t = (t or "").strip()
+            return (not t) or t.startswith("{") or t.startswith("```")
+        return all(_bad(getattr(p, "ocr_text", "")) for p in scanned)
 
     # ── Text extraction (pdfplumber) ──
 
@@ -390,7 +440,7 @@ class PDFDataExtractor:
                     text=prompt,
                     image_base64=img_base64,
                     media_type=media_type,
-                    max_tokens=4096,
+                    max_tokens=8192,  # 🔴 提高上限，保证 full_text 逐字全文不被截断
                 )
 
                 # Try to extract JSON or text from response
@@ -486,12 +536,13 @@ class PDFDataExtractor:
                         filename = f"pdf_{safe_name}_p{page_num+1}_img{img_idx}.{img_ext}"
                         filepath = images_dir / filename
 
-                        # Avoid duplicates
+                        # Avoid duplicates: 已存在则直接复用路径（图片仍可用，返回给调用方）
+                        relative = f"images/{filename}"
                         if filepath.exists():
+                            saved_paths.append(relative)
                             continue
 
                         filepath.write_bytes(img_bytes)
-                        relative = f"images/{filename}"
                         saved_paths.append(relative)
 
                     except Exception as e:
@@ -519,12 +570,13 @@ class PDFDataExtractor:
                         safe_name = re.sub(r'[\\/:*?"<>|]', '_', doc_basename)
                         filename = f"pdf_{safe_name}_page{page_num+1}.png"
                         filepath = images_dir / filename
+                        relative = f"images/{filename}"
 
                         if filepath.exists():
+                            saved_paths.append(relative)
                             continue
 
                         filepath.write_bytes(img_bytes)
-                        relative = f"images/{filename}"
                         saved_paths.append(relative)
 
                     except Exception:
@@ -557,6 +609,12 @@ class PDFDataExtractor:
         tables = []
         try:
             import pdfplumber
+
+            # 🔴 勘测定界报告：用专门的解析器一次性产出「地块汇总表 + 土地分类面积表」，
+            #    比逐页横排流提取可靠；命中即整份返回，不再走逐页残缺副本。
+            kd_tables = self._kd_tables(pdf_path)
+            if kd_tables:
+                return kd_tables
 
             with pdfplumber.open(pdf_path) as pdf:
                 for page_num, page in enumerate(pdf.pages):
@@ -608,12 +666,39 @@ class PDFDataExtractor:
             print(f"    ⚠️ Table extraction error: {e}")
             return []
 
+    def _kd_tables(self, pdf_path: str) -> List[Dict[str, Any]]:
+        """用勘测定界专门解析器产出规范表格（地块汇总表 + 土地分类面积表）。
+
+        返回 list[dict]（非勘测定界报告时为空列表）。
+
+        🔴 **不再自己拼一份**：这里以前手写了一遍和 `land_survey_parser.to_extracted_tables()`
+           几乎相同的转换，只有表题不同（这里「表3-1」、那边「表6-1」）——
+           于是同一份材料会产出**同表头、不同表题**的两份表，
+           去重按表头签名做，谁活下来**取决于调用顺序**，报告里的表号就飘。
+           现在只此一处来源：直接复用解析器的产物。
+        """
+        try:
+            from app.services.land_survey_parser import parse_land_survey, to_extracted_tables
+            parsed = parse_land_survey(pdf_path)
+            if not parsed:
+                return []
+            return [{**t, "page": 1, "table_index": i}
+                    for i, t in enumerate(to_extracted_tables(parsed))]
+        except Exception as e:
+            print(f"    ⚠️ 勘测定界解析失败: {e}")
+            return []
+
     def _extract_text_from_vl_response(self, response: str) -> str:
         """Extract usable text content from VL model JSON response."""
         # Try JSON first
         try:
-            import json
-            data = json.loads(response)
+            import json, re as _re
+            _resp = (response or "").strip()
+            # 🔴 去掉 ```json ... ``` 围栏：否则 json.loads 失败 → 整个 JSON 被当正文塞进报告
+            _m = _re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', _resp)
+            if _m:
+                _resp = _m.group(1).strip()
+            data = json.loads(_resp)
             # If it has full_text, return that
             if data.get("full_text"):
                 return data["full_text"]
@@ -833,23 +918,12 @@ class PDFDataExtractor:
         """
         fillable = {}
 
-        if doc_data.document_type == "announcement":
-            # Use structured data fields for clean paragraph text
-            key_data = doc_data.key_data
+        # 注：预公告（announcement）不再在此解析。
+        #     公告正文（征收目的/范围/期限/工作安排/其他事项/法律依据…）统一由
+        #     `app/services/announcement_extract.parse_announcement()` 从逐字文本解析，
+        #     避免两套逻辑各抽一半、互相不一致。
 
-            if key_data.get("purpose_text"):
-                fillable["purpose_paragraph"] = str(key_data["purpose_text"])
-            if key_data.get("scope_text"):
-                fillable["scope_paragraph"] = str(key_data["scope_text"])
-
-            # Also check page-level structured data
-            for page in doc_data.pages:
-                for key in ["purpose", "scope", "full_text"]:
-                    val = page.structured_data.get(key)
-                    if val and key not in fillable and len(str(val)) > 50:
-                        fillable[f"{key}_paragraph"] = str(val)
-
-        elif doc_data.document_type == "meeting":
+        if doc_data.document_type == "meeting":
             key_data = doc_data.key_data
             if key_data.get("public_demands"):
                 fillable["public_demands_paragraph"] = str(key_data["public_demands"])

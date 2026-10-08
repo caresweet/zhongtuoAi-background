@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 
 @dataclass
@@ -209,7 +210,7 @@ class ReportDiffEngine:
             ),
             "10章结构": all(
                 f"第{ch}章" in gen_text or f"{ch}拟征收" in gen_text
-                for ch in range(1, 11)
+                for ch in ALL_CHAPTERS
             ) or True,  # Template may use different numbering
             "关键术语存在": all(
                 term in gen_text

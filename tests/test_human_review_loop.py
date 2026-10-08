@@ -80,89 +80,61 @@ def test_global_human_items_not_mapped_to_chapter():
 # 场景1：skill 命中违规，单章多次重试失败 → 推入人工队列（独立重试计数）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _mk_review_state(short_md="内容"):
-    """构造 node_chapter_review 的最小状态：单章、内容过短必然触发 issues。"""
-    return {
-        "outline_list": [{"chapter_no": "6", "title": "措施前风险等级研判",
-                          "raw_content": short_md, "review_msg": "", "review_score": None}],
-        "_chapter_idx": 0, "_chapter_retry": 0,
-        "chapters": {}, "human_items": {}, "human_queue": [], "logs": [],
-        "filled_data": {}, "max_retry": MAX_RETRY,
-    }
+# ═══════════════════════════════════════════════════════════════════════════════
+# 场景1：需人工介入的章节 → 推入人工队列（当前实现：push_human_chapters）
+#
+# 说明：旧的逐章审核节点 node_chapter_review 已随「逐章硬规则审核层」移除，
+# 人工入队现统一发生在 node_quality_review（终稿审核）阶段，
+# 入队逻辑收敛为 push_human_chapters()，此处直接对该函数做行为测试。
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def test_scene1_retry_exhausted_pushes_human_queue(monkeypatch):
-    """人工复核开启时：第6章重试耗尽 → 推入人工队列。"""
+def test_human_chapters_pushed_to_queue_when_enabled(monkeypatch):
+    """人工复核开启：需人工介入的章节推入人工队列，状态置 queued。"""
     from app.services import report_workflow as wf
     monkeypatch.setattr(wf, "ENABLE_HUMAN_REVIEW", True)
 
-    async def _run():
-        state = _mk_review_state(short_md="内容太短")   # <300字 → 必然 issues
+    state = {"human_items": {}, "human_queue": [], "logs": []}
+    added = wf.push_human_chapters(state, [6])
 
-        # 第 1 次审查：还有重试机会 → AI 重写本章
-        await wf.node_chapter_review(state)
-        hi = state["human_items"][6]
-        assert hi["retry_count"] == 1
-        assert hi["in_human_queue"] is False
-        assert state["_next_action"] == "generate"       # 回生成重写
-        assert 6 not in state["human_queue"]
+    hi = state["human_items"][6]
+    assert hi["in_human_queue"] is True
+    assert hi["status"] == "queued"
+    assert hi["retry_count"] == wf.MAX_RETRY
+    assert 6 in state["human_queue"]
+    assert added == [6]
 
-        # 第 2 次审查：本章重试耗尽 → 推入人工队列
-        await wf.node_chapter_review(state)
-        hi = state["human_items"][6]
-        assert hi["retry_count"] == MAX_RETRY
-        assert hi["in_human_queue"] is True
-        assert hi["status"] == "queued"
-        assert 6 in state["human_queue"]
-        assert state["chapters"][6]["status"] == "human_review"
-
-        # 验证不再消耗全局轮次相关字段（_quality_round 未被动过）
-        assert state.get("_quality_round", 0) == 0
-        return state
-    asyncio.run(_run())
+    # 幂等：重复入队不产生重复项
+    again = wf.push_human_chapters(state, [6])
+    assert state["human_queue"] == [6]
+    assert again == []
 
 
-def test_scene1_retry_exhausted_agent_generates_when_human_disabled(monkeypatch):
-    """人工复核关闭（默认）：第6章重试耗尽 → 不入队、不暂停，agent 自行生成。"""
+def test_human_queue_multi_chapter_and_independent(monkeypatch):
+    """多章同时入队互不影响；每章各自维护状态。"""
+    from app.services import report_workflow as wf
+    monkeypatch.setattr(wf, "ENABLE_HUMAN_REVIEW", True)
+
+    state = {"human_items": {}, "human_queue": []}
+    added = wf.push_human_chapters(state, [6, 8, 11])
+    assert sorted(state["human_queue"]) == [6, 8, 11]
+    assert sorted(added) == [6, 8, 11]
+    assert all(state["human_items"][c]["in_human_queue"] for c in (6, 8, 11))
+
+    # 单章审批通过不影响其它章
+    state["human_items"][6]["human_approved"] = True
+    assert state["human_items"][8]["human_approved"] is False
+
+
+def test_human_disabled_chapters_not_queued(monkeypatch):
+    """人工复核关闭（默认）：节点不得调用入队逻辑，队列保持为空。"""
     from app.services import report_workflow as wf
     monkeypatch.setattr(wf, "ENABLE_HUMAN_REVIEW", False)
 
-    async def _run():
-        state = _mk_review_state(short_md="内容太短")
-
-        await wf.node_chapter_review(state)   # 第1次：重试
-        assert state["human_items"][6]["retry_count"] == 1
-
-        await wf.node_chapter_review(state)   # 第2次：耗尽 → agent 自行生成
-        hi = state["human_items"][6]
-        assert hi["retry_count"] == MAX_RETRY
-        assert hi["in_human_queue"] is False          # 不入人工队列
-        assert 6 not in state.get("human_queue", [])
-        assert hi["status"] == "auto_generated"
-        assert state["chapters"][6]["status"] == "generated_with_issues"
-        assert state["_next_action"] in ("generate", "quality_review")  # 继续流程不暂停
-        return state
-    asyncio.run(_run())
-
-
-def test_scene1_per_chapter_retry_is_independent():
-    """第5章通过不影响第6章的重试计数（每章独立维护 retry_count）。"""
-    from app.services import report_workflow as wf
-
-    async def _run():
-        state = _mk_review_state()
-        state["outline_list"] = [
-            {"chapter_no": "5", "title": "风险因素识别", "raw_content": "x" * 500,
-             "review_msg": "", "review_score": None},
-            {"chapter_no": "6", "title": "措施前研判", "raw_content": "短",
-             "review_msg": "", "review_score": None},
-        ]
-        # 第5章（idx=0）通过
-        await wf.node_chapter_review(state)
-        assert state["human_items"][5]["status"] == "passed"
-        assert state["human_items"].get(6, {}).get("retry_count", 0) == 0  # 第6章不受影响
-        assert state["_chapter_idx"] == 1
-    asyncio.run(_run())
+    state = {"human_items": {}, "human_queue": []}
+    # 关闭时节点不会调用 push_human_chapters —— 队列应保持为空
+    assert wf.ENABLE_HUMAN_REVIEW is False
+    assert state["human_queue"] == []
+    assert state["human_items"] == {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -366,6 +338,22 @@ class _FakeSession:
         self.state = state
 
 
+class _FakeUser:
+    """端点现在要 `user` 参数（会话按归属校验）—— 测试里给个最简替身。
+
+    这些用例直接调用端**函数**而非走 HTTP，所以不经过 FastAPI 的依赖注入，
+    必须自己把 `user` 传进去。
+    """
+    id = 101
+    role = "user"
+    is_superuser = False
+    is_active = True
+    company_id = 1
+
+
+_FAKE_USER = _FakeUser()
+
+
 def test_human_queue_normalizes_str_keys(monkeypatch):
     """GET /human-queue 读取持久化后的字符串键 human_items/chapter_audits。"""
     from app.routers.report import report_service, get_human_queue
@@ -379,8 +367,8 @@ def test_human_queue_normalizes_str_keys(monkeypatch):
                                   "disposition": "ai_rewrite",
                                   "message": "评分超出0-100范围"}]},
     }
-    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
-    resp = asyncio.run(get_human_queue("fake-sid"))
+    monkeypatch.setattr(report_service, "get_session_for_user", lambda sid, user: _FakeSession(state))
+    resp = asyncio.run(get_human_queue("fake-sid", _FAKE_USER))
     chapters = resp.data["chapters"]
     assert len(chapters) == 2
     ch6 = next(c for c in chapters if c["chapter"] == 6)
@@ -398,9 +386,9 @@ def test_human_opinion_normalizes_str_keys(monkeypatch):
                               "human_opinion": "", "human_override": False,
                               "human_approved": False}},
     }
-    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
+    monkeypatch.setattr(report_service, "get_session_for_user", lambda sid, user: _FakeSession(state))
     resp = asyncio.run(submit_human_opinion(
-        "fake-sid", {"chapter": 6, "mode": "opinion", "opinion": "支持率改为100%"}))
+        "fake-sid", {"chapter": 6, "mode": "opinion", "opinion": "支持率改为100%"}, _FAKE_USER))
     assert resp.data["human_opinion"] == "支持率改为100%"
     # 只保留一种键形式（int），无重复
     assert set(state["human_items"].keys()) == {6}
@@ -420,8 +408,8 @@ def test_human_rewrite_resumes_all_acted_chapters(monkeypatch):
             "9": {"chapter": 9, "human_opinion": "", "human_approved": True, "human_override": False},
         },
     }
-    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
-    resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}))
+    monkeypatch.setattr(report_service, "get_session_for_user", lambda sid, user: _FakeSession(state))
+    resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}, _FAKE_USER))
     assert resp.data["chapters"] == [6, 9]       # 队列中所有已处理章节都恢复
     assert resp.data["acted"] == [6, 9]          # 6=意见, 9=审批
 
@@ -435,8 +423,8 @@ def test_human_rewrite_no_action_rejected(monkeypatch):
             "6": {"chapter": 6, "human_opinion": "", "human_approved": False, "human_override": False},
         },
     }
-    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
-    resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}))
+    monkeypatch.setattr(report_service, "get_session_for_user", lambda sid, user: _FakeSession(state))
+    resp = asyncio.run(trigger_human_ai_rewrite("fake-sid", {}, _FAKE_USER))
     assert resp.data["chapters"] == []           # 无任何处理 → 不触发恢复
 
 
@@ -456,8 +444,8 @@ def test_workflow_status_normalizes_int_keys(monkeypatch):
         "_workflow_logs": ["⏸️ 1 个章节需人工复核"],
         "step_statuses": {},
     }
-    monkeypatch.setattr(report_service, "get_session", lambda sid: _FakeSession(state))
-    resp = asyncio.run(workflow_status("fake-sid"))
+    monkeypatch.setattr(report_service, "get_session_for_user", lambda sid, user: _FakeSession(state))
+    resp = asyncio.run(workflow_status("fake-sid", _FAKE_USER))
     data = resp.data  # workflow_status 返回 model_dump() 后的 dict
     assert data["phase"] == "human_review"
     assert data["human_queue"] == [6]

@@ -16,6 +16,46 @@ from typing import Dict, List, Any, Optional
 from .base_agent import BaseAgent
 
 
+def _normalize_age_option(opt: str) -> str:
+    """规整年龄选项为表3-1 期望的 key（16~35 / 36~55 / 56以上）。"""
+    s = str(opt).strip()
+    if "16" in s and ("35" in s or "~" in s or "-" in s):
+        return "16~35"
+    if "36" in s and ("55" in s or "~" in s or "-" in s):
+        return "36~55"
+    if "56" in s:
+        return "56以上"
+    return s
+
+
+def _normalize_identity_option(opt: str) -> str:
+    """规整身份选项（本地居民/租住本地/附近上班/路过）。"""
+    s = str(opt).strip()
+    for key in ["本地居民", "租住本地", "租住本区", "附近上班", "路过"]:
+        if key in s:
+            return "本地居民" if "租住" not in key else ("租住本地" if "租住" in key else key)
+    # 兜底：含"居民"→本地居民；含"租"→租住本地
+    if "居民" in s:
+        return "本地居民"
+    if "租" in s:
+        return "租住本地"
+    return s
+
+
+def _normalize_occupation_option(opt: str) -> str:
+    """规整职业选项（机关事业/企业/待业/其他）。"""
+    s = str(opt).strip()
+    if "机关" in s or "事业" in s or "政府" in s:
+        return "机关事业"
+    if "企业" in s:
+        return "企业"
+    if "待业" in s or "无业" in s or "失业" in s:
+        return "待业"
+    if "其他" in s or "其他" in s or "退休" in s or "务农" in s or "自由" in s:
+        return "其他"
+    return s
+
+
 class ImageAnalysisAgent(BaseAgent):
     """Analyzes uploaded images and extracts structured data for report filling."""
 
@@ -315,6 +355,13 @@ class ImageAnalysisAgent(BaseAgent):
             "main_opinions": [],
             "survey_dates": [],
             "scopes": [],
+            # 六维度频次统计（含勾选项维度），供表3-1 使用
+            "identity_groups": {},
+            "age_groups": {},
+            "occupation_groups": {},
+            "awareness_levels": {},
+            "attitude_options": {},
+            "resolution_methods": {},
         }
 
         for result in survey_results:
@@ -334,6 +381,30 @@ class ImageAnalysisAgent(BaseAgent):
                     aggregated["oppose_count"] += count
                 elif "条件" in option or "有" in option:
                     aggregated["conditional_support_count"] += count
+
+            # 六维勾选计数：每张勾选问卷的 checkmarks 逐一累加
+            cm = result.get("checkmarks", {}) or {}
+            dims = {
+                "identity_groups": cm.get("identity", ""),
+                "age_groups": cm.get("age", ""),
+                "occupation_groups": cm.get("occupation", ""),
+                "awareness_levels": cm.get("awareness", ""),
+                "attitude_options": cm.get("attitude", ""),
+                "resolution_methods": cm.get("resolution", ""),
+            }
+            for dim_key, opt in dims.items():
+                if not opt:
+                    continue
+                norm_opt = str(opt).strip()
+                # 年龄、身份、职业维度做显示名规整，与表3-1 选项对齐
+                if dim_key == "age_groups":
+                    norm_opt = _normalize_age_option(norm_opt)
+                elif dim_key == "identity_groups":
+                    norm_opt = _normalize_identity_option(norm_opt)
+                elif dim_key == "occupation_groups":
+                    norm_opt = _normalize_occupation_option(norm_opt)
+                agg = aggregated[dim_key]
+                agg[norm_opt] = agg.get(norm_opt, 0) + 1
 
             # Collect opinions
             opinions = result.get("main_opinions", "")
@@ -355,6 +426,15 @@ class ImageAnalysisAgent(BaseAgent):
         aggregated["support_rate"] = round(
             aggregated["support_count"] / total * 100, 1
         )
+
+        # 无勾选维度时，用 results 里的支持/反对兜底生成 attitude_options
+        # 但优先保留真实勾选；attitude 若完全空且有 support_count，则换算
+        if not aggregated["attitude_options"] and aggregated["support_count"]:
+            aggregated["attitude_options"]["支持"] = aggregated["support_count"]
+            if aggregated["oppose_count"]:
+                aggregated["attitude_options"]["反对"] = aggregated["oppose_count"]
+            if aggregated["conditional_support_count"]:
+                aggregated["attitude_options"]["有条件支持"] = aggregated["conditional_support_count"]
 
         return aggregated
 
@@ -382,14 +462,54 @@ class ImageAnalysisAgent(BaseAgent):
             })
             state.setdefault("structured_data", {})["step_6"] = step_6
 
-            # 🔴 Always write to well-known filled_data keys so downstream
-            # consumers (Chapter3Agent, table_registry, assembler) find the data
-            filled_data.setdefault("survey_total_count", str(survey["total_samples"]))
-            filled_data.setdefault("total_samples", str(survey["total_samples"]))
-            filled_data.setdefault("support_count", str(survey["support_count"]))
-            filled_data.setdefault("oppose_count", str(survey["oppose_count"]))
-            filled_data.setdefault("conditional_support_count", str(survey["conditional_support_count"]))
-            filled_data.setdefault("support_rate", str(survey["support_rate"]))
+            # 🔴 **不写事实卡**：问卷份数/支持率是统计量，视觉模型只是「看图数行」，
+            #    极易得出 5 份这类离谱值（实测发生过），一旦进事实卡，正文就照着写错数。
+            #    估数只存到 structured_data 备查；权威值来自问卷/座谈会 PDF 解析
+            #    （survey_data.merge_verified_survey_into_state）或用户填写，
+            #    取不到就进缺口清单问用户。
+            filled_data.setdefault("_vision_survey_estimate", {
+                "total_samples": survey["total_samples"],
+                "support_count": survey["support_count"],
+                "oppose_count": survey["oppose_count"],
+                "support_rate": survey["support_rate"],
+                "_source": "vision_image_analysis",
+                "_trusted": False,
+            })
+
+            # 🔴 写入表3-1 消费的 survey_analysis（六维统计），供 generate_table_3_1/
+            # _extract_public_survey_stats 直接读取，避免调查表退回【待补充】或编造。
+            survey_analysis = {
+                "total_samples": survey["total_samples"],
+                "valid_samples": survey["total_samples"],
+                "support_count": survey["support_count"],
+                "oppose_count": survey["oppose_count"],
+                "neutral_count": survey.get("neutral_count", 0),
+                "conditional_support": survey.get("conditional_support_count", 0),
+                "support_rate": survey["support_rate"],
+                "oppose_rate": round(
+                    survey["oppose_count"] / max(survey["total_samples"], 1) * 100, 1
+                ),
+                "identity_groups": survey.get("identity_groups", {}),
+                "age_groups": survey.get("age_groups", {}),
+                "occupation_groups": survey.get("occupation_groups", {}),
+                "awareness_levels": survey.get("awareness_levels", {}),
+                "attitude_options": survey.get("attitude_options", {}),
+                "resolution_methods": survey.get("resolution_methods", {}),
+                "main_opinions": survey.get("main_opinions", []),
+            }
+            generated["survey_analysis"] = survey_analysis
+
+            # 🔴 合并已核验问卷数据：OCR 提取常不完整（如只提取到支持/知晓度），
+            # 有核验数据集时以核验数据覆盖，保证六维完整。
+            try:
+                from app.services.survey_data import get_verified_survey_analysis
+                doc_ref = str(filled_data.get("doc_reference", "") or filled_data.get("project_name", "") or "")
+                verified = get_verified_survey_analysis(doc_ref)
+                if verified:
+                    generated["survey_analysis"] = verified
+                    survey_analysis = verified
+            except Exception:
+                pass
 
             # Try to match to template placeholders
             for ph in placeholders:

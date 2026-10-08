@@ -41,12 +41,12 @@ from .cross_reference_agent import CrossReferenceAgent
 from .intent_clarification_agent import IntentClarificationAgent, INTENT_DEFINITIONS
 
 from .chapters import (
-    ChapterAgentBase,
-    Chapter1Agent, Chapter2Agent, Chapter3Agent, Chapter4Agent,
-    Chapter5Agent, Chapter6Agent, Chapter7Agent, Chapter8Agent,
-    Chapter9Agent, Chapter10Agent,
-    CHAPTER_AGENT_MAP, get_chapter_agent,
+    get_chapter_agent,
+    get_review_table_agent,
+    use_template_fill_pipeline,
+    REVIEW_TABLE_AGENT,
 )
+from .chapter_writer_agent import ChapterWriterAgent
 
 __all__ = [
     "BaseAgent",
@@ -62,10 +62,8 @@ __all__ = [
     "FormatComplianceAgent",
     "CrossReferenceAgent",
     "IntentClarificationAgent", "INTENT_DEFINITIONS",
-    # Chapter Agents
-    "ChapterAgentBase",
-    "Chapter1Agent", "Chapter2Agent", "Chapter3Agent", "Chapter4Agent",
-    "Chapter5Agent", "Chapter6Agent", "Chapter7Agent", "Chapter8Agent",
-    "Chapter9Agent", "Chapter10Agent",
-    "CHAPTER_AGENT_MAP", "get_chapter_agent",
+    # Chapter Agents（按 CHAPTER_PIPELINE 开关分派）
+    "ChapterWriterAgent",
+    "get_chapter_agent", "get_review_table_agent", "use_template_fill_pipeline",
+    "REVIEW_TABLE_AGENT",
 ]

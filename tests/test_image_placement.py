@@ -1,4 +1,4 @@
-"""图片位置绑定 + 附件分类 单元测试（官方规范：10章结构）。"""
+"""图片位置绑定 + 附件分类 单元测试（DB32/T4013-2021 十章结构）。"""
 import sys, os, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,16 +10,16 @@ from app.services.image_catalog import (
 
 def test_folder_hint_maps_to_chapter():
     """正文图片 → 正确章节（官方规范）。"""
-    # 位置示意图 → 第1章（决策地理位置）
-    assert _classify_chapter_hint('x.jpg', '位置图') == 1
-    assert _classify_chapter_hint('x.jpg', '勘测定界') == 1
-    # 风险评估流程图 → 第2章
-    assert _classify_chapter_hint('x.jpg', '评估流程') == 2
-    # 公示照片/座谈会照片 → 第3章
-    assert _classify_chapter_hint('x.jpg', '公示照片4') == 3
-    assert _classify_chapter_hint('x.jpg', '村民开会现场') == 3
-    # 控制性详细规划图 → 第4章
-    assert _classify_chapter_hint('x.jpg', '控制性详细规划') == 4
+    # 位置示意图 → 第6章（项目基本情况·6.1 项目概况）
+    assert _classify_chapter_hint('x.jpg', '位置图') == 6
+    assert _classify_chapter_hint('x.jpg', '勘测定界') == 6
+    # 风险评估流程图 → 第7章（稳评工作方案·7.2 评估方法）
+    assert _classify_chapter_hint('x.jpg', '评估流程') == 7
+    # 公示照片/座谈会照片 → 第8章（稳评方法与过程·8.4 风险调查过程）
+    assert _classify_chapter_hint('x.jpg', '公示照片4') == 8
+    assert _classify_chapter_hint('x.jpg', '村民开会现场') == 8
+    # 控制性详细规划图 → 第6章
+    assert _classify_chapter_hint('x.jpg', '控制性详细规划') == 6
 
 
 def test_appendix_classification():
@@ -46,6 +46,6 @@ def test_chapter_hint_binds_image():
     open(p, 'wb').write(content)
     catalog = build_image_catalog([p])
     assert 'appendix' in catalog
-    ch3 = catalog['by_chapter'].get(3, [])
-    assert any(os.path.basename(i['path']) == 'a.jpg' for i in ch3), \
-        '公示照片4 应绑定到第3章'
+    ch8 = catalog['by_chapter'].get(8, [])
+    assert any(os.path.basename(i['path']) == 'a.jpg' for i in ch8), \
+        '公示照片4 应绑定到第8章'

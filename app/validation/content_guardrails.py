@@ -92,24 +92,63 @@ DATA_VALIDITY_PATTERNS: List[Tuple[str, str]] = [
 # ═══════════════════════════════════════════════════════════════
 
 # Known valid regulation patterns (whitelist)
-KNOWN_REGULATIONS = {
-    "DB32/T4013-2021",
-    "DB3201/T1163-2023",
-    "DB32/T4937-2024",
-    "发改办投资〔2013〕428号",
-    "苏政发〔2020〕86号",
-    "苏政发〔2021〕87号",
-    "苏自然资发〔2021〕128号",
-    "苏自然资函〔2021〕769号",
-    "中华人民共和国土地管理法",
-    "中华人民共和国土地管理法实施条例",
-    "中华人民共和国突发事件应对法",
+#
+# 🔴 **不写死**：从 data/regulation_whitelist.json（按地区维护）汇总；
+#    新增省/市法规只需改 JSON，无需动代码。另附少量跨地区通用条目。
+_UNIVERSAL_REGULATIONS = {
     "国有土地上房屋征收与补偿条例",
-    "江苏省征地补偿和被征地农民社会保障办法",
-    "江苏省社会稳定风险评估办法",
-    "江苏省土地管理条例",
-    "淮安市征地补偿和被征地农民社会保障实施细则",
+    "大中型水利水电工程建设征地补偿和移民安置条例",
 }
+
+
+def _reg_keys(item: str) -> Set[str]:
+    """把「《某办法》（苏政发〔2021〕87号）」拆成 {'某办法', '苏政发〔2021〕87号'}。
+
+    同时收三类「文号形态」，否则正文引用它们会被误判成编造：
+      - 令号：国务院令第743号   → '第743号'
+      - 标准号：DB32/T4013-2021 → 'DB32/T4013-2021'（去空格）
+    """
+    s = str(item or "").strip()
+    keys: Set[str] = set()
+    for name in re.findall(r'《([^》]+)》', s):
+        if name.strip():
+            keys.add(name.strip())
+    for num in re.findall(r'[一-龥A-Za-z]{1,12}\s*〔\s*\d{4}\s*〕\s*\d+\s*号', s):
+        keys.add(re.sub(r'\s+', '', num))
+    # 🔴 令号（国务院令第743号 / 省政府令第XX号）
+    for ling in re.findall(r'第\s*\d+\s*号', s):
+        keys.add(re.sub(r'\s+', '', ling))
+    # 🔴 标准号（DB32/T 4013-2021 → DB32/T4013-2021）
+    for std in re.findall(r'[A-Z]{2,}\s*/\s*T\s*\d+\s*[-—–－]\s*\d+', s):
+        keys.add(re.sub(r'\s+', '', std))
+    if not keys and s:
+        keys.add(s)
+    return keys
+
+
+def _load_known_regulations() -> Set[str]:
+    import json
+    from pathlib import Path
+    keys: Set[str] = set(_UNIVERSAL_REGULATIONS)
+    try:
+        p = Path(__file__).resolve().parents[2] / "data" / "regulation_whitelist.json"
+        if p.exists():
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            groups = [cfg.get("national") or []]
+            for reg in (cfg.get("regions") or {}).values():
+                groups.append(reg.get("province") or [])
+                groups.append(reg.get("standard") or [])
+                for lst in (reg.get("cities") or {}).values():
+                    groups.append(lst or [])
+            for grp in groups:
+                for item in grp:
+                    keys |= _reg_keys(item)
+    except Exception:
+        pass
+    return keys
+
+
+KNOWN_REGULATIONS = _load_known_regulations()
 
 # Regex to extract regulation-like patterns from text
 REGULATION_CITATION_PATTERN = re.compile(
@@ -403,9 +442,12 @@ def find_hallucinated_regulations(markdown: str) -> List[Dict[str, str]]:
         if _is_project_doc(citation):
             continue  # 项目文号跳过，不是法规编造
         # Check if this exact string or a close variant is in known list
+        # 🔴 比较前去掉空白：白名单里存的是「DB32/T4013-2021」，正文常写「DB32/T 4013-2021」
+        _c = re.sub(r'\s+', '', citation)
         is_known = False
         for known in KNOWN_REGULATIONS:
-            if citation in known or known in citation:
+            _k = re.sub(r'\s+', '', str(known))
+            if _c in _k or _k in _c:
                 is_known = True
                 break
         if not is_known:
@@ -418,8 +460,11 @@ def find_hallucinated_regulations(markdown: str) -> List[Dict[str, str]]:
             })
 
     # Check for vague regulation patterns
+    # 🔴 必须带「依据/根据/按照」这类引导词才算泛化引用；
+    #    否则小节标题「（三）决策相关文件」会被误判。
     vague_patterns = [
-        (r'(?:相关|有关|国家|地方|省级|市级)\s*(?:法律法规|政策|规定|文件|标准)',
+        (r'(?:依据|根据|按照|按|遵照|执行)\s*(?:国家|省|市|地方|上级|有关|相关)\s*'
+         r'(?:的)?\s*(?:有关|相关)?\s*(?:法律法规|政策|规定|文件|标准|要求)',
          "使用了泛化法规引用，应引用具体法规名称和文号"),
         (r'(?:依据|根据|按照)\s*(?:国家|省|市)\s*(?:有关|相关)\s*(?:规定|政策|要求)',
          "使用了「国家/省/市有关规定」等模糊依据，应写明具体法规"),
@@ -736,16 +781,7 @@ def check_chapters_against_facts(
         if not md:
             continue
         for val, unit in _extract_numbers(md):
-            if unit == '亩' and fact_area_mu is not None:
-                # 允许换算：亩 ≈ ㎡/666.67
-                if abs(val - fact_area_mu) / fact_area_mu > 0.01:
-                    _add(ch_num, 'area_mismatch',
-                         f"第{ch_num}章出现面积「{val}亩」，与资料 {fact_area_mu} 亩 不一致")
-            elif unit == '㎡' and fact_area_m2 is not None:
-                if abs(val - fact_area_m2) / fact_area_m2 > 0.01:
-                    _add(ch_num, 'area_mismatch',
-                         f"第{ch_num}章出现面积「{val}㎡」，与资料 {fact_area_m2}㎡ 不一致")
-            elif unit == '%' and fact_support is not None:
+            if unit == '%' and fact_support is not None:
                 # 仅当数值接近支持率（±15 以内）时才当作「支持率」核对，避免误抓其他百分比
                 if abs(val - fact_support) <= 15:
                     if abs(val - fact_support) > 0.5:
@@ -759,6 +795,24 @@ def check_chapters_against_facts(
                 if val != fact_household:
                     _add(ch_num, 'household_mismatch',
                          f"第{ch_num}章出现户数「{int(val)}户」，与资料 {int(fact_household)}户 不一致")
+
+        # ── 面积一致性：只在「总/合计」上下文核对总面积，避免把各权属/地类分项面积误判为不一致 ──
+        if fact_area_mu is not None:
+            for m in re.finditer(
+                r'(总面积|合计面积|合计|拟征收土地总面积|拟征收土地面积|征收面积合计|拟征收总面积)'
+                r'\s*[约为共]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*亩', md):
+                val = float(m.group(2))
+                if abs(val - fact_area_mu) / fact_area_mu > 0.01:
+                    _add(ch_num, 'area_mismatch',
+                         f"第{ch_num}章出现面积「{val}亩」，与资料 {fact_area_mu} 亩 不一致")
+        if fact_area_m2 is not None:
+            for m in re.finditer(
+                r'(总面积|合计面积|合计|拟征收土地总面积|拟征收土地面积|征收面积合计|拟征收总面积)'
+                r'\s*[约为共]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*(?:平方米|㎡)', md):
+                val = float(m.group(2))
+                if abs(val - fact_area_m2) / fact_area_m2 > 0.01:
+                    _add(ch_num, 'area_mismatch',
+                         f"第{ch_num}章出现面积「{val}㎡」，与资料 {fact_area_m2}㎡ 不一致")
 
     # 去重（同 chapter + 同 type 只保留一条，避免同一数字多段重复刷屏）
     seen = set()
@@ -807,25 +861,41 @@ def fix_chapters_against_facts(
             continue
         orig = md
 
-        # ── 面积（亩）──
+        # ── 面积（亩）── 只在「总/合计/拟征收」上下文替换，避免把各权属/地类分项面积误改成总面积
         if fact_area_mu is not None:
             def _fix_mu(m):
-                val = float(m.group(1))
+                val = float(m.group(2))
                 if abs(val - fact_area_mu) / fact_area_mu > 0.01:
-                    fixes.append((ch_num, f"{val}亩", f"{fact_area_mu}亩"))
-                    return f"{fact_area_mu}亩"
+                    fixes.append((ch_num, f"{val}亩", f"{_fmt(fact_area_mu)}亩"))
+                    return f"{m.group(1)}{_fmt(fact_area_mu)}亩"
                 return m.group(0)
-            md = re.sub(r'(?<![\d.])(\d+(?:\.\d+)?)\s*亩', _fix_mu, md)
+            md = re.sub(
+                r'(总面积|合计面积|合计|拟征收土地总面积|拟征收土地面积|征收面积合计|拟征收总面积)'
+                r'\s*[约为共]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*亩', _fix_mu, md)
 
-        # ── 面积（㎡）──
+        # ── 面积（㎡）── 同上，只在「总/合计」上下文替换
         if fact_area_m2 is not None:
             def _fix_m2(m):
-                val = float(m.group(1))
+                val = float(m.group(2))
                 if abs(val - fact_area_m2) / fact_area_m2 > 0.01:
                     fixes.append((ch_num, f"{val}㎡", f"{int(fact_area_m2)}㎡"))
-                    return f"{int(fact_area_m2)}㎡"
+                    return f"{m.group(1)}{int(fact_area_m2)}㎡"
                 return m.group(0)
-            md = re.sub(r'(?<![\d.])(\d+(?:\.\d+)?)\s*(?:平方米|㎡)', _fix_m2, md)
+            md = re.sub(
+                r'(总面积|合计面积|合计|拟征收土地总面积|拟征收土地面积|征收面积合计|拟征收总面积)'
+                r'\s*[约为共]?\s*(?<![\d.])(\d+(?:\.\d+)?)\s*(?:平方米|㎡)', _fix_m2, md)
+
+        # ── 地类分项套总面积（第4章常见：每个地类都写成总面积）──
+        if fact_area_m2 is not None and ch_num == 4:
+            _land = r'(?:耕地|园地|林地|草地|水域及水利设施用地|水域|其他土地|商业服务业设施用地|住宅用地|交通运输用地)'
+            _at = str(int(fact_area_m2))
+            _land_repeat = re.compile(
+                r'(?:' + _land + r'面积\s*' + _at + r'\s*(?:平方米|㎡))'
+                r'(?:\s*[、，,和及与]\s*(?:' + _land + r'面积\s*' + _at + r'\s*(?:平方米|㎡)))+'
+            )
+            if _land_repeat.search(md):
+                md = _land_repeat.sub('各地类构成及面积以表6-1（土地分类面积表）为准', md)
+                fixes.append((ch_num, f"地类面积套用总面积{_at}㎡", "改以表6-1为准"))
 
         # ── 支持率（仅「支持率X%」明确上下文）──
         if fact_support is not None:

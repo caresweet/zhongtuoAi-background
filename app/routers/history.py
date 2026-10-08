@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.history_db import get_history_db
+from app.deps import get_current_user, is_admin
 from app.models.history import Report, ConversationMessage
+from app.models.user import User
 from app.schemas.history import (
     ReportResponse, ReportDetailResponse, ReportListResponse, ReportDataResponse,
     MessageResponse,
@@ -19,16 +21,43 @@ from app.services.file_service import file_service
 router = APIRouter(prefix="/api/v1/history", tags=["历史报告"])
 
 
+# ═══════════════════════════════════════════════════════════════
+# 归属过滤 —— 本模块**所有**读取/删除都必须经过这两个函数
+# ═══════════════════════════════════════════════════════════════
+# 🔴 原先这里 7 个端点全部只按 id 查：报告列表全量返回、`/download` 连 token
+#    都不校验 —— 知道 id 就能下别人的报告。「每个账号只看自己的报告」由此落空。
+
+def _scoped(query, user: User):
+    """把查询限制在当前用户可见范围内。**管理员看全部**（运维/客服需要）。"""
+    if is_admin(user):
+        return query
+    return query.where(Report.user_id == str(user.id))
+
+
+async def _owned_report(report_id: int, user: User, db: AsyncSession) -> Report:
+    """按 id 取报告，并校验归属。取不到或无权限一律 **404**。
+
+    🔴 用 404 而不是 403：403 等于告诉对方「这个 id 确实存在」，
+       在多租户下是可被枚举的信息泄露。
+    """
+    result = await db.execute(_scoped(select(Report).where(Report.id == report_id), user))
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return report
+
+
 @router.get("/reports", response_model=ApiResponse)
 async def list_reports(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """获取历史报告列表（分页）。"""
-    query = select(Report)
+    """获取历史报告列表（分页）—— **只返回当前账号自己的**（管理员看全部）。"""
+    query = _scoped(select(Report), user)
 
     if status:
         query = query.where(Report.status == status)
@@ -63,15 +92,14 @@ async def list_reports(
 @router.get("/reports/{report_id}", response_model=ApiResponse)
 async def get_report(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """获取报告详情。"""
-    query = (
-        select(Report)
-        .where(Report.id == report_id)
+    """获取报告详情（仅限本人，管理员不限）。"""
+    result = await db.execute(
+        _scoped(select(Report).where(Report.id == report_id), user)
         .options(selectinload(Report.messages))
     )
-    result = await db.execute(query)
     report = result.scalar_one_or_none()
 
     if not report:
@@ -83,15 +111,11 @@ async def get_report(
 @router.get("/reports/{report_id}/data", response_model=ApiResponse)
 async def get_report_data(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """获取报告的填充数据。"""
-    query = select(Report).where(Report.id == report_id)
-    result = await db.execute(query)
-    report = result.scalar_one_or_none()
-
-    if not report:
-        raise HTTPException(status_code=404, detail="报告不存在")
+    """获取报告的填充数据（仅限本人，管理员不限）。"""
+    report = await _owned_report(report_id, user, db)
 
     filled_data = None
     section_progress = None
@@ -119,9 +143,13 @@ async def get_report_data(
 @router.get("/reports/{report_id}/conversation", response_model=ApiResponse)
 async def get_report_conversation(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """获取报告的对话记录。"""
+    """获取报告的对话记录（仅限本人，管理员不限）。"""
+    # 🔴 先校验报告归属再取消息 —— 消息表本身没有归属列，
+    #    只按 report_id 查会绕过上面的隔离。
+    await _owned_report(report_id, user, db)
     query = (
         select(ConversationMessage)
         .where(ConversationMessage.report_id == report_id)
@@ -138,15 +166,11 @@ async def get_report_conversation(
 @router.delete("/reports/{report_id}", response_model=ApiResponse)
 async def delete_report(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """删除报告记录及其文件。"""
-    query = select(Report).where(Report.id == report_id)
-    result = await db.execute(query)
-    report = result.scalar_one_or_none()
-
-    if not report:
-        raise HTTPException(status_code=404, detail="报告不存在")
+    """删除报告记录及其文件（仅限本人，管理员不限）。"""
+    report = await _owned_report(report_id, user, db)
 
     # Delete file
     if report.report_file_path:
@@ -162,15 +186,11 @@ async def delete_report(
 @router.get("/reports/{report_id}/download")
 async def download_report(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
-    """下载生成的报告docx文件。"""
-    query = select(Report).where(Report.id == report_id)
-    result = await db.execute(query)
-    report = result.scalar_one_or_none()
-
-    if not report:
-        raise HTTPException(status_code=404, detail="报告不存在")
+    """下载生成的报告docx文件（仅限本人，管理员不限）。"""
+    report = await _owned_report(report_id, user, db)
     if not report.report_file_path:
         raise HTTPException(status_code=404, detail="报告文件不存在")
 
@@ -189,6 +209,7 @@ async def download_report(
 @router.get("/reports/{report_id}/review-table")
 async def download_review_table(
     report_id: int,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
     """下载独立生成的评审表docx文件。
@@ -204,12 +225,7 @@ async def download_review_table(
     - 表8-2 措施前后得分对比表
     - 评审结论
     """
-    query = select(Report).where(Report.id == report_id)
-    result = await db.execute(query)
-    report = result.scalar_one_or_none()
-
-    if not report:
-        raise HTTPException(status_code=404, detail="报告不存在")
+    report = await _owned_report(report_id, user, db)
 
     # Try the review_table_path field first
     review_path = getattr(report, 'review_table_path', None)

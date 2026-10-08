@@ -11,13 +11,27 @@ Each chapter agent:
 import asyncio
 import logging
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 from ..base_agent import BaseAgent
 from ..knowledge_agent import get_knowledge_context_for_chapter
 from app.validation.content_guardrails import AI_BUZZWORDS
+from app.agent.chapter_definitions import ALL_CHAPTERS, FANWEN_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(v, default: int = 0) -> int:
+    """字段值 → int；`【待补充】` / 空 / 非数字一律回落默认值。
+
+    🔴 占位符被直接 `int()` 会抛 ValueError，把整条链打断。
+    """
+    import re as _re
+    t = _re.sub(r'[^\d.\-]', '', str(v if v is not None else ""))
+    try:
+        return int(float(t))
+    except (TypeError, ValueError):
+        return int(default)
 
 # ── Learning hints cache (shared across all chapter agents) ──
 _learning_cache = {"hints": {}, "updated": 0}  # hints by chapter_num
@@ -36,7 +50,7 @@ def _refresh_learning_cache():
         if loop.is_running():
             return  # can't run async in sync context
         async def _fetch():
-            for ch in range(1, 11):
+            for ch in ALL_CHAPTERS:
                 hints = await learning_service.build_learning_hints("stability")
                 common = await learning_service.get_common_issues("stability", 10)
                 ch_issues = [c for c in common if _is_chapter_relevant(c["type"], ch)]
@@ -50,11 +64,13 @@ def _refresh_learning_cache():
 
 def _is_chapter_relevant(issue_type: str, chapter_num: int) -> bool:
     """Check if an issue type is relevant to a specific chapter."""
+    # 章号 = 参照件十四章号：6 项目基本情况 / 9 各利益相关者 / 12 确定风险等级
+    #                    2 编制依据 / 10 四性分析 / 13 工作建议
     ch_specific = {
-        "fabricated_data": [1, 3, 6, 8],  # chapters with numbers
-        "data_validity": [3, 6, 8],        # support rate, scores
-        "hallucinated_regulation": [2, 4, 9],  # legal references
-        "invalid_range": [1, 6, 8],         # area, scores
+        "fabricated_data": [6, 9, 12],          # 有具体数字的章
+        "data_validity": [9, 12],               # 支持率/评分
+        "hallucinated_regulation": [2, 10, 13], # 法规引用
+        "invalid_range": [6, 12],               # 面积/评分
     }
     if issue_type in ch_specific:
         return chapter_num in ch_specific[issue_type]
@@ -89,6 +105,19 @@ class ChapterAgentBase(BaseAgent):
     rag_query_extra: str = ""
     required_data_keys: List[str] = []
     key_tables: List[str] = []
+
+    def __init__(self, llm_service=None):
+        super().__init__(llm_service=llm_service)
+        # 🔴 标题与 RAG 检索词一律以 chapter_definitions（唯一事实源）为准，
+        #    覆盖子类里可能已过时的类属性，避免章节结构变更后各处写死走样。
+        try:
+            from app.agent.chapter_definitions import (
+                get_chapter_title, get_chapter_rag_query)
+            if self.chapter_number:
+                self.chapter_title = get_chapter_title(self.chapter_number)
+                self.rag_query_extra = get_chapter_rag_query(self.chapter_number)
+        except Exception:
+            pass
 
     # ---- Public API ----
 
@@ -162,8 +191,29 @@ class ChapterAgentBase(BaseAgent):
 
         # 🔴 Master orchestrator custom prompt — overrides agent's built-in prompt
         if state.get("_use_custom_prompt") and state.get("_custom_prompt"):
-            system_prompt = "你是江苏众拓项目代理咨询有限公司的资深稳评工程师。"
+            # 🔴 不写死公司名：外部用户出报告时，提示词里的公司名会被模型抄进正文。
+            #    实施单位一律取自事实卡（已按本报告所属公司填好）。
+            system_prompt = "你是一位资深稳评工程师。"
             user_prompt = state["_custom_prompt"]
+            # 🔴 自定义 prompt 路径此前会**丢掉 think() 检索到的 RAG** ——
+            #    LLM 只能凭记忆写，于是编造法规名称/规划名称/同类项目。
+            #    这里把检索到的真实素材追加进去，并明确「只能用它」。
+            _rag_block = self._format_rag_for_prompt(rag_context)
+            if _rag_block:
+                user_prompt = user_prompt + "\n\n" + _rag_block
+                await self._emit_thinking(
+                    f"🔍 已注入 RAG 检索素材（{len(rag_sources)} 条），约束 LLM 不得编造"
+                )
+            # 🔴 章节体例约束**必须在这条路上也注入**：主编排给的 custom prompt 会整段
+            #    覆盖 agent 自带提示词，不补的话「本章不出表」「须含表4-2/表4-3」这类约束
+            #    只在 UI 路径生效，`scripts/gen_full_report.py` 生成的全量报告完全不受约束
+            #    —— 两套路径分叉的老毛病。
+            try:
+                _extra = self._chapter_extra_context(state, rag_context, user_data)
+                if _extra:
+                    system_prompt = system_prompt + "\n\n" + _extra
+            except Exception:
+                pass
         else:
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
@@ -179,7 +229,11 @@ class ChapterAgentBase(BaseAgent):
         # 🔴 真实地名/文号/时间硬约束（无论用哪套 prompt 都注入，防止 LLM 编造）
         try:
             filled = state.get("filled_data", {})
-            loc = filled.get("location") or filled.get("land_location") or ""
+            # 🔴 清洗视觉分析 dict 混入的 location（{'general_area': ...} 等），
+            # 防止把结构化机器字段当"唯一真实值"注入导致正文出现 JSON 残留。
+            loc = self._sanitize_filled_value(
+                filled.get("location") or filled.get("land_location") or ""
+            )
             doc_ref = filled.get("doc_reference") or filled.get("project_name") or ""
             constraint_parts = []
             if loc and not str(loc).startswith("【"):
@@ -194,12 +248,43 @@ class ChapterAgentBase(BaseAgent):
             constraint_parts.append("- 报告年度为2026年。本项目的公告/预公告发布时间为2026年，评估工作时间应为2026年。禁止出现2024年、2025年等错误年份作为评估启动时间")
             # 🔴 社区背景描述约束：禁止编造社区的地理/历史/发展/水文等背景（如"地处淮河流域""紧挨城区""城镇化进程加快"等）
             constraint_parts.append("- 禁止编造社区或街道的背景描述（地理位置、水系、历史沿革、城镇化发展、周边设施等）。如果项目资料里没有这些信息，就直接写事实或标注【待补充】，不要用内部知识补充虚构的社区背景")
+
+            # 🔴 权威风险等级约束（系统计算一次，各章统一引用，禁止自创/矛盾）
+            ra = state.get("_risk_assessment") or {}
+            if ra and self.chapter_number in (5, 6, 8, 9):
+                level = ra.get("level", "低风险")
+                pre = ra.get("pre_total", "")
+                post = ra.get("post_total", "")
+                if self.chapter_number == 5:
+                    constraint_parts.append(
+                        f"- 🔴 本章综合风险等级判定必须为「{level}」（措施前{pre}分，系统已按量化评分体系统一计算）。"
+                        f"识别出的单因素风险可以是低/较低/一般/较高/高，但『综合风险等级』表述必须写「{level}」，"
+                        f"禁止写『一般偏中』『中风险』『较高』等与权威值矛盾的等级"
+                    )
+                elif self.chapter_number in (8, 9):
+                    constraint_parts.append(
+                        f"- 🔴 本章风险等级表述必须为「{level}」（措施前{pre}分、措施后{post}分，系统计算）。"
+                        f"结论处禁止写『中风险』『高风险』『一般偏中』等与权威值矛盾的等级；"
+                        f"如需说明措施前后变化，表述为「措施前{pre}分、落实措施后{post}分，均为{level}」"
+                    )
+                else:
+                    constraint_parts.append(
+                        f"- 风险等级按系统计算值「{level}」（措施前{pre}分、措施后{post}分），不得写矛盾等级"
+                    )
             if constraint_parts:
                 constraint_text = "\n🔒 项目真实数据约束（必须严格遵守，不得编造或替换）：\n" + "\n".join(constraint_parts) + "\n"
                 # 追加到 user_prompt 末尾（最近原则，LLM 更重视）
                 user_prompt = user_prompt + "\n\n" + constraint_text
         except Exception:
             pass
+
+        # 🔴 文风约束：以范文为蓝本重写、去 AI 痕迹。
+        #    放在这里（而不是 `_format_rag_for_prompt`）是因为 act() 有**两条分支**：
+        #      · `_use_custom_prompt` → `_format_rag_for_prompt`；
+        #      · 否则 → `_build_llm_prompt`。
+        #    只有本处是两条分支的**公共下游**，放这里才能保证每一章都带上。
+        if FANWEN_STYLE_GUIDE.strip() not in user_prompt:
+            user_prompt = user_prompt + "\n\n" + FANWEN_STYLE_GUIDE
 
         # 🔴 Inject Few-Shot template example for format alignment (respects style)
         from app.agent.report_styles import get_few_shot
@@ -214,10 +299,7 @@ class ChapterAgentBase(BaseAgent):
         if few_shot:
             system_prompt = system_prompt + few_shot
 
-        # 🔴 Inject chapter-specific image info into prompt
-        image_note = self._build_chapter_image_note(state)
-        if image_note:
-            user_prompt = user_prompt + "\n\n" + image_note
+        # 🔴 图片统一由组装器按图库分类插入；不再向 prompt 注入任何图片信息/标记要求。
 
         # 🔴 Inject table skeleton format instructions into EVERY chapter agent's prompt
         # This ensures per-chapter agent overrides of _build_llm_prompt still get table format
@@ -250,7 +332,22 @@ class ChapterAgentBase(BaseAgent):
                 "sources": rag_context.get("sources", []) if isinstance(rag_context, dict) else [],
             }
 
+        # 🔴 工具预检索回合：agent 可按需自主调用后端能力（RAG/勘测定界/评分）
+        # 把工具结果作为「真实数据补充」注入 user_prompt，再进入正文生成。
+        # 失败/关闭时完全回退到现有纯文本路径，不改变生成行为。
+        try:
+            tool_results = await self._maybe_run_tool_round(state, user_prompt, system_prompt)
+            if tool_results:
+                user_prompt = user_prompt + "\n\n## 🔧 工具补充数据（真实，可直接引用）\n" + "\n".join(tool_results)
+                await self._emit_thinking(f"已通过工具获取补充数据（{len(tool_results)} 项），用于本章生成")
+        except Exception as _te:
+            logger.warning(f"Tool-call round skipped for ch{self.chapter_number}: {type(_te).__name__}: {_te}")
+
         # 🔴 Retry loop for LLM calls (shared client can fail under parallel load)
+        # ⚠️ `settings` 必须**局部 import** —— 模块级 `from app.config import settings`
+        #    会成环（app.config → database.engine → logging_config → 本模块）。
+        from app.config import settings as _cfg
+
         max_retries = 3
         last_error = None
         content = ""
@@ -267,14 +364,15 @@ class ChapterAgentBase(BaseAgent):
                 # 🔴 Guidance — agent decides structure based on professional experience
                 writing_guide = (
                     "\n\n## 要求\n"
-                    "1. 你是一位资深稳评工程师，根据专业知识决定本章的结构和内容深度\n"
+                    "1. 你是一位资深稳评工程师，根据专业知识决定本章每个小节下的内容深度\n"
                     "2. 数据用「材料3：本项目数据」中提供的，没有的不编造\n"
                     "3. 地名/村名/社区名必须来自项目数据，禁止使用LLM内部知识中的地名\n"
                     "4. 写短句，像老工程师写报告，不要AI翻译腔\n"
                     "5. 不用「第一/第二/第三」排比，不用「具有重要/切实/有力」等套词\n"
-                    "6. ⚠️ 章节结构自由决定（不需要固定小节数），根据内容需要自然组织\n"
-                    "7. ⚠️ 「材料5：本章可用图片」中如有图片，必须在正文对应位置插入标记\n"
-                    "8. 表格只在必要时使用，不要为填模板而加表\n"
+                    "6. 🔴 子标题结构：严格用下方「本章结构规范」/「本章必须使用的子标题」给出的编号标题"
+                    "（如 4.1 合法性分析、6.1 量化评分指标体系）。禁止自创数字编号标题，"
+                    "禁止用「六、」「八、」中文序号标题；更细的分点用（一）（二）（三）写在正文里，不用编号标题。\n"
+                    "7. 表格只在必要时使用，不要为填模板而加表\n"
                 )
                 system_prompt = system_prompt + writing_guide
 
@@ -284,8 +382,16 @@ class ChapterAgentBase(BaseAgent):
                         system=system_prompt,
                         max_tokens=8000,
                         temperature=0.4,  # Higher temp for more natural variation
+                        # 🔴 关思考：推理模型会把预算烧在 reasoning_content 上，
+                        #    正文一个字都出不来（详见 config.CHAPTER_DISABLE_THINKING）。
+                        disable_thinking=_cfg.CHAPTER_DISABLE_THINKING,
                     ),
-                    timeout=150.0,
+                    # 🔴 单次预算 8000 token 的中文正文，按 DeepSeek 的吐字速度要
+                    #    200～400s；若被 finish_reason=length 截断，服务内部还会放大到
+                    #    16000 再重试一次 —— 150s 连第一次都跑不完。
+                    #    实测第 8 章（稳评方法与过程，四大节、8000+ 字）连续两轮
+                    #    3 次尝试全部 TimeoutError，只能回退上一轮正文。
+                    timeout=600.0,
                 )
                 content = result.get("content", "")
                 reasoning = result.get("reasoning", "")
@@ -320,6 +426,15 @@ class ChapterAgentBase(BaseAgent):
             await self._emit_thinking(reasoning[:500])
 
         content = self._clean_content(content)
+        # 🔴 整章重复兜底（LLM 偶发输出两遍）
+        content = self._dedup_repeated_blocks(content)
+        # 🔴 三级标题规范化（LLM 屡次退回加粗写法，提示约束不住，用后处理兜底）
+        content = self._apply_section_subs(content)
+        # 🔴 按参照件模板**通篇无表**的章节：确定性删表（提示词约束不住时的兜底）。
+        #    第十一章「分析预测风险源」模板里一张表都没有，而「风险因素初始风险等级表」
+        #    属**第十二章 表12-4**。本章若也写一张，报告里就冒出两张同名表。
+        if self.chapter_number in self.NO_TABLE_CHAPTERS:
+            content = self._strip_markdown_tables(content)
         # 🔴 金湖模板：不注入系统表格，LLM生成markdown表格即可
         tables = self._extract_tables(content)
         sources = rag_context.get("sources", [])
@@ -363,6 +478,20 @@ class ChapterAgentBase(BaseAgent):
             if phrase not in markdown:
                 issues.append(f"第{self.chapter_number}章: 缺少关键词「{phrase}」")
 
+        # 🔴 地类/权属面积重复检测：同一大数值（5-7位）在正文出现≥4次，
+        # 疑似 LLM 把总面积（如326342）套用到每个地类/权属上 → 触发重写
+        if self.chapter_number == 4:
+            import re as _re_area
+            from collections import Counter
+            area_nums = _re_area.findall(r'(?<!\d)(\d{5,7})(?=\s*(?:㎡|平方米|亩|m²))', markdown)
+            for num, cnt in Counter(area_nums).items():
+                if cnt >= 4:
+                    issues.append(
+                        f"第4章: 数字{num}重复出现{cnt}次，疑似把总面积套用到多个地类/权属，"
+                        f"必须与第6章 表6-1 的真实数据核对（表中逐地块/逐权属列出），不得每项都写总面积"
+                    )
+                    break
+
         return issues
 
     async def update_state(self, state: dict, result: Dict[str, Any]) -> dict:
@@ -401,42 +530,6 @@ class ChapterAgentBase(BaseAgent):
         return state
 
     # ---- Subclass Override Hooks ----
-
-    def _build_chapter_image_note(self, state: dict) -> str:
-        """Build image placement instructions for this chapter.
-
-        Uses auto-built chapter image map from assembler + DataAnalysisAgent results.
-        """
-        # First check DataAnalysisAgent results
-        chapter_images = state.get("_chapter_images", {})
-        ch_key = str(self.chapter_number)
-        ch_imgs = list(chapter_images.get(ch_key, []))
-
-        # Fall back to auto-built chapter image map (from _get_session_images)
-        if not ch_imgs:
-            ch_map = state.get("_chapter_image_map", {})
-            ch_imgs = ch_map.get(self.chapter_number, [])
-
-        if not ch_imgs:
-            return ""
-
-        lines = [
-            "## 📸 本章必须插入的图片",
-            f"以下 {len(ch_imgs)} 张图片属于本章，必须在正文中引用：",
-        ]
-        ch = self.chapter_number
-        for i, img in enumerate(ch_imgs, 1):
-            if isinstance(img, dict):
-                path = img.get("path", "")
-                fname = path.rsplit("/", 1)[-1] if "/" in path else path
-                caption = img.get("caption", fname)
-                lines.append(f"{i}. `![图{ch}-{i} {caption}]` → 文件: {fname}")
-            else:
-                fname = str(img).rsplit("/", 1)[-1] if "/" in str(img) else str(img)
-                lines.append(f"{i}. `![图{ch}-{i} {fname}]`")
-
-        lines.append(f"\n🔴 在正文中必须插入以上图片标记（如 `![图{ch}-1 xxx]`），每个标记独占一行，放在相关段落之后。")
-        return "\n".join(lines)
 
     def _enrich_with_rag(self, content: str, rag_context: dict, user_data: dict) -> str:
         """Enrich template content with RAG-retrieved knowledge references.
@@ -486,22 +579,187 @@ class ChapterAgentBase(BaseAgent):
     ) -> tuple:
         """Build (system_prompt, user_prompt) for LLM generation.
 
-        Subclasses override to provide chapter-specific prompts.
+        默认实现完全由「章节结构规范」（chapter_definitions.CHAPTER_SECTION_SPECS）
+        驱动：标题、小节、内容要点、数据要求、图片规格全部来自单一事实源，
+        不再在各章 agent 里重复写死提示词。
+
+        子类只需覆盖 `_chapter_extra_context()` 注入本章特有的补充上下文
+        （如评分参考、勘测定界表、问卷统计表）。
         Returns (system_prompt: str, user_prompt: str).
         """
         system_prompt = self._default_system_prompt(state)
+        extra = self._chapter_extra_context(state, rag_context, user_data)
+        if extra:
+            system_prompt = f"{system_prompt}\n\n{extra}"
         user_prompt = self._default_user_prompt(state, rag_context, user_data)
         return system_prompt, user_prompt
 
-    def _fallback_content(self, state: dict) -> str:
-        """Template-based fallback when LLM is unavailable.
+    def _chapter_extra_context(
+        self,
+        state: dict,
+        rag_context: Dict[str, Any],
+        user_data: Dict[str, Any],
+    ) -> str:
+        """本章特有的补充上下文（默认无）。子类按需覆盖。"""
+        return ""
 
-        Subclasses override to provide chapter-specific fallback content.
+    # ═══════════════════════════════════════════════════════════════
+    # Agent Tool-Call 回合（按需调用后端能力）
+    # ═══════════════════════════════════════════════════════════════
+    async def _maybe_run_tool_round(
+        self,
+        state: dict,
+        user_prompt: str,
+        system_prompt: str,
+    ) -> List[str]:
+        """Agent 工具预检索回合：LLM 自主决定是否调用工具补充数据。
+
+        仅在开关开启、LLM 支持 tools、且本章不是纯模板模式时执行。
+        返回工具执行结果文本列表（空列表 = 未调用工具或关闭）。
+
+        工具结果只作为 prompt 增补注入，不写入 state，失败时回退不中断。
         """
-        return (
-            f"## 第{self._chapter_num_cn()}章 {self.chapter_title}\n\n"
-            f"【待生成：LLM服务不可用，请重试或手动补充本章内容】\n\n"
+        if getattr(self, "_use_template", False) or not self._llm:
+            return []
+        try:
+            from app.config import settings
+            if not getattr(settings, "ENABLE_AGENT_TOOLCALL", True):
+                return []
+        except Exception:
+            return []
+
+        # 只对需要数据的章节尝试（可调参：默认全部开启）
+        try:
+            from app.agent.tools import ALL_TOOLS_SCHEMA, execute_tool_calls
+
+            # 组装简短的工具决策 prompt（避免把超大 user_prompt 重复发给 LLM）
+            decision_prompt = self._build_tool_decision_prompt(state, user_prompt)
+
+            resp = await asyncio.wait_for(
+                self._llm.chat_with_reasoning(
+                    messages=[{"role": "user", "content": decision_prompt}],
+                    system="你是一个稳评报告助手。判断是否需要调用工具获取真实数据。"
+                           "需要时输出 tool call；不需要则直接简短回复'无需工具'。",
+                    max_tokens=512,
+                    temperature=0.2,
+                    tools=ALL_TOOLS_SCHEMA,
+                ),
+                timeout=60.0,
+            )
+        except Exception as e:
+            logger.debug(f"Tool-call round init failed (fallback to plain text): {e}")
+            return []
+
+        tool_calls = resp.get("tool_calls") or []
+        if not tool_calls:
+            return []
+
+        # 执行工具并上报事件
+        await self._emit_thinking(
+            f"🔧 调用工具: " + ", ".join(tc.get("name", "") for tc in tool_calls)
         )
+        context = self._build_tool_context(state)
+        results = await execute_tool_calls(tool_calls, context)
+        return [r.get("content", "") for r in results if r.get("content")]
+
+    def _build_tool_decision_prompt(self, state: dict, user_prompt: str) -> str:
+        """组装工具决策 prompt：给 LLM 提供项目关键信息 + 按章节引导相关工具。"""
+        filled = state.get("filled_data", {}) or {}
+        proj = {
+            "project_name": filled.get("project_name", ""),
+            "location": filled.get("location", ""),
+            "area_mu": filled.get("area_mu", ""),
+            "land_use": filled.get("land_use", ""),
+            "doc_reference": filled.get("doc_reference", ""),
+        }
+        proj_text = "\n".join(f"- {k}: {v}" for k, v in proj.items() if v)
+
+        # 🔴 按章节给与最相关的工具引导（避免无关工具的干扰调用）
+        ch = self.chapter_number
+        available = "可用工具：\n"
+        if ch in (1, 4):
+            available += "- parse_kd_table：获取地块/土地分类面积真实数据（第6章 表6-1），本表内容高度相关\n"
+        if ch == 3:
+            available += "- query_survey：获取公众问卷调查统计（身份/年龄/职业/了解/态度/诉求方式人数）\n"
+            available += "- query_dept_survey：获取部门/单位问卷调查统计\n"
+        if ch in (6, 8):
+            available += "- calc_risk_scoring：获取风险评分（扣分制）与风险等级\n"
+        else:
+            available += "- calc_risk_scoring：如需风险评分数据可调用\n"
+        available += "- retrieve_rag：正文需引用具体法规/规范/范文条文时调用"
+        if ch == 3:
+            available += "（quote法规依据、调查规范）"
+        available += "\n- parse_kd_table：如需地块/面积数据可调用\n"
+
+        return (
+            f"当前项目信息：\n{proj_text or '（暂无）'}\n\n"
+            f"你将生成报告第 {ch} 章。判断是否需要调用工具获取真实数据：\n{available}\n"
+            f"优先调用与你本章内容最相关的工具；若需要法规依据，可另调 retrieve_rag。\n"
+            f"如无需调用工具，直接回复'无需工具'（不要生成正文）。"
+        )
+
+    def _build_tool_context(self, state: dict) -> dict:
+        """构造工具执行所需的项目上下文（session_id、勘测定界 pdf 路径等）。"""
+        filled = state.get("filled_data", {}) or {}
+        uploaded = state.get("_uploaded_files", []) or []
+        paths = []
+        for f in uploaded:
+            if isinstance(f, dict):
+                p = f.get("path", f.get("file_path", ""))
+            else:
+                p = str(f)
+            if p:
+                paths.append(str(p))
+        # 本批上传的勘测定界报告（从文件名识别）
+        survey_report_path = ""
+        for p in paths:
+            if "勘测" in p or "界" in p:
+                survey_report_path = p
+                break
+        return {
+            "session_id": state.get("session_id", "default"),
+            "domain": "stability",
+            "file_paths": paths,
+            "survey_report_path": survey_report_path,
+            "facts": {
+                "project_name": filled.get("project_name", ""),
+                "support_rate": filled.get("support_rate", ""),
+                "location": filled.get("location", ""),
+            },
+            # 🔴 供「问卷/部门意见」工具使用的完整统计与生成缓存
+            "survey_analysis": (state.get("generated_sections", {}) or {}).get("survey_analysis", {}) or {},
+            "generated_sections": state.get("generated_sections", {}) or {},
+            "structured_data": state.get("structured_data", {}) or {},
+            # 报告相关字段（供多工具查询）
+            "filled": filled,
+        }
+
+    def _fallback_content(self, state: dict) -> str:
+        """LLM 不可用时的兜底内容 —— **按本章结构规范输出骨架**（不写死任何章节）。
+
+        与旧版「只给一句待生成」不同：这里按 chapter_definitions 的二级标题
+        逐节输出标题 + 中性说明，保证降级产物的**结构**仍与案卷一致，
+        组装出的目录/层级不塌，人工补写时可直接在各节下续写。
+        """
+        lines = [f"## 第{self._chapter_num_cn()}章 {self.chapter_title}", ""]
+        try:
+            from app.agent.chapter_definitions import (
+                get_chapter_section_specs, get_chapter_kind)
+            specs = get_chapter_section_specs(self.chapter_number)
+            if specs:
+                for sec in specs:
+                    lines.append(f"### {sec.get('title', '')}")
+                    points = sec.get("points") or []
+                    note = points[0] if points else ""
+                    lines.append(f"（本节待补充：{note}）" if note else "（本节待补充）")
+                    lines.append("")
+            elif get_chapter_kind(self.chapter_number) in ("table", "attachment"):
+                lines.append("（本章由系统按模板生成，无需 LLM 撰写）")
+            else:
+                lines.append("【待生成：LLM服务不可用，请重试或手动补充本章内容】")
+        except Exception:
+            lines.append("【待生成：LLM服务不可用，请重试或手动补充本章内容】")
+        return "\n".join(lines) + "\n"
 
     def _get_key_phrases(self) -> List[str]:
         """Key phrases that should appear in this chapter.
@@ -512,10 +770,36 @@ class ChapterAgentBase(BaseAgent):
 
     # ---- Internal Helpers ----
 
+    @staticmethod
+    def _sanitize_filled_value(value: Any) -> str:
+        """清洗 filled_data 中可能混入的结构化数据（视觉分析 dict/JSON）。
+
+        背景：image_analyzer 的视觉返回有时被整段写入 filled_data['location']，
+        形如 "{'general_area': '疑似城乡结合部…', 'visual_landmarks': …}"，
+        被当作"唯一真实值"注入 prompt 后，LLM 会原样抄进报告正文。
+
+        规则：
+        - dict/JSON 形态 → 返回空串（不可作为位置正文，交由 field_validate 用 PDF 原文修复）
+        - 普通文本 → 原样返回
+        """
+        if value is None:
+            return ""
+        s = str(value).strip()
+        if not s:
+            return ""
+        # Python dict 字面量或 JSON 对象
+        if s.startswith("{") or s.startswith("[{"):
+            return ""
+        return s
+
     def _chapter_num_cn(self) -> str:
-        """Convert chapter number to Chinese numeral."""
-        cn = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
-        return cn[self.chapter_number] if self.chapter_number <= 10 else str(self.chapter_number)
+        """Convert chapter number to Chinese numeral（支持 1~99，12 章结构需要「十一」「十二」）。"""
+        n = int(self.chapter_number)
+        if n <= 10:
+            return ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"][n]
+        if n < 20:
+            return "十" + ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][n - 10]
+        return f"{n // 10}十" + (["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][n % 10] if n % 10 else "")
 
     async def _retrieve_rag(self, state: dict) -> Dict[str, Any]:
         """Retrieve chapter-specific RAG context from knowledge base.
@@ -553,6 +837,14 @@ class ChapterAgentBase(BaseAgent):
                 domain=state.get("_domain") or state.get("_conversation_domain"),
             )
 
+            # 🔴 四性分析专线：第4章 4.2 / 第10章整章都要写四性分析，
+            #    主类型取回的是评分表碎片，四性范文排不上来 → LLM 只能凭记忆编法规名。
+            #    这里单独从 kb_four_dimension 取同类土地征收案卷的四性原文。
+            if self.chapter_number in (4, 10):
+                _fd = await self._retrieve_four_dimension(state)
+                if _fd:
+                    result["four_dimension_context"] = _fd
+
             # Cache in state
             rag_cache = state.setdefault("_rag_cache", {})
             rag_cache[self.chapter_number] = result
@@ -562,6 +854,280 @@ class ChapterAgentBase(BaseAgent):
         except Exception as e:
             logger.warning(f"Chapter {self.chapter_number} RAG failed: {e}")
             return {}
+
+    def _dedup_repeated_blocks(self, md: str) -> str:
+        """🔴 兜底：LLM 偶发把整章输出两遍（截断后重试 / 结构规范重复注入）。
+
+        以二级标题为界把正文切成「标题块」，**同名块只保留首次出现的那一份**。
+        实测第1章曾整章重复（7,375 字 ≈ 2×），本方法可自动收敛。
+        注意要按「块」而非按行处理：第二份里可能有第一份没有的标题
+        （如第一份被截断在（二），第二份才写到（三））—— 那些块要保留。
+        """
+        import re as _re
+        heads = list(_re.finditer(r'^#{2,4}\s+\S.*$', md, flags=_re.MULTILINE))
+        if len(heads) < 4:
+            return md
+
+        prefix = md[:heads[0].start()]          # 章标题与前言（第一个二级标题之前）
+        blocks = []
+        for k, m in enumerate(heads):
+            end = heads[k + 1].start() if k + 1 < len(heads) else len(md)
+            blocks.append((m.group(0).strip(), md[m.start():end]))
+
+        seen, kept = set(), []
+        for title, seg in blocks:
+            if title in seen:
+                continue                         # 同名块 → 丢弃（保留首次）
+            seen.add(title)
+            kept.append(seg)
+        if len(kept) == len(blocks):
+            return md
+        return (prefix + "".join(kept)).strip()
+
+    # 按参照件模板**通篇无表**的章节（第十一章 分析预测风险源）。
+    # 🔴「风险因素初始风险等级表」按模板属**第十二章 表12-4**；第十一章再写一张，
+    #   报告里就是两张同名表（业主：「重名不正确吧」）。
+    NO_TABLE_CHAPTERS = {11}
+
+    @staticmethod
+    def _strip_markdown_tables(md: str) -> str:
+        """删掉 markdown 表格整块（连同紧邻上方的表题行）。
+
+        提示词里已经写了「本章不出表」，但模型屡次照写不误 —— 层级、表名这类
+        结构问题必须用确定性后处理兜底，不能指望提示约束。
+        """
+        lines = (md or "").split("\n")
+        out, i = [], 0
+        while i < len(lines):
+            if lines[i].strip().startswith('|'):
+                # 连表题行一起删。🔴 表题与表格之间常夹一个空行，
+                #   必须先跳过空行再找表题，否则表题会孤零零留在正文里。
+                while out and not out[-1].strip():
+                    out.pop()
+                while out:
+                    _t = out[-1].strip()
+                    if _t.startswith('**表') or (_t.startswith('表') and len(_t) < 40):
+                        out.pop()
+                        while out and not out[-1].strip():
+                            out.pop()
+                    else:
+                        break
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    i += 1
+                continue
+            out.append(lines[i])
+            i += 1
+        # 删表后可能留下「空壳标题」（原标题底下就只有一张表）→ 一并去掉
+        _ls = "\n".join(out).split("\n")
+        keep = []
+        for k, l in enumerate(_ls):
+            if l.strip().startswith('#'):
+                _nxt = next((x.strip() for x in _ls[k + 1:] if x.strip()), "")
+                if not _nxt or _nxt.startswith('#'):
+                    continue
+            keep.append(l)
+        return re.sub(r'\n{3,}', '\n\n', "\n".join(keep))
+
+    @staticmethod
+    def _promote_dynamic_sections(md: str) -> str:
+        """动态小节章（第11、13章）把 LLM 自拟的 `N.小节名` 裸行提升为 `### （一）小节名`。
+
+        🔴 影响的是**章节层级与目录**：这两章没有固定小节清单（`dynamic_sections`），
+           小节名全由 LLM 自拟，它屡次写成 `1.xxx` 裸行 → 层级掉成正文条目，
+           整章在目录里只剩一个章标题（实测第11章 6 节、第13章 6 节全部丢失）。
+
+        判据三条同时满足，**宁可漏升也不误升**：
+          ① 该行独占一段（前一行是空行**或标题行** —— 模型常把小节 1 紧贴在章标题下一行）；
+          ② 编号**从 1 起连续**递增 —— 正文里的 1. 2. 3. 条目接不上这个序列；
+          ③ 行短（≤30 字）且不带句末标点、不以冒号引出（那是在写正文条目）。
+        """
+        _CN = {i + 1: c for i, c in enumerate("一二三四五六七八九十")}
+        lines = (md or "").split("\n")
+        out, expect = [], 1
+        for i, line in enumerate(lines):
+            t = line.strip()
+            # 🔴 已开始提升后，再冒出「没编号的 ### 二级标题」（如汇总小节）就按序补号，
+            #    否则（一）（二）…里会混进一个光秃秃的二级标题，目录看着就散了。
+            if (expect > 1 and re.match(r'^###\s+\S', t)
+                    and not re.match(r'^###\s+（[一二三四五六七八九十]+）', t)):
+                out.append(f"### （{_CN.get(expect, expect)}）{t[4:].strip()}")
+                expect += 1
+                continue
+            m = re.match(r'^(\d{1,2})[.、]\s*(\S.{1,28})$', t)
+            _prev = lines[i - 1].strip() if i else ""
+            prev_ok = (i == 0) or (not _prev) or _prev.startswith('#')
+            if (m and prev_ok and int(m.group(1)) == expect
+                    and not re.search(r'[。；，,;：:]$', t)):
+                out.append(f"### （{_CN.get(expect, expect)}）{m.group(2).strip()}")
+                expect += 1
+                continue
+            out.append(line)
+        return "\n".join(out) if expect > 1 else md
+
+    def _apply_section_subs(self, md: str) -> str:
+        """把 LLM 自创的加粗小标题规范成 `#### X.Y.Z 标题` 三级标题。
+
+        🔴 为什么需要：`chapter_definitions.CHAPTER_SECTION_SUBS` 里定义了三级标题
+        （4.2.1 合法性评估、8.4.1 现场公示…），提示词也明确要求用 `####` 输出，
+        但 LLM 屡次退回「**（一）合法性评估**」这种加粗写法 —— 提示约束不住，
+        必须用确定性后处理兜底，否则目录层级与参照件对不上。
+        """
+        # 🔴 全报告二级标题体例为「（一）（二）（三）」（业主口径：照参照件 1号）。
+        #    LLM 常写成加粗行或 ### 行，这里统一规范成 `### （一）xxx`（Heading 2，进目录）。
+        if True:
+            # 只有这三块是二级标题；块内的「（一）客观公正性原则」等要落回 `N.` 条目，
+            # 否则会被一并提升成二级标题（实测（三）下的四条原则全变成了 Heading 2）。
+            _BLOCKS = {"（一）稳评理由", "（二）稳评目的", "（三）稳评原则"}
+            _STD = set()
+            try:
+                from app.agent.chapter_definitions import get_chapter_section_specs
+                _STD = {x.get("title", "") for x in get_chapter_section_specs(self.chapter_number)}
+            except Exception:
+                pass
+            _CN2N = {c: i + 1 for i, c in enumerate("一二三四五六七八九十")}
+            out = []
+            for line in md.split("\n"):
+                t = line.strip()
+                # 兼容三种写法：加粗行、裸行、以及被 LLM 写成 ### / #### 的标题行
+                m = re.match(r'^#{0,4}\s*\*{0,2}\s*([（(][一二三四五六七八九十]+[）)]\s*[^*\s]{1,20})\s*\*{0,2}$', t)
+                if not m:
+                    out.append(line); continue
+                body = m.group(1).strip()
+                if body in _BLOCKS or body in _STD:
+                    out.append(f"### {body}")          # 标准二级标题 → 保留
+                else:
+                    # 块内条目（如（一）客观公正性原则）→ 落回 `N.xxx` 正文条目
+                    mm = re.match(r'^[（(]([一二三四五六七八九十]+)[）)]\s*(.+)$', body)
+                    out.append(f"{_CN2N.get(mm.group(1), 1)}.{mm.group(2).strip()}" if mm else line)
+            md = "\n".join(out)
+
+        # 🔴 动态小节章（第11/13章，`sections` 为空、小节名由 LLM 自拟）：
+        #    它把顶层小节写成 `1.xxx` 裸行，层级掉成正文条目 → 确定性提升为二级标题。
+        try:
+            from app.agent.chapter_definitions import get_chapter_section_specs
+            if not get_chapter_section_specs(self.chapter_number):
+                md = self._promote_dynamic_sections(md)
+        except Exception:
+            pass
+
+        try:
+            from app.agent.chapter_definitions import get_chapter_section_subs
+            subs = get_chapter_section_subs(self.chapter_number)
+        except Exception:
+            return md
+        if not subs:
+            return md
+
+        # {三级标题正文: 节内序号}，用于把「（一）合法性评估」「1.项目名称」对回来。
+        # 🔴 序号**在各二级小节内重排**，输出成 `#### 1.标题` —— 与照搬章
+        #    （reference_corpus ①a）同一套三级标题体例，全报告一致。
+        #    旧实现只认 `X.Y.Z 标题` 形式的配置项，第6章配置里写的是裸标题
+        #    （「项目名称」），于是 `want` 恒为空、三级标题一个都升不出来。
+        want = {}
+        for _sec, items in (subs or {}).items():
+            for _i, full in enumerate(items, 1):
+                _t = re.sub(r'^\d+(?:\.\d+){1,2}\s*', '', str(full).strip()).strip()
+                if _t:
+                    want[_t] = _i
+
+        out = []
+        for line in md.split("\n"):
+            t = line.strip()
+            if not t:
+                out.append(line)
+                continue
+            # 已是标题行（任何编号写法）且正文对得上配置 → 规范成 `#### N.标题`
+            _m3 = re.match(r'^#{3,4}\s*\d+(?:\.\d+)*[.、]?\s*(.+)$', t)
+            if _m3 and _m3.group(1).strip() in want:
+                _k = _m3.group(1).strip()
+                out.append(f"#### {want[_k]}.{_k}")
+                continue
+            # 加粗小标题／裸编号行：「**（一）合法性评估**」「1.项目名称」
+            m = re.match(r'^\*\*\s*(?:[（(][一二三四五六七八九十\d]+[）)]\s*|\d+[.、]\s*)?([^*]+?)\s*\*\*$', t)
+            if m:
+                key = m.group(1).strip()
+            elif re.match(r'^\d{1,2}[.、]\s*\S', t):
+                key = re.sub(r'^\d{1,2}[.、]\s*', '', t).strip()
+            else:
+                key = ""
+            if key and key in want:
+                out.append(f"#### {want[key]}.{key}")
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def _format_rag_for_prompt(self, rag_context: dict, max_per_section: int = 6000) -> str:
+        """把 RAG 检索结果渲染成 prompt 素材块（供自定义 prompt 路径注入）。
+
+        🔴 为什么必须注入：`_use_custom_prompt` 分支原先只用主编排给的 prompt，
+        把 `think()` 检索到的知识库素材整个丢掉。后果是 LLM 凭记忆写，
+        编造法规名称、规划名称、同类项目先例 —— 业主明确要求「不要让 LLM 乱编，要结合 RAG」。
+
+        素材按类型分组贴出，并附硬约束：**只能用这里和事实卡里的内容**。
+        """
+        if not isinstance(rag_context, dict):
+            return ""
+        _groups = [
+            # 🔴 四性分析排最前：第4章 4.2 / 第10章 直接照它的行文与依据写
+            ("four_dimension_context", "知识库·同类土地征收案卷「四性分析」原文"),
+            ("chapter_context", "知识库·规范条文与同类案卷"),
+            ("local_regulation_context", "知识库·地方规范"),
+            ("example_context", "知识库·同类项目范例"),
+            ("project_context", "本项目上传材料摘录"),
+        ]
+        parts = []
+        for key, label in _groups:
+            txt = str(rag_context.get(key) or "").strip()
+            if len(txt) < 30:
+                continue
+            parts.append(f"### 【{label}】\n{txt[:max_per_section]}")
+        if not parts:
+            return ""
+
+        return (
+            "\n## 📚 检索到的真实素材（写本章**只能**依据这些 + 事实卡）\n"
+            + "\n\n".join(parts)
+            + "\n\n## ⛔ 素材使用铁律\n"
+            "- 上面这些是**真实检索结果**：法规名称、文号、规划名称、同类项目先例**只能从里面取**，"
+            "一个字都不许自己编（编造法规文号是硬错误）；\n"
+            "- 上述素材里**没有提到**的法规、规划、先行项目、机构名称，一律不要写；\n"
+            "- 本项目专属数字/名称一律以「🔗 本项目事实卡」为准；两处都没有的，"
+            "写「以现状调查确认结果为准」这类规范表述，**不要编一个像样的数字填上**；\n"
+            "- 范例（同类项目）只作**行文与结构参考**，其中的项目名/地名/数字**绝不能抄进正文**。"
+        )
+
+    async def _retrieve_four_dimension(self, state: dict, n: int = 10) -> str:
+        """专线检索「四性分析」范文（`kb_four_dimension`）。
+
+        🔴 为什么要专线：第4章 4.2 与第10章整章都要写四性分析，而
+        `CHAPTER_KB_TYPES` 的主类型取回的是**评分表碎片**，四性范文混在几十条里排不上来。
+        结果 LLM 只能凭记忆编法规名与规划名 —— 业主明确要求「不要让 LLM 乱编，要结合 RAG」。
+
+        该库里是知识库内的**土地征收案卷**四性分析原文（法律法规相符性/地方规划相符性/
+        区域经济发展需要/符合群众根本利益/资金来源可靠…），正是本项目能对号入座的依据。
+        """
+        try:
+            from app.rag.rag_service import rag_service
+            from app.agent.chapter_definitions import get_chapter_rag_query
+            _ret = rag_service.retriever          # 复用常驻检索器（自带 embedder + vector_store）
+            vs = _ret.vector_store
+            col = vs.get_or_create_collection("kb_four_dimension")
+            if not col.count():
+                return ""
+            q = f"{get_chapter_rag_query(self.chapter_number)} 合法性 合理性 可行性 可控性 " \
+                f"{str(state.get('project_context',''))[:80]}"
+            emb = await _ret.embedder.embed_text(q)
+            res = vs.query(col, emb, n)
+            docs = (res.get("documents") or [[]])[0] if isinstance(res, dict) else []
+            metas = (res.get("metadatas") or [[]])[0] if isinstance(res, dict) else []
+            out = []
+            for d, m in zip(docs, metas or [None] * len(docs)):
+                sec = str((m or {}).get("section_title", "") or "")
+                out.append(f"【{sec}】\n{d}" if sec else str(d))
+            return "\n\n---\n\n".join(out)
+        except Exception as e:
+            logger.warning(f"Chapter {self.chapter_number} 四性分析检索失败: {e}")
+            return ""
 
     def _collect_user_data(self, state: dict) -> Dict[str, Any]:
         """Extract relevant user-provided data for this chapter from all sources.
@@ -597,6 +1163,9 @@ class ChapterAgentBase(BaseAgent):
 
         # ---- Strategy 1: Direct key lookup ----
         for key, value in filled.items():
+            # 🔴 location 若混入视觉分析 dict/JSON，清洗为纯文本（防正文出现 {'general_area': ...}）
+            if key in ("location", "land_location"):
+                value = self._sanitize_filled_value(value)
             data[key] = value
 
         # ---- Strategy 2: Smart extraction from placeholder-keyed values ----
@@ -610,7 +1179,7 @@ class ChapterAgentBase(BaseAgent):
         extraction_rules = [
             # (key_name, regex_pattern, extraction_group)
             ("org_name", [
-                r'(?:淮安|南京|南通|苏州|无锡|常州|镇江|扬州|泰州|盐城|徐州|连云港|宿迁|金湖|盱眙|洪泽)\S{0,20}(?:人民政府|管理委员会|街道办事处)',
+                r'[一-龥]{2,6}(?:人民政府|管理委员会|街道办事处)',
                 r'(?:责任单位|决策单位|征收主体)[：:]\s*(\S{2,30})',
             ]),
             ("implement_unit", [
@@ -774,30 +1343,41 @@ class ChapterAgentBase(BaseAgent):
     def _derive_survey_from_facts(filled: dict) -> dict:
         """Derive survey statistics from known project facts when OCR isn't available.
 
-        🔴 ONLY uses explicitly provided data (household_count, support_rate from filled_data).
-        Does NOT fabricate or estimate any percentages or distributions.
+        🔴 问卷总数只取 total_samples/survey_total_count，严禁用 household_count（涉及户数≠问卷数）。
+        支持率/反对率取真实字段，未提供则不推导，禁止把「户数」当「问卷数」换算人数。
         """
         stats = {}
-        total = int(filled.get("household_count", 0) or 0)
-        support_rate_str = filled.get("support_rate", "")
+        # 问卷总数：优先核验值 survey_total_count，其次 total_samples；不回退到 household_count
+        try:
+            total = _safe_int(filled.get("survey_total_count") or filled.get("total_samples"))
+        except (TypeError, ValueError):
+            total = 0
+        support_rate_str = str(filled.get("support_rate", "") or "").replace('%', '').strip()
+        oppose_rate_str = str(filled.get("oppose_rate", "") or "").replace('%', '').strip()
 
-        # Parse support_rate
+        # Parse rates
         support_rate = 0.0
+        oppose_rate = None
         if support_rate_str:
             try:
-                support_rate = float(str(support_rate_str).replace('%', ''))
+                support_rate = float(support_rate_str)
             except (ValueError, TypeError):
-                pass
+                support_rate = 0.0
+        if oppose_rate_str:
+            try:
+                oppose_rate = float(oppose_rate_str)
+            except (ValueError, TypeError):
+                oppose_rate = None
 
         if total > 0:
             stats["total_surveys"] = str(total)
         if support_rate > 0 and total > 0:
             support = int(total * support_rate / 100)
-            oppose = total - support
+            oppose = oppose_rate if oppose_rate is not None else max(0, 100 - support_rate)
             stats["support_count"] = str(support)
             stats["support_rate"] = f"{support_rate:.1f}%"
-            stats["oppose_count"] = str(oppose)
-            stats["oppose_rate"] = f"{100 - support_rate:.1f}%"
+            stats["oppose_count"] = str(int(total * oppose / 100))
+            stats["oppose_rate"] = f"{oppose:.1f}%"
         # 🔴 NO fabrication: don't estimate know_rate, conditional_support, etc.
 
         return stats
@@ -903,6 +1483,15 @@ class ChapterAgentBase(BaseAgent):
         # 结构：`## 第X章 XXX` 后若有直接正文（非标题行），且之后还有二级标题 → 删除该游离正文
         content = self._remove_h1_free_text(content)
 
+        # 🔴 修复标题编号混乱：自创数字三级标题→（一）（二）；中文序号章重复标题→删除
+        content = self._normalize_headings(content)
+
+        # 🔴 兜底清理旧44分制残留（评分=扣分值，无"满分44分"概念）
+        content = re.sub(r'[（(]?\s*满分\s*44\s*分\s*[）)]?', '', content)
+        content = re.sub(r'总分\s*44\s*分', '', content)
+        content = re.sub(r'44\s*分制', '扣分制', content)
+        content = content.replace('满分44分', '').replace('总分44分', '')
+
         # Strip garbled/binary characters first
         content = re.sub(r'[^\x20-\x7E一-鿿　-〿＀-￯\n\r\t]', '', content)
         # Strip source annotations like 【数据来源：XXX】
@@ -913,14 +1502,37 @@ class ChapterAgentBase(BaseAgent):
         content = re.sub(r'\[待补充[^\]]*\]', '', content)
         # Clean up empty table cells
         content = re.sub(r'\|\s*\|\s*', '| — |', content)
-        content = re.sub(r'：\s*\n', '：—\n', content)
+        # 🔴 不要往「以冒号结尾的行」后面补破折号——那是早期占位符时代的遗留，
+        #    会产出「拟征收地块基本情况如下表所示：—」这种正文脏字符。
+        content = re.sub(r'：\s*—\s*\n', '：\n', content)
 
         # Strip JSON blocks
         content = re.sub(r'```json\s*[\s\S]*?```', '', content)
         content = re.sub(r'```\s*', '', content)
 
+        # 🔴 正文不写「界址点数」——表格（第6章 表6-1）里已经有了，写在正文纯属冗余。
+        #    注意只删**正文**；表格单元格里的「界址点数」列不受影响（本函数不处理表内）。
+        content = self._strip_boundary_point_mentions(content)
+
+        # 🔴 标准号规范化：模型常把连字符写丢（DB32/T 4013-2021 → DB32/T 40132021），
+        #    也常写成全角／长破折号。统一回「DB32/T 4013-2021」这种写法。
+        content = re.sub(
+            r'(DB\s?32\s*/\s*T\s*)(\d{3,5})\s*[-—–－‐]?\s*(\d{4})',
+            lambda m: f"{m.group(1).replace(' ', '').upper()} {m.group(2)}-{m.group(3)}",
+            content,
+        )
+        # 其他常见标准号：GB/T、JGJ、苏政发 等形如 XXXX 1234-2020
+        content = re.sub(
+            r'\b(GB\s?/\s?T|JGJ|CJJ|SL|TD\s?/\s?T)\s*(\d{3,5})\s*[-—–－‐]?\s*(\d{4})\b',
+            lambda m: f"{m.group(1).replace(' ', '')} {m.group(2)}-{m.group(3)}",
+            content,
+        )
+
         # 🔴 Fix garbled single-line tables
         content = self._fix_garbled_tables(content)
+
+        # 🔴 表格末尾被吞进来的解读句 → 拆出来单独成段
+        content = self._split_table_trailing_prose(content)
 
         # 🔴 Remove unresolved image markers (keep caption text only)
         content = re.sub(r'!\[([^\]]*)\](?:\([^)]*\))?', r'[\1]', content)
@@ -997,6 +1609,84 @@ class ChapterAgentBase(BaseAgent):
             result.append(line)
             i += 1
         return '\n'.join(result)
+
+    def _normalize_headings(self, markdown: str) -> str:
+        """修复 LLM 标题编号混乱。
+
+        规则（与模板/规范对齐）：
+        1. 标准二级标题（如 `### 4.1 合法性分析`，与 template_headings.CHAPTER_HEADINGS
+           完全一致）→ 保留原样。
+        2. 中文序号章内重复标题（如 `## 六、风险等级`、`### 八、…`）→ 删除
+           （章节标题由组装器统一生成 `# 第X章 …`）。
+        3. 其余自创标题（撞号三级标题如 `4.1 决策主体与权限`、层数不一的
+           `4.1.2`/`4.2`/`4.3` 混用）→ 统一改写为正文小点 `**（一）（二）（三）**`，
+           与模板「（一）（二）」分点风格一致。
+        """
+        import re as _re
+        # 🔴 小节名**按项目动态生成**的章（如第11章分析预测风险源、第13章工作建议），
+        #    没有固定标题表可比对，归一化会把它们的小节标题全部改写成正文小点
+        #    → 章节结构塌掉。这类章直接放行。
+        try:
+            from app.agent.chapter_definitions import has_dynamic_sections
+            if has_dynamic_sections(self.chapter_number):
+                return markdown
+        except Exception:
+            pass
+        try:
+            from app.agent.template_headings import CHAPTER_HEADINGS
+        except Exception:
+            return markdown
+
+        # 标准二级标题全文本集合：{"4.1 合法性分析", "6.1 量化评分指标体系", ...}
+        std_heading_texts = set()
+        for headings in CHAPTER_HEADINGS.values():
+            for h in headings:
+                std_heading_texts.add(h.strip())
+
+        cn_num = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+                  "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"]
+
+        lines = markdown.split('\n')
+        out = []
+        sub_counter = 0
+        inside_std_section = False
+
+        for line in lines:
+            s = line.strip()
+            m = _re.match(r'^#{1,4}\s*(.+)$', s)
+            if not m:
+                out.append(line)
+                continue
+            heading = m.group(1).strip().strip('*').strip()
+            if not heading:
+                out.append(line)
+                continue
+
+            # 标准二级标题 → 保留，重置（一）（二）计数
+            if heading in std_heading_texts:
+                out.append(line)
+                inside_std_section = True
+                sub_counter = 0
+                continue
+
+            # 中文序号章内重复标题（六、/七、/八、…）→ 删除（非章节标题本身）
+            if _re.match(r'^[一二三四五六七八九十]+、', heading) and '章' not in heading:
+                continue
+
+            # 自创标题 → 改写为（N）正文小点（文档顺序递增）
+            if inside_std_section or _re.match(r'^\d+\.\d+(\.\d+)?\s', heading):
+                sub_counter += 1
+                cn = cn_num[sub_counter] if sub_counter < len(cn_num) else str(sub_counter)
+                title = _re.sub(r'^[\d\.]+\s*', '', heading).strip()
+                # 🔴 去掉标题自带的中文序号，避免与方法生成的序号叠加成「（一）（一）」
+                title = _re.sub(r'^[（(][一二三四五六七八九十]+[）)]\s*', '', title).strip()
+                out.append(f"**（{cn}）{title}**")
+                continue
+
+            # 其他（如「一、国家法律」等固定节）→ 原样保留
+            out.append(line)
+
+        return '\n'.join(out)
 
     def _extract_tables(self, markdown: str) -> List[Dict[str, Any]]:
         """Extract table data from markdown content."""
@@ -1083,6 +1773,12 @@ class ChapterAgentBase(BaseAgent):
         """Default system prompt for chapter generation — 去AI化风格."""
         project_name = state.get("report_title", "本项目")
 
+        # 🔴 实施单位取**本报告所属公司**（字段校验阶段已按公司填好）；
+        #    取不到就明确告诉模型「不要写具体单位名」——
+        #    以前这里写死「实施单位：江苏众拓…」，模型会把我们的名字抄进外部用户的报告。
+        _impl_unit_hint = str(((state.get("filled_data") or {}).get("implement_unit")) or "").strip() \
+            or "（本报告未提供实施单位，相关位置写「待填写」，不得写入任何具体公司名）"
+
         kb_ctx = get_knowledge_context_for_chapter(state, self.chapter_number)
         kb_spec = kb_ctx.get("structure_spec", {})
         kb_constraints = kb_ctx.get("writing_constraints", {})
@@ -1116,50 +1812,59 @@ class ChapterAgentBase(BaseAgent):
         except Exception:
             section_spec = ""
 
+        # 🔴 本章「人工模板底稿」：从公司标准模板切出本章对应文本，作为结构与行文基准
+        try:
+            from app.services.template_chapter_chunker import build_template_block_for_prompt
+            template_block = build_template_block_for_prompt(self.chapter_number)
+        except Exception:
+            template_block = ""
+
         return (
-            f"你是江苏众拓项目代理咨询有限公司的稳评工程师，在淮安做了8年征地稳评。\n"
+            f"你是一位资深稳评工程师，长期做土地征收社会稳定风险评估。\n"
             f"根据你的专业经验撰写第{self._chapter_num_cn()}章「{self.chapter_title}」。\n\n"
             f"## 核心原则\n"
             f"- 根据DB32/T4013-2021规范和你8年的实战经验来组织内容\n"
             f"- 🔴 严格按下方「本章结构规范」的二级标题逐一撰写，禁止新增/删减/合并/改名标题\n"
             f"- 🔴 每个二级标题下必须有实质内容，禁止标题后空白\n"
-            f"- 所有地名只用：淮安市洪泽区朱坝街道三圩社区二组、三组、六组\n\n"
+            f"- 🔴 所有地名只能用「可用数据 / 事实卡」里的真实地名，禁止使用任何其他地名\n\n"
             f"## ⛔ 禁止\n"
             f"- 禁用词：{'、'.join(AI_BUZZWORDS)}\n"
             f"- 禁止「第一/第二/第三」工整排比\n"
-            f"- 禁止编造数据，用户没提供的写【待补充】\n"
+            f"- 禁止编造数据，用户没提供的写规范话术（如「以现状调查确认结果为准」）\n"
             f"- 禁止AI翻译腔，像真人工程师写报告\n\n"
             f"## 🔴 数据归位铁律（本报告各章数据各归其位，不得越界、不得重复）\n"
-            f"- 项目概况类数据（征收面积/地类面积/四至/户数）只在第1章出现，后续章节不得重复罗列\n"
-            f"- 勘测定界数据（各组耕地/林地/建设用地面积）只属于第1章，不得出现在第4章决策综合分析\n"
+            f"- 项目概况类数据（征收面积/地类面积/四至/户数）只在第4章「决策事项基本情况」出现，后续章节不得重复罗列\n"
+            f"- 勘测定界数据（各地类/各权属单位面积）只属于第4章，不得出现在第7章四性分析\n"
+            f"- 问卷/座谈数据（份数、支持率、参会人数、诉求）只属于第6章「各利益相关者对决策事项的反映」\n"
+            f"- 风险因素与评分只属于第8章「分析预测风险源」；防范化解措施只属于第9章\n"
             f"- 文号（如洪拟征告〔2026〕X号）必须严格来自「可用数据」里的真实文号，绝不编造、不改号、不抄范文里的文号\n"
-            f"- 同一数据全文只写一次，避免「326342平方米」这类数字在多章反复出现\n"
-            f"- 图片标记必须放在对应小节内（如位置图放 1.5 项目位置，不放 1.9 补偿方案），不得跨节错位\n"
-            f"- 每张图片都要在图下配图注（「图X-X 描述」），不得裸放无名称\n\n"
+            f"- 同一数据全文只写一次，避免同一组数字在多章反复出现\n"
             f"## 🚫 范文数据一律作废（最重要）\n"
             f"- 范文/参考里的所有具体数字（面积/地类/户数/文号/村组名）都是**别的项目的示例数据**，一个字都不能抄\n"
             f"- 你只能从「可用数据」里取真实数据。范文数字只是让你看「该在哪写什么类型的数据」，不是让你抄数值\n"
             f"- 勘测数据每次每个项目都不一样，绝不能用范文里的勘测面积套到本项目\n"
-            f"- 如果「可用数据」里没有某项数据 → 写【待补充】，绝不能拿范文的数字填进去\n\n"
-            f"## 🚫 禁止模糊表达（写不出具体就标【待补充】，绝不写笼统话）\n"
-            f"- ❌ 禁止写「有关单位」「相关部门」「上级部门」「有关人员」——必须写具体单位名称，不知道就【待补充】\n"
-            f"- ❌ 禁止写「依据相关法律法规」「根据国家有关规定」「按照相关政策要求」——必须写具体法规名称+文号，知识库没有就【待补充】，不编造\n"
-            f"- ❌ 禁止写「相关部门负责」「有关方面」等责任主体模糊表述——直接写「责任单位：XX」或【待补充】\n"
-            f"- ✅ 正确示范：写「责任单位为淮安市洪泽区人民政府」或「依据《土地管理法》第四十六条」，写不出具体就标【待补充：XX未提供】\n"
+            f"- 如果「可用数据」里没有某项数据 → 写规范话术（如「以现状调查确认结果为准」），绝不能拿范文的数字填进去\n\n"
+            f"## 🚫 禁止模糊表达（写不出具体就写规范话术，绝不写笼统话）\n"
+            f"- ❌ 禁止写「有关单位」「相关部门」「上级部门」「有关人员」——必须写具体单位名称，不知道就写「以现状调查确认结果为准」\n"
+            f"- ❌ 禁止写「依据相关法律法规」「根据国家有关规定」「按照相关政策要求」——必须写具体法规名称+文号，知识库没有就写「依据现行土地管理法律法规」，不编造\n"
+            f"- ❌ 禁止写「相关部门负责」「有关方面」等责任主体模糊表述——直接写「责任单位：XX」或「以现状调查确认结果为准」\n"
+            f"- ✅ 正确示范：写「责任单位为〔取事实卡的责任单位〕」或「依据《土地管理法》第四十六条」，写不出具体就写「以现状调查确认结果为准」\n"
             f"- 空话凑字数（如「各单位应高度重视」）一律禁止，宁可短，不要空\n\n"
             f"## ✅ 鼓励\n"
             f"- 段落长短错落，短句穿插长段\n"
             f"- 基层过渡语：「结合入户走访」「根据社区书记反馈」\n"
             f"- 结论适度模糊：「大概率」「初步判断」「需重点关注」\n"
             f"- 政策引用精简，只列本章直接相关的\n"
-            f"- 实施单位：江苏众拓项目代理咨询有限公司\n"
-            f"- 表格用 markdown 语法写，有数据支撑才写，缺数据写【待补充】\n"
+            f"- 实施单位：{_impl_unit_hint}\n"
+            f"- 表格用 markdown 语法写，有数据支撑才写，缺数据写「以现状调查确认结果为准」\n"
             f"- 每个小标题下必须有实质内容，禁止标题后空白\n"
             f"{skeleton_rule}\n"
             # 🔴 标准小标题约束（修复死代码：heading_constraint 之前没拼进返回）
             f"{heading_constraint}\n"
             # 🔴 章节二级标题结构规范（内容要点+数据+图片规格，权威结构）
             f"{section_spec}\n"
+            # 🔴 本章人工模板底稿（从数据库模板按 12 章切块，结构与行文基准）
+            f"{template_block}\n"
         )
 
     def _default_user_prompt(
@@ -1250,12 +1955,10 @@ class ChapterAgentBase(BaseAgent):
             f"项目名称：{state.get('report_title', '未指定')}\n"
             f"位置：{state.get('project_context', '')[:300]}\n"
             f"{data_summary}\n"
-            f"⛔ 涉及村组只允许：三圩社区二组、三组、六组。禁止出现任何其他社区名/村名。\n"
+            f"⛔ 涉及村组只能用「可用数据 / 事实卡」里的真实村组；事实卡没有就写「以现状调查确认结果为准」，禁止出现任何其他社区名/村名。\n"
             f"🔒 用户提供的公告/勘测报告中的数据是权威数据，禁止编造或修改。\n"
             f"   如无数据写\"以正式公告为准\"，不要编造具体数字。\n"
             f"{prev_summary}\n"
-            f"### 材料5：本章可用图片\n"
-            f"{state.get('_chapter_image_guide', '（无图片）')}\n"
             f"### 材料4：原始文件\n"
             f"{user_data.get('pdf_raw_text', '')[:6000]}\n\n"
             f"---\n"
@@ -1482,23 +2185,12 @@ class ChapterAgentBase(BaseAgent):
     def _build_kb_context_section(self, state: dict) -> str:
         """从KnowledgeAgent缓存构建知识库上下文段落，注入到user prompt中"""
         from app.agent.agents.knowledge_agent import (
-            TEMPLATE_IMAGE_PLACEMENT, TEMPLATE_TABLE_DATA_RULES,
+            TEMPLATE_TABLE_DATA_RULES,
             TEMPLATE_TABLE_SKELETONS, RISK_LEVEL_CRITERIA,
         )
 
         kb_ctx = get_knowledge_context_for_chapter(state, self.chapter_number)
         parts = []
-
-        # 🔴 图片位置要求（从模板学习）
-        img_placement = TEMPLATE_IMAGE_PLACEMENT.get(self.chapter_number, [])
-        if img_placement:
-            parts.append("## 📸 本章图片要求（仿照模板）\n")
-            for ip in img_placement:
-                parts.append(
-                    f"- 位置：{ip['position']} | 图注：{ip['caption']} | "
-                    f"数据源：{ip['source']}\n"
-                )
-            parts.append("\n**请在本章对应位置用 `![图注](图片描述)` 标记图片位置。**\n\n")
 
         # 🔴🔴 表格骨架（最重要！从模板提取的完整表格结构，标注哪些列固定、哪些需填入数据）
         table_skeletons = TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {})
@@ -1618,68 +2310,83 @@ class ChapterAgentBase(BaseAgent):
 
     @staticmethod
     def _fix_hallucinated_names(content: str) -> str:
-        """Force-replace LLM-hallucinated community/village names with correct project data.
+        """清理 LLM 幻觉残留。
 
-        Also fixes duplicate names that result from over-replacement (e.g.,
-        '在三圩社区和三圩社区' → '在三圩社区').
+        🔴 不写死任何项目名/地名——地名一律由「事实卡」约束（prompt 里已强制）。
+        这里只做与项目无关的通用清理（裸文件名、AI 套词）。
         """
         import re as _re_hn
-
-        _HALLUCINATED_REPLACEMENTS = [
-            (r'大魏社区', '三圩社区'),
-            (r'洪泽园三村社区', '三圩社区'),
-            (r'洪泽园三村', '三圩社区'),
-            (r'高良涧街道', '朱坝街道'),
-            (r'金北街道', '朱坝街道'),
-            (r'金湖县', '洪泽区'),
-            (r'金湖', '洪泽'),
-            # 🔴 常见 LLM 幻觉组合（音近/形近字）
-            (r'朱紫街道', '朱坝街道'),
-            (r'三坊社区', '三圩社区'),
-            (r'三坊', '三圩'),
-            (r'朱紫', '朱坝'),
-            (r'三沪', '三圩'),
-            (r'三虎', '三圩'),
-        ]
-
-        for old, new in _HALLUCINATED_REPLACEMENTS:
-            content = content.replace(old, new)
-
-        # Fix duplicate adjacent references from over-replacement
-        # "在A和A" → "在A"  /  "A和A的" → "A及其周边"
-        content = _re_hn.sub(r'(三圩社区)和\1', r'\1', content)
-        content = _re_hn.sub(r'(三圩社区)和\1', r'\1', content)  # Run twice for nested cases
-        content = _re_hn.sub(r'(朱坝街道)和\1', r'\1', content)
-        content = _re_hn.sub(r'(朱坝街道)和\1', r'\1', content)
-
-        # Fix date contamination from few-shot examples
-        content = content.replace('2024年7月3日', '2026年')
-        content = content.replace('2024年7月', '2026年')
-        content = content.replace('2024年6月', '2026年')
-        content = content.replace('2024年5月', '2026年')
-
-        # Fix remaining AI buzzwords that slip through
-        content = content.replace('有力支撑', '有效支持')
-        content = content.replace('有力保障', '有效保障')
-
-        # Remove bare filenames appearing as text in body (LLM hallucination)
-        # Pattern: "xxx_xxx.png" or "xxx_xxx.jpg" appearing as standalone text
+        # 去掉正文里裸文件名
         content = _re_hn.sub(r'\n[^\n]{5,60}\.(png|jpg|jpeg|PNG|JPG)\n', '\n', content)
         content = _re_hn.sub(r'^[^\n]{5,60}\.(png|jpg|jpeg|PNG|JPG)\s*$', '', content, flags=_re_hn.MULTILINE)
-
-        # Fix location duplication: "X组X省X市X区" → "X组。"
-        content = _re_hn.sub(
-            r'(三圩社区二组、三组、六组)江苏省淮安市洪泽区朱坝街道三圩社区二组、三组、六组',
-            r'\1',
-            content
-        )
-
+        # AI 套词兜底
+        content = content.replace('有力支撑', '有效支持')
+        content = content.replace('有力保障', '有效保障')
         return content
+
+    @staticmethod
+    def _strip_boundary_point_mentions(content: str) -> str:
+        """删掉正文里的「界址点 N 个」表述（表格里已有该列，正文重复是冗余）。
+
+        逐句处理：
+        - 从句里去掉该分句后，句子还剩实质内容 → 保留剩余部分；
+        - 去掉后整句只剩个主语（如「本项目。」）→ 整句删掉，避免留下残句。
+        """
+        import re as _re_bp
+        _CLAUSE = _re_bp.compile(
+            r'[，,、；;]?\s*(?:其中)?\s*(?:共)?\s*界址点(?:数)?\s*(?:为|共|达)?\s*'
+            r'\d+\s*个?\s*(?:[（(]\s*共?\s*\d+\s*个\s*[)）])?')
+        _MIN_KEEP = 8  # 剩余字数少于这个数，判为残句
+
+        out_lines = []
+        for line in str(content or "").split('\n'):
+            if '界址点' not in line:
+                out_lines.append(line)
+                continue
+            # 表格行不动
+            if line.strip().startswith('|'):
+                out_lines.append(line)
+                continue
+            kept = []
+            for seg in _re_bp.split(r'(?<=[。；;])', line):
+                if not seg or '界址点' not in seg:
+                    kept.append(seg)
+                    continue
+                cleaned = _CLAUSE.sub('', seg)
+                cleaned = _re_bp.sub(r'[，,]\s*([。；;])', r'\1', cleaned)
+                cleaned = _re_bp.sub(r'([。；;])\s*\1+', r'\1', cleaned)
+                core = cleaned.strip().rstrip('。；;').strip()
+                if len(core) < _MIN_KEEP:
+                    continue          # 残句，整句丢掉
+                kept.append(cleaned)
+            out_lines.append(''.join(kept))
+        return '\n'.join(out_lines)
+
+    @staticmethod
+    def _split_table_trailing_prose(content: str) -> str:
+        """表格末尾被吞进来的解读句 → 拆出来单独成段。
+
+        模型写完表格后常把「上表所列…」这类解读直接接成一行表格行，
+        形如 `| 上表所列法规中，…的判断。 | — | — | — |`。
+        判据：首格是长句（>40 字）且其余格全是空/破折号。
+        """
+        _EMPTY = ('', '—', '-', '－', '–', '/')
+        out = []
+        for ln in str(content or "").split('\n'):
+            s = ln.strip()
+            if s.startswith('|') and s.endswith('|') and s.count('|') >= 3:
+                cells = [c.strip() for c in s.strip('|').split('|')]
+                if len(cells) >= 2 and len(cells[0]) > 40 and \
+                        all(c in _EMPTY for c in cells[1:]):
+                    out.append('')
+                    out.append(cells[0])
+                    continue
+            out.append(ln)
+        return '\n'.join(out)
 
     @staticmethod
     def _fix_garbled_tables(content: str) -> str:
         """Fix LLM-generated single-line tables where rows are concatenated with — separators."""
-        import re as _re_tbl
 
         def _split_table_line(line):
             if '| — |' not in line and '|—|' not in line:

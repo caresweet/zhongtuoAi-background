@@ -338,7 +338,7 @@ STYLES: Dict[str, ReportStyle] = {
     "jinhu": ReportStyle(
         name="jinhu",
         label="XX模板",
-        description="简洁风格，正文为主，仅第5章有1个表格，强调可读性",
+        description="简洁风格，正文为主，强调可读性（范文已改由 RAG 提供）",
         examples=JINHU_EXAMPLES,
     ),
     "standard": ReportStyle(
@@ -361,5 +361,10 @@ def list_styles() -> Dict[str, str]:
 
 
 def get_few_shot(chapter_number: int, style: str = None) -> str:
-    """Get Few-Shot example for a chapter with given style."""
-    return get_style(style).get_example(chapter_number)
+    """Few-Shot 范文 —— **已停用**，一律返回空串。
+
+    历史遗留：本模块自持一份按旧章号（十章/十二章时代）组织的范文片段表，
+    章节结构已改过两轮，这些片段会**把错误章节的范文喂给 LLM**。
+    范文统一改由 RAG 知识库提供（content-type 库 + 参照件），见 `app/rag/`。
+    """
+    return ""

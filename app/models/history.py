@@ -36,7 +36,12 @@ class Report(Base):
 
     # Metadata
     generation_duration_sec = Column(Integer, nullable=True)
+    # 🔴 报告归属：`user_id` 存**账号 id 的字符串**（`str(user.id)`）。
+    #    这一列早就存在，但从来没人写过值 —— 所有行都是默认的 "default"，
+    #    于是「每个账号只看自己的报告」根本无从实现。见 database/history_db.py 的回填。
     user_id = Column(String(100), default="default")
+    # 生成时的公司归属（公司资料会变，报告需要记下当时的归属）
+    company_id = Column(Integer, nullable=True)
 
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -54,6 +59,7 @@ class Report(Base):
         Index("idx_reports_status", "status"),
         Index("idx_reports_created", "created_at"),
         Index("idx_reports_session", "session_id"),
+        Index("idx_reports_user", "user_id"),
     )
 
 

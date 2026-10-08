@@ -164,65 +164,59 @@ PRESERVED_PATTERNS = [
 # Section Analysis — maps sections to their data sources and fill strategies
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SECTION_STRATEGIES = {
-    # Chapter 1: Basic info — mostly user input
-    "1.1": {"strategy": "ask_user", "fields": ["决策名称", "报告标题", "项目名称"]},
-    "1.2": {"strategy": "ask_user", "fields": ["决策单位", "决策主体"]},
-    "1.3": {"strategy": "ask_user", "fields": ["拟征地位置", "地理位置"], "needs_image": True},
-    "1.4": {"strategy": "ask_user", "fields": ["征收范围", "面积", "地上附着物", "地类"]},
-    "1.5": {"strategy": "ask_user", "fields": ["资金筹措", "投资金额"]},
-    "1.6": {"strategy": "ask_user", "fields": ["实施周期", "工期"]},
-    "1.7": {"strategy": "ask_user", "fields": ["红线图", "征地红线图"], "needs_image": True},
+# ═══════════════════════════════════════════════════════════════════════════════
+# 章节填充策略 —— **按章号（1..14，参照件《白马湖…报告》结构）**
+#
+#   历史遗留：原先按「节号」（"1.1"、"3.3"…）硬编码，而节号随章节结构变过两轮，
+#   早已对不上号。现统一按**章**给策略：拿到任意节号先取它的章号（`_chapter_of`），
+#   再查本表。
+#
+#   strategy 取值：
+#     ask_user      —— 该章主要靠用户/资料提供（进缺口清单）
+#     auto_generate —— 该章由 agent 依事实卡 + RAG 自动生成
+#     preserved     —— 该章沿用模板固定话术，不重写
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    # Chapter 2: Assessment process — partially user, partially preserved
-    "2.1": {"strategy": "ask_user", "fields": ["评估过程", "评估方法"]},
-    "2.2": {"strategy": "preserved", "fields": []},  # 法规依据列表
-
-    # Chapter 3: Survey — user provides data/images, agent analyzes
-    "3.1": {"strategy": "preserved", "fields": []},  # 调查方法（标准描述）
-    "3.2": {"strategy": "ask_user", "fields": ["调查范围", "调查对象"]},
-    "3.3": {"strategy": "auto_generate", "fields": [], "agent": "SurveyAnalyzer",
-            "depends_on": ["3.2", "survey_images"]},  # 调查内容表格 — from image analysis
-    "3.4": {"strategy": "auto_generate", "fields": [], "agent": "SurveyAnalyzer",
-            "depends_on": ["3.3"]},  # 调查过程
-    "3.5": {"strategy": "auto_generate", "fields": [], "agent": "SurveyAnalyzer",
-            "depends_on": ["3.3", "3.4"]},  # 意见建议
-    "3.6": {"strategy": "ask_user", "fields": ["利益相关者", "诉求"]},
-
-    # Chapter 4: Four-dimensional analysis — ALL auto-generated via RAG
-    "4.1": {"strategy": "auto_generate", "agent": "RationalityAgent", "rag_required": True},
-    "4.2": {"strategy": "auto_generate", "agent": "RationalityAgent", "rag_required": True},
-    "4.3": {"strategy": "auto_generate", "agent": "RationalityAgent", "rag_required": True},
-    "4.4": {"strategy": "auto_generate", "agent": "RationalityAgent", "rag_required": True},
-
-    # Chapter 5: Risk factor identification — auto-generated from survey + analysis
-    "5.1": {"strategy": "auto_generate", "agent": "RiskScorer",
-            "depends_on": ["3.0", "4.0"]},
-    "5.2": {"strategy": "auto_generate", "agent": "RiskScorer",
-            "depends_on": ["5.1"]},
-
-    # Chapter 6: Risk scoring (pre-measures) — auto-generated
-    "6.0": {"strategy": "auto_generate", "agent": "RiskScorer",
-            "depends_on": ["5.0"]},
-
-    # Chapter 7: Mitigation measures — auto-generated + user review
-    "7.1": {"strategy": "preserved", "fields": []},  # 基本原则（标准文本）
-    "7.2": {"strategy": "auto_generate", "agent": "RiskScorer",
-            "depends_on": ["6.0"]},
-
-    # Chapter 8: Post-measure risk assessment — auto-generated
-    "8.1": {"strategy": "preserved", "fields": []},  # 分析方法（标准描述）
-    "8.2": {"strategy": "auto_generate", "agent": "RiskScorer",
-            "depends_on": ["7.0"]},
-
-    # Chapter 9: Conclusions — auto-generated + user review
-    "9.1": {"strategy": "auto_generate", "agent": "RiskScorer", "depends_on": ["8.0"]},
-    "9.2": {"strategy": "auto_generate", "agent": "RiskScorer", "depends_on": ["8.0"]},
-    "9.3": {"strategy": "auto_generate", "agent": "RiskScorer", "depends_on": ["8.0"]},
-
-    # Chapter 10: Emergency plan — preserved from template, can be user-customized
-    "10.0": {"strategy": "preserved", "fields": []},
+CHAPTER_STRATEGIES = {
+    1:  {"strategy": "preserved", "fields": []},                      # 编制说明（模板固定话术）
+    2:  {"strategy": "preserved", "fields": []},                      # 编制依据（法规清单）
+    3:  {"strategy": "auto_generate", "agent": "ReviewTable",
+         "depends_on": [6, 9]},                                       # 评审表（数据驱动渲染）
+    4:  {"strategy": "auto_generate", "agent": "RiskScorer",
+         "depends_on": [6, 9, 10, 11, 12, 13]},                       # 工作报告（全文汇总）
+    5:  {"strategy": "preserved", "fields": []},                      # 应急预案
+    6:  {"strategy": "ask_user",                                      # 项目基本情况
+         "fields": ["项目名称", "责任单位", "建设/实施单位", "项目位置",
+                    "用地面积", "土地用途", "资金筹措", "实施周期"],
+         "needs_image": True},
+    7:  {"strategy": "ask_user",                                      # 稳评工作方案
+         "fields": ["委托日期", "评估方法", "评估程序", "工作计划"]},
+    8:  {"strategy": "auto_generate", "agent": "SurveyAnalyzer",
+         "depends_on": [6, 9]},                                       # 稳评方法与过程
+    9:  {"strategy": "ask_user",                                      # 各利益相关者对项目的反映
+         "fields": ["调查范围", "调查对象", "利益相关者", "诉求"]},
+    10: {"strategy": "auto_generate", "agent": "RationalityAgent",
+         "rag_required": True},                                       # 四性分析
+    11: {"strategy": "auto_generate", "agent": "RiskScorer",
+         "depends_on": [6, 9, 10]},                                   # 分析预测风险源
+    12: {"strategy": "auto_generate", "agent": "RiskScorer",
+         "depends_on": [11]},                                         # 确定风险等级
+    13: {"strategy": "auto_generate", "agent": "RiskScorer",
+         "depends_on": [11]},                                         # 防范和化解风险的建议
+    14: {"strategy": "preserved", "fields": []},                      # 附件
 }
+
+
+def _chapter_of(section_number) -> int:
+    """从「节号」取章号：'6.1' → 6；'12' → 12；取不到返回 0。"""
+    import re as _re
+    m = _re.match(r'^\s*(\d+)', str(section_number or ""))
+    return int(m.group(1)) if m else 0
+
+
+def get_section_strategy(section_number) -> dict:
+    """按节号取该节（其所属章）的填充策略。"""
+    return CHAPTER_STRATEGIES.get(_chapter_of(section_number), {})
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Table Data Source Mappings
@@ -234,23 +228,25 @@ TABLE_DATA_SOURCES = {
     0: {
         "name": "稳评事项基本情况表（文章评审表）",
         "data_source": "derived_from_sections",
+        # 🔴 值 = **章号**（参照件十四章），不是节号 —— 节号随章节结构变动过两轮，
+        #    按节号硬编码必然对不上；按章给源既稳又够用。
         "mappings": {
-            "事项名称": "1.1",        # 决策名称
-            "拟征地位置": "1.3",      # 位置
-            "征收范围": "1.4",        # 面积、附着物
-            "资金筹措": "1.5",        # 资金
-            "决策实施周期": "1.6",    # 周期
-            "稳评责任单位": "1.2",    # 责任单位
-            "稳评实施单位": "1.2",    # 实施单位
-            "合法性分析": "4.1",      # 合法性
-            "合理性分析": "4.2",      # 合理性
-            "可行性分析": "4.3",      # 可行性
-            "可控性分析": "4.4",      # 可控性
-            "风险等级": "6.0/8.0",   # 风险等级
-            "评估结论": "9.1",        # 结论
+            "事项名称": "6",          # 项目基本情况·项目名称
+            "拟征地位置": "6",        # 项目位置
+            "征收范围": "6",          # 用地范围与规模
+            "资金筹措": "6",          # 资金筹措
+            "决策实施周期": "6",      # 实施周期
+            "稳评责任单位": "6",      # 责任单位
+            "稳评实施单位": "6",      # 实施单位
+            "合法性分析": "10",       # 四性分析
+            "合理性分析": "10",
+            "可行性分析": "10",
+            "可控性分析": "10",
+            "风险等级": "12",         # 确定风险等级
+            "评估结论": "4",          # 工作报告·评估结论
         },
     },
-    # Table 1 (5r x 4c): 调查层级/范围/对象/方法 — from user input (3.2)
+    # Table 1 (5r x 4c): 调查层级/范围/对象/方法 — 来自用户输入（第9章 各利益相关者对项目的反映）
     1: {
         "name": "风险调查范围及对象表",
         "data_source": "user_input",
@@ -515,12 +511,13 @@ class TemplateAnalyzer:
     def _get_section_strategy(self, section_num: str) -> dict:
         """Get the fill strategy for a section by number."""
         # Try exact match first
-        if section_num in SECTION_STRATEGIES:
-            return SECTION_STRATEGIES[section_num]
+        _st = get_section_strategy(section_num)
+        if _st:
+            return _st
 
         # Try matching by major chapter number
         major = section_num.split(".")[0]
-        for key, value in SECTION_STRATEGIES.items():
+        for key, value in CHAPTER_STRATEGIES.items():
             if key.startswith(major + "."):
                 # Return first match for this chapter as default
                 return value
@@ -544,7 +541,7 @@ class TemplateAnalyzer:
                     keywords.append(word)
 
             # Add strategy-specific keywords
-            strategy = SECTION_STRATEGIES.get(section.number, {})
+            strategy = get_section_strategy(section.number)
             keywords.extend(strategy.get("fields", []))
 
             keyword_map[section.number] = list(set(keywords))
@@ -563,7 +560,7 @@ class TemplateAnalyzer:
         basic_sections = [s for s in analysis.sections
                          if s.number.startswith("1.") and s.fill_strategy == "ask_user"]
         for s in basic_sections:
-            strategy = SECTION_STRATEGIES.get(s.number, {})
+            strategy = get_section_strategy(s.number)
             questions.append({
                 "section": s.number,
                 "title": s.title,
@@ -581,7 +578,7 @@ class TemplateAnalyzer:
                 "section": s.number,
                 "title": s.title,
                 "question": f"请提供{s.title}的信息",
-                "fields": SECTION_STRATEGIES.get(s.number, {}).get("fields", []),
+                "fields": get_section_strategy(s.number).get("fields", []),
                 "needs_image": False,
                 "priority": 2,
             })

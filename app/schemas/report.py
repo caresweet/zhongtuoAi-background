@@ -114,11 +114,26 @@ class WorkflowStartRequest(BaseModel):
     materials_dir: str = Field(default="", description="资料目录路径（可选）")
     project_context: str = Field(default="", description="项目背景说明")
     report_title: str = Field(default="社会稳定风险评估报告", description="报告标题")
+    selected_personnel: List[str] = Field(
+        default_factory=list,
+        description="用户在「选择报告人员」多选框里勾选的人员姓名（决定前置工作组名单与培训证书取图）")
+    # 🔴 证书页与工作组**分开选**：证书页只贴「有证书扫描件的人」的证书图，
+    #    最多 3 人（业主口径）。不传则回退为「工作组里持证的人」。
+    selected_cert_personnel: List[str] = Field(
+        default_factory=list,
+        description="用户在「选择证书」多选框里勾选的人员姓名（决定前置「公司资质证书」区贴哪几张人员证书，最多 3 人）")
 
 
 class WorkflowResumeRequest(BaseModel):
-    """用户补充缺失字段后继续生成。"""
-    data: Dict[str, str] = Field(default_factory=dict, description="用户填写的缺失字段 {key: value}")
+    """用户补充缺失字段后继续生成。
+
+    🔴 `data` 的值必须是 `Any` 而**不能是 `str`**：
+       前端「跳过」按钮送的是 `{"__skip__": true}`（布尔哨兵），
+       pydantic v2 不做 bool→str 强转，`Dict[str, str]` 会在**进入函数体之前**直接
+       422 —— 表现就是「一按跳过就报错」，而且因为没进业务代码，后端日志里
+       一条痕迹都没有（实测踩过）。端点内部对值本来就有 `str(value).strip()`。
+    """
+    data: Dict[str, Any] = Field(default_factory=dict, description="用户填写的缺失字段 {key: value}")
 
 
 class MissingField(BaseModel):

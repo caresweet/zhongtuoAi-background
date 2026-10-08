@@ -10,8 +10,22 @@ import time
 from typing import Dict, List, Any, Optional
 
 from .chapters import get_chapter_agent
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(v, default: int = 0) -> int:
+    """字段值 → int；`【待补充】` / 空 / 非数字一律回落默认值。
+
+    🔴 占位符被直接 `int()` 会抛 ValueError，把整条链打断。
+    """
+    import re as _re
+    t = _re.sub(r'[^\d.\-]', '', str(v if v is not None else ""))
+    try:
+        return int(float(t))
+    except (TypeError, ValueError):
+        return int(default)
 
 # In seconds
 CHAPTER_REVIEW_TIMEOUT = 2     # 2s auto-approve (direct generation mode, no user interaction)
@@ -632,7 +646,7 @@ class ChapterOrchestrator:
                     "missing_items": (state.get("_chapter_data_packages") or {}).get(number, {}).get("missing", []),
                 })
         if not chapters:
-            chapters = [{"number": i, "title": f"第{i}章", "missing_items": []} for i in range(1, 11)]
+            chapters = [{"number": i, "title": f"第{i}章", "missing_items": []} for i in ALL_CHAPTERS]
 
         return {
             "domain": state.get("_domain") or "stability",
@@ -788,9 +802,15 @@ class ChapterOrchestrator:
             chapters = state.setdefault("chapters", {})
             if ch_num in state_copy.get("chapters", {}):
                 chapters[ch_num] = state_copy["chapters"][ch_num]
-            review = await self._run_blocking_content_review(ch_num, state)
-            if not review.get("passed"):
-                chapters[ch_num]["status"] = "needs_revision"
+            # 🔴 参照件照搬章跳过质量门：它们的字数/表格分布与「LLM 自由写」的预期不同，
+            #    会被判「字数不足/表后缺分析」并打回重写，重写后就不再是照搬了。
+            from app.agent.agents.chapters.chapter_reference_agent import is_verbatim_status
+            if is_verbatim_status(chapters.get(ch_num)):
+                await self._emit_thinking(f"📖 第{ch_num}章为参照件原文照搬，跳过内容质量门")
+            else:
+                review = await self._run_blocking_content_review(ch_num, state)
+                if not review.get("passed"):
+                    chapters[ch_num]["status"] = "needs_revision"
                 chapters[ch_num]["_blocking_review"] = review
                 state.setdefault("_pending_regenerations", [])
                 if ch_num not in state["_pending_regenerations"]:
@@ -863,7 +883,9 @@ class ChapterOrchestrator:
                 ch_data["generation_attempts"] = ch_data.get("generation_attempts", 0) + 1
 
             # Content guardrails auto-check (skip on first attempt — final review handles it)
-            if attempt > 0:
+            # 🔴 参照件照搬章一律跳过（重写后就不再是照搬了）
+            from app.agent.agents.chapters.chapter_reference_agent import is_verbatim_status as _is_verbatim
+            if attempt > 0 and not _is_verbatim(ch_data):
                 try:
                     review = await self._run_blocking_content_review(chapter_num, state)
                     if not review.get("passed"):
@@ -1283,7 +1305,7 @@ class ChapterOrchestrator:
         doc = _Document(doc_path)
         filled = state.get("filled_data", {}) or {}
         scoring_report = _ss.build_scoring_report(filled, {})
-        survey_total = int(filled.get("survey_total_count", filled.get("household_count", 50)))
+        survey_total = _safe_int(filled.get("survey_total_count") or filled.get("total_samples"))
 
         # ── Fix hallucinated percentages in text ──
         for para in doc.paragraphs:
@@ -1342,16 +1364,26 @@ class ChapterOrchestrator:
                     for run in p.runs:
                         run.text = str(expected_total)
 
-        # ── Fix survey demographic table (find by content, not index) ──
-        demo_data = {
-            '本地居民': (str(int(survey_total * 0.938)), '93.8%'),
-            '租住本地': (str(int(survey_total * 0.062)), '6.2%'),
-            '16~35': ('0', '0.0%'), '36~55': (str(survey_total // 2), '50.0%'),
-            '56以上': (str(survey_total // 2), '50.0%'),
-            '机关事业': ('0', '0.0%'), '企业': (str(int(survey_total * 0.125)), '12.5%'),
-            '待业': (str(int(survey_total * 0.062)), '6.2%'),
-            '其他': (str(int(survey_total * 0.812)), '81.2%'),
-        }
+        # ── Fix survey demographic table (真实数据驱动，禁止编造) ──
+        # 从 state 的真实问卷统计（survey_analysis）读取各维度人数；缺失则填【待补充】，绝不编造。
+        survey_analysis = (state.get("generated_sections", {}) or {}).get("survey_analysis", {}) or {}
+        demo_data = {}
+        # 六维度：身份/年龄/职业/了解/态度/诉求方式，键对应 _extract_public_survey_stats 的字段
+        for dim_map_key, build in (
+            ("identity_groups", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+            ("age_groups", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+            ("occupation_groups", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+            ("awareness_levels", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+            ("attitude_options", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+            ("resolution_methods", lambda v: (str(v), f"{v / survey_total * 100:.1f}%" if survey_total else "0.0%")),
+        ):
+            groups = survey_analysis.get(dim_map_key, {}) or {}
+            for opt, cnt in groups.items():
+                if isinstance(cnt, (int, float)):
+                    demo_data[str(opt)] = build(int(cnt))
+        # 态度维度里的"反对/强烈反对"等把键归一化（问卷选项可能为 space 或别名）
+        # 需求：无真实统计时，对应选项填【待补充】而非编造百分比。
+
         for t in doc.tables:
             if not t.rows: continue
             h0 = t.rows[0].cells[0].text.strip()
@@ -1370,6 +1402,12 @@ class ChapterOrchestrator:
                         for run in p.runs: run.text = count
                     for p in row.cells[3].paragraphs:
                         for run in p.runs: run.text = pct
+                else:
+                    # 该选项无真实统计 → 填【待补充】，不编造
+                    for p in row.cells[2].paragraphs:
+                        for run in p.runs: run.text = "【待补充】"
+                    for p in row.cells[3].paragraphs:
+                        for run in p.runs: run.text = "【待补充】"
 
         # Fix risk level mentions in conclusion text
         risk_level = scoring_report["meta"]["risk_level"]
@@ -1502,11 +1540,11 @@ class ChapterOrchestrator:
 
         # Build data request
         descs = {
-            "org_name": ("责任单位", "如：淮安市洪泽区人民政府"),
-            "implement_unit": ("实施单位", "默认：江苏众拓项目代理咨询有限公司"),
-            "location": ("项目位置", "如：淮安市洪泽区朱坝街道三圩社区"),
-            "area_m2": ("征收面积（㎡）", "如：326342"),
-            "area_mu": ("征收面积（亩）", "如：489.51"),
+            "org_name": ("责任单位", "如：XX区人民政府"),
+            "implement_unit": ("实施单位", "默认：取本报告所属公司"),
+            "location": ("项目位置", "如：XX街道XX社区"),
+            "area_m2": ("征收面积（㎡）", "如：326000"),
+            "area_mu": ("征收面积（亩）", "如：489"),
             "land_use": ("土地用途", "如：商业服务业设施用地"),
             "funding": ("资金测算", ""),
             "total_samples": ("问卷总人数", "如：120"),
@@ -1523,7 +1561,7 @@ class ChapterOrchestrator:
         await self._emit("missing_data_prompt", {
             "chapter": chapter_num, "title": title,
             "data_items": items, "total_missing": len(items),
-            "content": f"## ⚠️ 第{chapter_num}章「{title}」缺少数据\n\n{items_text}\n\n请直接输入数据，格式如「责任单位：淮安市洪泽区人民政府」",
+            "content": f"## ⚠️ 第{chapter_num}章「{title}」缺少数据\n\n{items_text}\n\n请直接输入数据，格式如「责任单位：XX区人民政府」",
         })
         state["phase"] = "chapter_review"
         await self._emit("phase_change", {"phase": "chapter_review"})

@@ -16,9 +16,18 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# 🔴 AI 分析偶尔自编的「土地统计摘要」类结构 —— **一律不收进 filled_data**。
+#    它们没有任何消费者，却各自带着一套总面积，与勘测定界的实测数打架
+#    （实测三套并存：land_statistics_summary=15268 / 派生合计=14068 / 勘测定界=18929）。
+#    业主口径：土地面积统一以**勘测定界报告**为准。
+_AI_AREA_SUMMARY_KEYS = {
+    "land_statistics_summary", "detailed_land_breakdown",
+    "land_area_summary", "land_category_summary", "land_summary",
+}
 
 # Image classification categories — 🔴 扩充为8类（survey/announcement/review/map/photo/meeting/cert/other）
 IMAGE_CATEGORIES = {
@@ -210,6 +219,37 @@ def _map_vision_category(category: str) -> str:
     return "other"
 
 
+def _norm_pdf_stem(name: str) -> str:
+    """PDF 文件名 / 抽图名里的文档名 → 可比较的归一化串。
+
+    🔴 同一份 PDF 在不同时期抽过，库里的名字不统一：
+        上传件叫「洪拟征告〔2026〕7号 征收土地预公告（盖章）.pdf」
+        抽图却叫 `pdf_洪拟征告〔2026〕7号 征收土地预公告_p1_img0.jpeg`（少了「（盖章）」），
+        还有一份被抽成了 `pdf_洪拟征告_2026_7号…`（〔〕被换成下划线）。
+       所以把非字母数字汉字的字符全部抹掉再比，并去掉抽取器加的 hash 后缀。
+    """
+    s = re.sub(r'\.[A-Za-z0-9]+$', '', str(name or ''))
+    s = re.sub(r'_[0-9a-f]{6,}$', '', s, flags=re.I)
+    return re.sub(r'[^0-9a-z一-鿿]+', '', s.lower())
+
+
+def _pdf_stem_matches(stem: str, session_stems: set) -> bool:
+    """抽图的文档名是否属于**本次会话上传的 PDF**。
+
+    完全相等，或短的那个是长的那个的前缀（长度 ≥6）—— 覆盖「（盖章）」这类后缀差异。
+    """
+    n = _norm_pdf_stem(stem)
+    if not n:
+        return False
+    for s in session_stems:
+        if n == s:
+            return True
+        a, b = sorted((n, s), key=len)
+        if len(a) >= 6 and b.startswith(a):
+            return True
+    return False
+
+
 def _map_dept_question(question: str) -> Optional[str]:
     """把部门调查题目（贵单位开头）映射到 dept_data_maps 的 key。
 
@@ -255,12 +295,19 @@ async def analyze_all_materials(
 
     # Collect all files
     all_files = []
+    # 🔴 存储名是 uuid，必须同时记住**原始文件名**——否则「微信图片_xxx.jpg」看起来
+    #    和随机串没区别，既判不出「模糊命名需 vision 分类」，也判不出「公示/现场/座谈」归属。
+    orig_names: Dict[str, str] = {}
     uploaded = state.get("_uploaded_files", []) or []
     for item in uploaded:
         if isinstance(item, str):
             all_files.append(item)
+            orig_names[item] = os.path.basename(item)
         elif isinstance(item, dict):
-            all_files.append(item.get("path", ""))
+            _p = item.get("path", "")
+            if _p:
+                all_files.append(_p)
+                orig_names[_p] = item.get("original_name") or os.path.basename(_p)
 
     material_facts = state.get("_project_material_facts", {}) or {}
     extracted_imgs = material_facts.get("_extracted_images", []) or []
@@ -271,10 +318,23 @@ async def analyze_all_materials(
     # 🔴 主动扫描 storage/images 里的 PDF 提取图片（座谈会问卷扫描页等）。
     # 解决时序问题：PDF 图片在后台异步提取，deep analysis 可能跑在提取完成之前，
     # 导致 _extracted_images 为空。这里直接扫描磁盘补上。
+    #
+    # 🔴 **只收本会话上传的 PDF 抽出来的图**：`storage/images` 是全局共享目录，
+    #    历次会话的抽图永久堆积（实测 1234 张里 1122 张属于龙华路/龙中西路/白马湖
+    #    等**别的项目**）。旧实现扫整个目录，把那些图全送进视觉识别 ——
+    #    每次素材分析白跑 ~1122 次视觉调用（约 1 小时 + API 费用），
+    #    而且 `dept_tallies` 这类跨项目聚合统计会混进别人项目的问卷勾选。
+    _sess_pdf_stems = set()
+    for _it in (state.get("_uploaded_files") or []):
+        _p = _it if isinstance(_it, str) else (_it or {}).get("path") or (_it or {}).get("original_name") or ""
+        _b = os.path.basename(str(_p))
+        if _b.lower().endswith(".pdf"):
+            _sess_pdf_stems.add(_norm_pdf_stem(_b))
     try:
         from app.config import settings
         images_dir = settings.STORAGE_DIR / "images"
-        if images_dir.exists():
+        if images_dir.exists() and _sess_pdf_stems:
+            _skipped = 0
             for f in images_dir.iterdir():
                 fn = f.name
                 # 只扫描 PDF 嵌入图（_img），跳过整页渲染（_page/_full，用于 OCR 不是问卷材料）
@@ -284,14 +344,44 @@ async def analyze_all_materials(
                     continue
                 if f.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
                     continue
+                _m = re.match(r'^pdf_(.+?)_(?:[0-9a-f]{6,}_)?p\d+_img\d+', fn)
+                if not _m or not _pdf_stem_matches(_m.group(1), _sess_pdf_stems):
+                    _skipped += 1
+                    continue
                 fp = str(f)
                 if fp not in all_files:
                     all_files.append(fp)
+            if _skipped:
+                logger.info(f"[素材分析] 跳过 {_skipped} 张非本会话的 PDF 抽图")
     except Exception as e:
         logger.warning(f"Scan storage/images for PDF images failed: {e}")
 
     if not all_files:
         return result
+
+    # 🔴 按**真实路径**去重：`_uploaded_files` 里同一个文件往往出现两次
+    #    （上传时的 Downloads 绝对路径 + 复制进 storage 的相对路径），
+    #    字符串比较挡不住 —— 实测 250 条里只有 173 个真实文件。
+    #    重复条目会让同一张图被送两次视觉识别（以前靠 md5 缓存掩盖，缓存一清就是双倍 API 调用）。
+    def _resolve(p: str) -> str:
+        p = str(p)
+        if os.path.exists(p):
+            return os.path.realpath(p)
+        for cand in (settings.STORAGE_DIR / p, settings.STORAGE_DIR / "images" / os.path.basename(p)):
+            if cand.exists():
+                return os.path.realpath(str(cand))
+        return os.path.realpath(p)
+
+    _seen, _dedup = set(), []
+    for _f in all_files:
+        _k = _resolve(_f)
+        if _k in _seen:
+            continue
+        _seen.add(_k)
+        _dedup.append(_f)
+    if len(_dedup) != len(all_files):
+        logger.info(f"[素材分析] 去重 {len(all_files) - len(_dedup)} 条重复文件条目")
+    all_files = _dedup
 
     # Separate images from PDFs
     images = [f for f in all_files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'))]
@@ -301,8 +391,14 @@ async def analyze_all_materials(
 
     # 1. 图片筛选分类：文字文档全量 OCR，场景照片直接分类备用
     # 文字文档（扫描件/表单/证书）：需要 OCR 提取勾选、数据
-    TEXT_DOC_KEYWORDS = ['扫描', '签字', '问卷', '调查表', '意见', '评审', '签到',
-                         'pdf_page', 'pdf_', '评估', '备案', '执照', '证书', '预公告', '公告']
+    TEXT_DOC_KEYWORDS = ['扫描', '签字', '问卷', '调查表', '意见', '评审', '签到', '座谈',
+                         '评估', '备案', '执照', '证书', '预公告', '公告']
+    # 🔴 原来这表里有一条**裸的 `'pdf_'`** —— 只要是从 PDF 抽出来的页图，不论是什么
+    #    内容全送视觉 OCR。本意是「扫描件需要 OCR」，实际把整本参考报告的每一页都拖了
+    #    进来（配合上面那个「扫整个 storage/images」的洞，一次分析白跑一千多次）。
+    #    收窄成具体的**扫描件类型**：「座谈」（座谈会签到表/问卷）、「预公告」等。
+    #    ⚠️ 改动前实测过：本会话 112 张 PDF 抽图在新表下仍 100% 命中（108 靠「座谈」、
+    #       4 靠「预公告」），无回归。
     # 文件名明确能判断类别的关键词（可直接分类，省 vision）
     CLEAR_FILENAME_KEYWORDS = ['位置图', '红线', '勘测', '公示栏', '问卷', '签到表', '专家意见',
                                '评审', '意见', '执照', '证书', '资质', '公告', '预公告', '地图', '百度']
@@ -321,7 +417,7 @@ async def analyze_all_materials(
     text_doc_images = []
     ambiguous_images = []
     for img_path in images:
-        fname = os.path.basename(img_path).lower()
+        fname = str(orig_names.get(img_path) or os.path.basename(img_path)).lower()
         fdir = os.path.dirname(img_path).lower() if os.path.dirname(img_path) else ""
         is_text_doc = any(kw in fname or kw in fdir for kw in TEXT_DOC_KEYWORDS)
         is_clear_name = any(kw in fname for kw in CLEAR_FILENAME_KEYWORDS)
@@ -344,7 +440,10 @@ async def analyze_all_materials(
         async def _ocr_one(img_path):
             async with sem:
                 try:
-                    vr = await classify_image_with_vision(img_path, llm_service)
+                    # 🔴 单图超时保护：防止个别图片的视觉调用挂起拖死整批分析
+                    vr = await asyncio.wait_for(
+                        classify_image_with_vision(img_path, llm_service), timeout=90.0
+                    )
                 except Exception as e:
                     logger.warning(f"Vision OCR error for {img_path}: {e}")
                     vr = {}
@@ -526,7 +625,11 @@ def _extract_data_from_text(text: str) -> Dict[str, str]:
         (r'(?:涉及|共|共计)\s*(\d+)\s*(?:户|农户)', 'household_count'),
         (r'(\d+)\s*(?:人|人口)\s*(?:被征地|安置)', 'population_count'),
         (r'(?:补偿标准|综合地价)[^\d]*(\d[\d,.]*)\s*(?:元|万元)', 'compensation_standard'),
-        (r'(?:总费用|总补偿|资金)[^\d]*(\d[\d,.]*)\s*(?:万元|元)', 'funding'),
+        # 🔴 金额抽到 `funding_amount`，**不能**写进 `funding` ——
+        #    `funding` 的语义是「资金筹措**单位**」（field meta 示例「区财政统筹」，
+        #    第6章/第10章 按资金来源渠道用）。此前把金额写进 `funding`，
+        #    正文就成了「资金筹措为 1234 万元」，且弹窗仍会追问用户「资金筹措单位」。
+        (r'(?:总费用|总补偿|资金)[^\d]*(\d[\d,.]*)\s*(?:万元|元)', 'funding_amount'),
         (r'(\d+)\s*(?:份|张)\s*(?:问卷|调查)', 'total_samples'),
         (r'([^\s]{2,10}[告发字]\s*〔?\s*\d{4}\s*〕?\s*\d+\s*号)', 'doc_reference'),
         (r'(?:责任单位|征收主体)[：:]\s*(\S{2,30})', 'org_name'),
@@ -574,12 +677,27 @@ def apply_analysis_to_state(state: dict, analysis_result: Dict[str, Any]) -> Non
     # 2. Filled data updates
     updates = analysis_result.get("filled_data_updates", {})
     filled = state.setdefault("filled_data", {})
+    _ai_keys = []
     for k, v in updates.items():
+        # 🔴 不收 AI 自编的「土地统计摘要」类结构：它们**没有任何消费者**，
+        #    却各自带着一套与勘测定界不一致的总面积
+        #    （实测 land_statistics_summary=15268 / _land_by_category=14068 / 勘测定界=18929
+        #      三套口径并存）。业主口径是「土地面积统一以勘测定界为准」。
+        if k in _AI_AREA_SUMMARY_KEYS:
+            continue
         if v and (k not in filled or not filled[k]):
             if isinstance(v, dict):
                 filled[k] = v  # 🔴 dict 保留结构（如 questionnaire_tallies），不转字符串
             else:
                 filled[k] = str(v)
+            _ai_keys.append(str(k))
+    # 🔴 来源=AI 提取（视觉分析 / LLM 抽取推出来的，**最容易出错**，
+    #    「解析值核对弹窗」要重点让用户看的就是这一批）
+    try:
+        from app.services.field_sources import mark
+        mark(filled, "ai", *_ai_keys)
+    except Exception:
+        pass
 
     # 3. PDF text for RAG
     pdf_text = analysis_result.get("extracted_pdf_text", "")

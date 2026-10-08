@@ -154,19 +154,13 @@ class TestIntegration:
                 passed=False, details=[f"Cannot open document: {e}"],
             )
 
-        # Required chapters for 稳评报告
-        required = [
-            "拟征收决策基本概况",
-            "评估过程",
-            "社会稳定风险因素调查",
-            "决策综合分析",
-            "风险因素识别",
-            "措施前风险等级研判",
-            "风险防范与化解措施",
-            "措施后风险等级评估",
-            "评估结论与建议",
-            "应急预案",
-        ]
+        # Required chapters for 稳评报告 —— 取自 chapter_definitions（唯一事实源），
+        # 不再在此另存一份会过期的章节名清单
+        try:
+            from app.agent.chapter_definitions import ALL_CHAPTERS, get_chapter_title
+            required = [get_chapter_title(n) for n in ALL_CHAPTERS]
+        except Exception:
+            required = []
 
         full_text = "\n".join(p.text for p in doc.paragraphs)
         full_text_lower = full_text.lower()

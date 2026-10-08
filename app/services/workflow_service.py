@@ -15,6 +15,7 @@ from app.utils.sse import (
     sse_phase_change, sse_complete, sse_error,
     sse_agent_status,
 )
+from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +434,7 @@ class WorkflowService:
         """Get status of all 10 chapters."""
         state = session.state
         result = {}
-        for ch_num in range(1, 11):
+        for ch_num in ALL_CHAPTERS:
             result[ch_num] = self.get_chapter_status(session, ch_num)
 
         return {

@@ -26,6 +26,96 @@ _TEXT_EXTENSIONS = {".txt", ".md"}
 _WORD_EXTENSIONS = {".doc", ".docx"}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 关键信息识别 —— 日期 / 结论性数值
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔴 用户上传的材料**不只有固定的那几项**：除了预公告，还可能是施工/调查类文件，
+#    里面夹着各类日期（公示、勘察、座谈、评审…）和结论性数据（群众支持率、户数、
+#    问卷份数）。这些信息此前一律识别不出来，用户上传了材料仍被弹窗逐项追问。
+#    这里按「标签就近取日期」识别，且只认**带明确标签**的日期 —— 不按裸日期乱猜，
+#    避免把勘测定界图、图纸比例尺上的无关日期串成报告字段。
+_DATE_LABEL_ALIASES = [
+    ("commission_date",       ("委托日期", "委托时间")),
+    ("plan_date",             ("制定方案日期", "方案制定日期", "工作方案日期", "工作方案时间")),
+    ("plan_approve_date",     ("方案审核日期", "方案审核时间")),
+    ("notice_publish_date",   ("公告发布日期", "预公告发布日期", "发布日期", "公告日期")),
+    ("notice_date",           ("现场公示开始", "现场公示时间", "现场公示日期", "现场公示", "张贴公示")),
+    ("notice_end_date",       ("现场公示结束", "公示结束日期")),
+    ("publicity_start_date",  ("稳评公示开始", "稳评公示日期", "稳评公示时间", "稳评公示")),
+    ("survey_date",           ("实地勘察日期", "实地勘察时间", "勘察日期", "勘察时间", "现场勘察")),
+    ("symposium_date",        ("座谈会日期", "座谈会时间", "座谈日期", "座谈时间")),
+    ("risk_predict_date",     ("风险预测开始", "风险预测日期")),
+    ("report_draft_date",     ("报告编制开始", "报告编制日期", "编制开始日期")),
+    ("report_draft_end_date", ("报告编制结束", "报告编制完成", "编制完成日期")),
+    ("review_date",           ("专家评审日期", "专家评审时间", "评审日期", "评审时间")),
+    ("review_end_date",       ("专家评审结束", "评审结束日期", "评审结束时间")),
+]
+
+# 起止同属一个活动 —— 只要标签处给的是区间（「6月4日至6月10日」）就顺带补结束日
+_DATE_RANGE_PAIRS = {
+    "notice_date": "notice_end_date",
+    "publicity_start_date": "publicity_end_date",
+    "risk_predict_date": "risk_predict_end_date",
+    "report_draft_date": "report_draft_end_date",
+    "review_date": "review_end_date",
+}
+
+# 核验清单：这些是「用户到底有没有正确上传」的判据
+KEY_RECOGNITION_FIELDS = [
+    ("project_name",          "项目名称"),
+    ("doc_reference",         "公告/批复文号"),
+    ("location",              "项目位置"),
+    ("org_name",              "稳评责任单位"),
+    ("area_mu",               "用地面积"),
+    ("household_count",       "涉及户数"),
+    ("total_samples",         "问卷份数"),
+    ("support_rate",          "群众支持率"),
+    ("compensation_standard", "补偿标准"),
+    ("commission_date",       "委托日期"),
+    ("notice_publish_date",   "公告发布日期"),
+    ("notice_date",           "现场公示时间"),
+    ("survey_date",           "实地勘察日期"),
+    ("symposium_date",        "座谈会日期"),
+    ("review_date",           "专家评审日期"),
+]
+
+# 中文 / 短横线 / 点分年份日期，可选「日」
+_DATE_PAT = r'(\d{4})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*日?'
+_DATE_PAT_MD = r'(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*日?'
+
+
+def _norm_date(y: int, mo: int, d: int) -> str:
+    """归一化成 ISO 日期；不合法返回空串（宁可空着，也不要造一个错日期）。"""
+    if not (1900 <= y <= 2200 and 1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+def _re_date_labeled(alias: str, text: str) -> Dict[str, str]:
+    """在标签后 40 字内就近取日期；返回 {'start': ISO, 'end': ISO?}。"""
+    for am in re.finditer(re.escape(alias), text):
+        seg = text[am.end(): am.end() + 40]
+        dm = re.search(_DATE_PAT, seg)
+        if not dm:
+            continue
+        start = _norm_date(*(int(x) for x in dm.groups()))
+        if not start:
+            continue
+        out: Dict[str, str] = {"start": start}
+        # 区间：「至 / 到 / ~ / — / -」后跟第二个日期（可省略年份）
+        rest = seg[dm.end(): dm.end() + 16]
+        rm = re.match(r'\s*(?:至|到|—|–|~|－|-)\s*' + _DATE_PAT, rest)
+        if rm:
+            end = _norm_date(*(int(x) for x in rm.groups()))
+        else:
+            rm2 = re.match(r'\s*(?:至|到|—|–|~|－|-)\s*' + _DATE_PAT_MD, rest)
+            end = _norm_date(int(start[:4]), int(rm2.group(1)), int(rm2.group(2))) if rm2 else ""
+        if end and end >= start:
+            out["end"] = end
+        return out
+    return {}
+
+
 @dataclass
 class MaterialArtifact:
     source_path: str
@@ -411,12 +501,21 @@ class MaterialIngestionService:
     def _extract_structured_fields(self, text: str) -> Dict[str, Any]:
         if not text:
             return {}
+        # ── 文本型字段：按「标签：值」逐行抽取 ──────────────────────────────
         candidates = {
             "location": ["位置", "坐落", "地址", "地理位置"],
             "responsible_unit": ["责任单位", "征收主体", "实施单位", "稳评单位"],
             "project_name": ["项目名称", "决策名称", "报告标题"],
             "doc_reference": ["文号", "公告号", "批文号"],
             "area": ["面积", "征收面积", "用地面积"],
+            # 🔴 用户上传的材料里常把关键结论单列成行（「群众支持率：98.5%」），
+            #    这些值直接决定第 9 章（问卷调查情况）能不能写实，必须识别出来。
+            "support_rate": ["群众支持率", "支持率", "赞成率"],
+            "total_samples": ["问卷份数", "问卷数量", "发放问卷", "回收问卷", "调查问卷"],
+            "household_count": ["涉及户数", "被征收户数", "征收户数", "户数"],
+            "contact_name": ["联系人", "经办人"],
+            "contact_phone": ["联系电话", "联系方式", "电话"],
+            "compensation_standard": ["补偿标准", "补偿单价", "安置补偿标准"],
         }
         result: Dict[str, Any] = {}
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -428,9 +527,100 @@ class MaterialIngestionService:
                     if alias in line and ("：" in line or ":" in line):
                         parts = line.split("：", 1) if "：" in line else line.split(":", 1)
                         if len(parts) == 2 and parts[1].strip():
-                            result[key] = parts[1].strip()
+                            result[key] = self._clean_field_value(key, parts[1].strip())
                             break
+
+        # ── 日期字段：标签就近取日期，中文日期归一化为 ISO ────────────────
+        # 🔴 日期是报告里最容易出错的地方（报告编制 / 现场公示 / 座谈会 / 评审…），
+        #    原来一个日期都不识别，用户上传了材料也照样被弹窗逐项追问。
+        #    这里只认**带明确标签**的日期，避免把勘测定界图上的无关日期串成字段。
+        for key, aliases in _DATE_LABEL_ALIASES:
+            if key in result:
+                continue
+            for alias in aliases:
+                m = _re_date_labeled(alias, text)
+                if not m:
+                    continue
+                result[key] = m["start"]
+                # 同一处给的是区间（「2026年6月4日至6月10日」）→ 顺带补结束日
+                if m.get("end") and key in _DATE_RANGE_PAIRS:
+                    result.setdefault(_DATE_RANGE_PAIRS[key], m["end"])
+                break
+
+        # ── 数值兜底：整句正则（「支持率达 98.5%」这类不带冒号的写法）──────
+        if "support_rate" not in result:
+            m = re.search(r'(?:群众|公众|村民|被征地群众)?\s*支持率[^0-9%％]{0,8}(\d{1,3}(?:\.\d+)?)\s*[%％]', text)
+            if m:
+                result["support_rate"] = m.group(1)
+        if "household_count" not in result:
+            # 🔴 必须有**征收/涉及**语境才认 —— 裸「共 120 户」在村里是总户数，
+            #    当「涉及户数」写进报告就是错的（错数字比空着更糟）。
+            m = re.search(r'(?:涉及|被征收|征收|拟征收|需征收|搬迁)\s*(?:农户|居民|住户|户数)?\s*(\d{1,6})\s*户', text)
+            if m:
+                result["household_count"] = m.group(1)
+        if "total_samples" not in result:
+            # 🔴 同上：必须与**问卷/调查表**同现，避免「发放资料 500 份」被当成问卷数
+            m = re.search(r'(?:发放|回收|收回|印制)[^。\n]{0,12}?(?:问卷|调查表)[^。\n]{0,8}?(\d{1,6})\s*份', text) \
+                or re.search(r'(\d{1,6})\s*份\s*(?:有效|调查)?\s*问卷', text) \
+                or re.search(r'(?:问卷|调查表)[^。\n]{0,10}?(\d{1,6})\s*份', text)
+            if m:
+                result["total_samples"] = m.group(1)
+        if "doc_reference" not in result:
+            # 文号（各机关都可能不同前缀）：如「洪拟征告〔2026〕10号」
+            m = re.search(r'([\u4e00-\u9fff]{2,12}\s*[〔\[（(]\s*\d{4}\s*[〕\]）)]\s*第?\s*\d{1,4}\s*号)', text)
+            if m:
+                result["doc_reference"] = re.sub(r'\s+', '', m.group(1))
         return result
+
+    @staticmethod
+    def _clean_field_value(key: str, raw: str) -> str:
+        """抽出来的值做最小清洗：去尾部标点；数值字段只保留数字。
+
+        🔴 一行里常并排多项（「联系人：张主任  联系电话：0517-12345678」），
+        按冒号切会**把后面那项一起吞进来** —— 所以电话/人名要各自定位截取。
+        """
+        v = str(raw or "").strip().strip("。；;,，")
+        if key in ("support_rate", "household_count", "total_samples"):
+            m = re.search(r'(\d+(?:\.\d+)?)', v)
+            if m:
+                return m.group(1)
+        if key == "contact_phone":
+            m = re.search(r'(?:0\d{2,3}[-\s]?\d{7,8}|1[3-9]\d{9})', v)
+            return m.group(0) if m else v
+        if key in ("contact_name", "doc_reference", "project_name", "location",
+                   "responsible_unit", "compensation_standard"):
+            # 截到下一项标签之前（多空格 / 下一个「XX：」）
+            v = re.split(r'\s{2,}|\s+(?=(?:联系人|联系电话|联系方式|电话|地址|备注)\s*[:：])', v)[0]
+        return v.strip()
+
+    @staticmethod
+    def recognition_report(source: Dict[str, Any]) -> Dict[str, List[Any]]:
+        """核验「关键信息有没有从上传材料里识别出来」。
+
+        🔴 用户少传/传错时，系统此前**没有任何反馈** —— 一路生成到弹窗才逐项问，
+        用户不知道是材料没传对还是系统没认出来。这里给出明确的两栏清单：
+        `recognized`（已识别，含值）与 `missing`（材料里没认到，生成时会问）。
+        """
+        src = source or {}
+        # 别名：材料侧键名 → 报告字段名
+        _alias = {
+            "area_mu": ("area_mu", "area"),
+            "org_name": ("org_name", "responsible_unit"),
+        }
+        recognized, missing = [], []
+        for key, label in KEY_RECOGNITION_FIELDS:
+            _keys = _alias.get(key, (key,))
+            val = ""
+            for _k in _keys:
+                _v = src.get(_k)
+                if _v not in (None, "", [], {}):
+                    val = _v
+                    break
+            if val:
+                recognized.append({"key": key, "label": label, "value": str(val)[:40]})
+            else:
+                missing.append({"key": key, "label": label})
+        return {"recognized": recognized, "missing": missing}
 
     def _summarize_image_result(self, result: Dict[str, Any]) -> str:
         if not isinstance(result, dict):

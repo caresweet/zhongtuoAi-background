@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -25,8 +27,8 @@ import httpx
 BASE_URL = "http://localhost:8000/api/v1"
 
 
-async def test_full_pipeline():
-    """Full end-to-end generation test."""
+async def _run_e2e():
+    """Full end-to-end generation test (requires running backend + RUN_E2E=1)."""
     print("=" * 60)
     print("  端到端测试：智能报告生成 + 格式校验")
     print("=" * 60)
@@ -257,5 +259,20 @@ async def test_full_pipeline():
 
 
 if __name__ == "__main__":
-    result = asyncio.run(test_full_pipeline())
+    result = asyncio.run(_run_e2e())
     sys.exit(0 if result["report_id"] else 1)
+
+
+def test_full_pipeline():
+    """端到端集成测试：仅当 RUN_E2E=1 且后端运行于 :8000 时真实执行。
+
+    避免 pytest 默认把需要在线后端 + 真实 LLM 生成的长流程当作单元测试跑。
+    其余情况标记 skip（pytest-asyncio 未安装时 async 测试也无法运行）。
+    """
+    if os.environ.get("RUN_E2E") != "1":
+        pytest.skip("端到端测试需设置 RUN_E2E=1 且后端运行于 :8000（真实生成，较慢）")
+    try:
+        httpx.get("http://localhost:8000/api/v1/health", timeout=3.0)
+    except Exception:
+        pytest.skip("后端未运行于 :8000，跳过端到端测试")
+    asyncio.run(_run_e2e())

@@ -6,39 +6,53 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.knowledge_db import get_knowledge_db
 from app.database.history_db import get_history_db
+from app.deps import get_current_user, is_admin
 from app.models.knowledge import Template
 from app.models.history import Report
+from app.models.user import User
 from app.schemas.dashboard import DashboardStats, RecentReport, DailyTrend
 from app.schemas.knowledge import ApiResponse
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["数据展示"])
 
 
+def _owner_where(user: User) -> list:
+    """归属过滤条件，供 `.where(*_owner_where(user), …)` 展开。
+
+    非管理员只看自己的报告 —— 统计数字同样是信息（「别人出了多少份」），
+    不隔离就等于把全公司的产出量摊给每个账号看。管理员看全部。
+    """
+    return [] if is_admin(user) else [Report.user_id == str(user.id)]
+
+
 @router.get("/stats", response_model=ApiResponse)
 async def get_stats(
+    user: User = Depends(get_current_user),
     db_knowledge: AsyncSession = Depends(get_knowledge_db),
     db_history: AsyncSession = Depends(get_history_db),
 ):
-    """获取仪表盘统计数据。"""
+    """获取仪表盘统计数据（**按当前账号**，管理员为全量）。"""
+    mine = _owner_where(user)
     # Total reports
-    result = await db_history.execute(select(func.count(Report.id)))
+    result = await db_history.execute(select(func.count(Report.id)).where(*mine))
     total_reports = result.scalar() or 0
 
     # Completed reports
     result = await db_history.execute(
-        select(func.count(Report.id)).where(Report.status == "completed")
+        select(func.count(Report.id)).where(*mine, Report.status == "completed")
     )
     completed = result.scalar() or 0
 
     # Failed reports
     result = await db_history.execute(
-        select(func.count(Report.id)).where(Report.status == "failed")
+        select(func.count(Report.id)).where(*mine, Report.status == "failed")
     )
     failed = result.scalar() or 0
 
     # In progress
     result = await db_history.execute(
         select(func.count(Report.id)).where(
+            *mine,
             Report.status.in_(["created", "analyzing", "interviewing", "filling", "reviewing"])
         )
     )
@@ -54,13 +68,14 @@ async def get_stats(
     now = datetime.now()
     month_start = now.replace(day=1, hour=0, minute=0, second=0)
     result = await db_history.execute(
-        select(func.count(Report.id)).where(Report.created_at >= month_start)
+        select(func.count(Report.id)).where(*mine, Report.created_at >= month_start)
     )
     reports_this_month = result.scalar() or 0
 
     # Average generation time
     result = await db_history.execute(
         select(func.avg(Report.generation_duration_sec)).where(
+            *mine,
             Report.status == "completed",
             Report.generation_duration_sec.isnot(None),
         )
@@ -83,12 +98,14 @@ async def get_stats(
 @router.get("/recent", response_model=ApiResponse)
 async def get_recent(
     limit: int = 10,
+    user: User = Depends(get_current_user),
     db_history: AsyncSession = Depends(get_history_db),
 ):
-    """获取最近的报告列表。"""
+    """获取最近的报告列表（**只看自己的**，管理员为全量）。"""
     from sqlalchemy import desc
     query = (
         select(Report)
+        .where(*_owner_where(user))
         .order_by(desc(Report.created_at))
         .limit(limit)
     )
@@ -111,11 +128,13 @@ async def get_recent(
 @router.get("/trends", response_model=ApiResponse)
 async def get_trends(
     days: int = 30,
+    user: User = Depends(get_current_user),
     db_history: AsyncSession = Depends(get_history_db),
 ):
-    """获取最近N天每日报告趋势。"""
+    """获取最近N天每日报告趋势（**只看自己的**，管理员为全量）。"""
     from sqlalchemy import text
 
+    mine = _owner_where(user)
     trends = []
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -126,6 +145,7 @@ async def get_trends(
         # Count for this day
         result = await db_history.execute(
             select(func.count(Report.id)).where(
+                *mine,
                 Report.created_at >= day_start,
                 Report.created_at < day_end,
             )
@@ -134,6 +154,7 @@ async def get_trends(
 
         result = await db_history.execute(
             select(func.count(Report.id)).where(
+                *mine,
                 Report.created_at >= day_start,
                 Report.created_at < day_end,
                 Report.status == "completed",

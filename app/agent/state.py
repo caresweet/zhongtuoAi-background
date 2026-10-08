@@ -13,7 +13,7 @@ from typing import TypedDict, List, Dict, Any, Optional
 class ChapterContent(TypedDict, total=False):
     """Content and status of a single report chapter (1-10)."""
     number: int                      # 1-10
-    title: str                       # e.g., "拟征收决策基本概况"
+    title: str                       # e.g., "项目基本情况"
     status: str                      # pending | generating | review | approved | revised
     markdown: str                    # Current markdown content
     rag_sources: List[Dict[str, Any]]  # Retrieved knowledge used
@@ -165,67 +165,18 @@ class AgentState(TypedDict, total=False):
 # Chapter Definitions (built-in, replaces template-based structure)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CHAPTER_DEFINITIONS: Dict[int, Dict[str, str]] = {
-    1: {
-        "number": 1,
-        "title": "拟征收决策基本概况",
-        "description": "涵盖决策名称、责任单位、征地位置、征收范围/面积/地类/附着物、资金测算、实施周期",
-        "key_tables": ["拟征收土地基本情况表"],
-    },
-    2: {
-        "number": 2,
-        "title": "评估过程、方法和依据",
-        "description": "评估流程还原、法规依据（DB32/T4013-2021等）、三类核心方法",
-        "key_tables": ["评估依据法规清单"],
-    },
-    3: {
-        "number": 3,
-        "title": "社会稳定风险因素调查",
-        "description": "问卷调查统计、利益相关者诉求、公示/座谈/现场照片、网络舆情排查",
-        "key_tables": ["公众意见调查分析表", "部门意见调查分析表"],
-    },
-    4: {
-        "number": 4,
-        "title": "决策综合分析",
-        "description": "合法性分析（主体/目的/规划/程序）、合理性分析（经济/投资/群众）、可行性分析（资金/政府/群众）、可控性分析（安全/宣传/群体/治安）",
-        "key_tables": [],
-    },
-    5: {
-        "number": 5,
-        "title": "风险因素识别与初始等级表",
-        "description": "识别4类核心风险：补偿方案、资金分配、社保名单、信访舆情；明确发生概率、影响程度、初始风险等级",
-        "key_tables": ["风险因素初始风险等级表"],
-    },
-    6: {
-        "number": 6,
-        "title": "措施前风险等级研判",
-        "description": "按DB32/T4013-2021量化指标体系打分，合法性/合理性/可行性/可控性四大类，措施前总分15-20分",
-        "key_tables": ["措施前风险等级量化评分表"],
-    },
-    7: {
-        "number": 7,
-        "title": "风险防范与化解措施",
-        "description": "对应4类风险制定可落地措施，覆盖宣传/补偿/资金/社保/信访五大方向，明确责任主体",
-        "key_tables": ["风险防范与化解措施汇总表"],
-    },
-    8: {
-        "number": 8,
-        "title": "措施后风险等级评估",
-        "description": "重新计算量化得分，措施后总分10-15分，判定低风险，附措施前后得分对比表",
-        "key_tables": ["措施后风险等级量化评分表", "措施前后得分对比表"],
-    },
-    9: {
-        "number": 9,
-        "title": "评估结论与建议",
-        "description": "总结合法性/合理性/可行性/可控性论证结果，明确低风险可实施，给出4-5条工作建议",
-        "key_tables": [],
-    },
-    10: {
-        "number": 10,
-        "title": "应急预案",
-        "description": "组织指挥体系/分级响应/处置措施（金湖模板：3节纯文字无表格）",
-        "key_tables": [],
-    },
+# 🔴 章节定义：**单一事实源在 app/agent/chapter_definitions.py**，
+#    此处仅做格式转换，不再重复维护一份章节目录（以 chapter_definitions 为准）。
+from app.agent.chapter_definitions import CHAPTER_DEFINITIONS as _CANONICAL_CHAPTERS
+
+CHAPTER_DEFINITIONS: Dict[int, Dict[str, Any]] = {
+    num: {
+        "number": num,
+        "title": d.get("title", f"第{num}章"),
+        "description": d.get("description", ""),
+        "key_tables": d.get("key_tables", []),
+    }
+    for num, d in _CANONICAL_CHAPTERS.items()
 }
 
 
@@ -244,7 +195,7 @@ def create_initial_state(
     Returns:
         Initialized AgentState dict.
     """
-    # Initialize all 10 chapters as pending
+    # Initialize all chapters as pending
     chapters: Dict[int, ChapterContent] = {}
     for num, defn in CHAPTER_DEFINITIONS.items():
         chapters[num] = ChapterContent(
@@ -263,7 +214,7 @@ def create_initial_state(
         session_id=session_id,
         report_title=report_title or "社会稳定风险评估报告",
         template_id=0,
-        template_name="内置10章标准结构",
+        template_name="内置十四章案卷标准结构",
         template_path="",
         preserved_sections=[],
         template_placeholders=[],

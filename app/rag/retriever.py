@@ -14,19 +14,9 @@ from app.rag.embedder import EmbedderService
 from app.rag.vector_store import VectorStoreService
 
 
-# Chapter-specific query templates for the 10-chapter report structure
-CHAPTER_QUERY_TEMPLATES: Dict[int, str] = {
-    1: "拟征收决策基本概况 项目名称 责任单位 征地位置 征收范围 面积 地类 资金测算 实施周期",
-    2: "评估过程 评估方法 评估依据 对照表法 实地考察法 问卷调查法 稳评法规 DB32/T4013-2021 公示 座谈",
-    3: "社会稳定风险因素调查 公众意见调查 部门意见调查 问卷调查统计 利益相关者诉求 网络舆情 公示照片 座谈会照片",
-    4: "决策综合分析 合法性分析 合理性分析 可行性分析 可控性分析 征收主体 征收目的 规划相符性 程序合规性",
-    5: "风险因素识别 初始风险等级 补偿方案风险 资金分配风险 社保名单风险 信访舆情风险 发生概率 影响程度",
-    6: "措施前风险等级研判 量化指标体系 合法性打分 合理性打分 可行性打分 可控性打分 DB32/T4013-2021 评分表",
-    7: "风险防范化解措施 宣传规范 补偿方案 资金监管 社保落实 信访舆情应对 责任主体 可执行措施",
-    8: "措施后风险等级评估 重新计算得分 得分对比 风险下降 低风险判定",
-    9: "评估结论 建议 合法性结论 合理性结论 可行性结论 可控性结论 低风险 可实施 工作建议",
-    10: "应急预案 编制目的 依据 适用范围 指导思想 工作原则 组织领导 职责任务 预警预防 现场处置 舆情处置 保障措施 奖惩机制",
-}
+# Chapter-specific query templates —— 单一事实源：chapter_definitions.CHAPTER_RAG_QUERIES
+from app.agent.chapter_definitions import CHAPTER_RAG_QUERIES as CHAPTER_QUERY_TEMPLATES
+from app.agent.chapter_definitions import ALL_CHAPTERS  # noqa: F401
 
 
 class RetrieverService:
@@ -391,6 +381,121 @@ class RetrieverService:
         terms = re.split(r'[，。！？；：、\s\n]+', text)
         return [t for t in terms if len(t) >= 2 and t not in stop_words][:10]
 
+    # ═══════════════════════════════════════════════════════════════
+    # 内容类型库检索（kb_* 集合，按章节 → 内容类型映射）
+    # ═══════════════════════════════════════════════════════════════
+    async def retrieve_by_kb_type(
+        self,
+        chapter_number: int,
+        project_context: str = "",
+        main_results: int = 8,
+        alt_results: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """按「章节」查对应的内容类型库(kb_*)，取回该内容类型的范文正文。
+
+        返回裸 item 列表（未经 format），供 rag_service 合并/格式化。
+        """
+        from app.rag.kb_chapter_map import CHAPTER_KB_TYPES
+
+        main_type, alt_types = CHAPTER_KB_TYPES.get(chapter_number, ("decision_info", []))
+
+        # 构建语义化查询词：类型说明 + 项目关键词
+        from app.rag.kb_types_config import TYPES
+        main_desc = TYPES.get(main_type, main_type)
+        query = f"{main_desc} {project_context[:80]}"
+        query_embedding = await self.embedder.embed_text(query)
+
+        # 🔴 复用自身 vector_store（避免新建 ChromaDB 连接与主进程锁冲突）
+        vs = self.vector_store
+        collections = []
+        try:
+            c = vs.get_or_create_collection(f"kb_{main_type}")
+            if c.count():
+                collections.append(c)
+        except Exception:
+            pass
+        for alt in alt_types:
+            try:
+                ac = vs.get_or_create_collection(f"kb_{alt}")
+                if ac.count():
+                    collections.append(ac)
+            except Exception:
+                pass
+        if not collections:
+            return []
+
+        # 🔴 池子要**远超**最终名额：原实现是「整章一个查询、直接取 top-8」，
+        #    结果最像查询词的那一个小节把名额占光 —— 实测第6章 11 条里 6 条都是
+        #    「4.1.1 决策名称」，其余小节一条范文都没有。没有范文的小节只能靠模型
+        #    自由发挥，正是业主说的「让 LLM 自己去编造」。
+        #    改成：先大池取样，再**按小节轮流取**（见下），让尽量多的小节都分到范文。
+        _POOL = max(main_results * 8, 80)
+        all_items = []
+        for idx, col in enumerate(collections):
+            limit = _POOL if idx == 0 else max(_POOL // 3, 20)
+            res = self.vector_store.query(col, query_embedding, limit)
+            if res.get("documents") and res["documents"][0]:
+                for i in range(len(res["documents"][0])):
+                    meta = res["metadatas"][0][i] if res.get("metadatas") else {}
+                    all_items.append({
+                        "document": res["documents"][0][i],
+                        "metadata": meta,
+                        "distance": res["distances"][0][i],
+                        "collection": col.name,
+                    })
+        all_items.sort(key=lambda x: x["distance"])
+
+        budget = main_results + alt_results * max(len(collections) - 1, 1)
+
+        # 🔴 **主类型优先**：备选类型只用来**补位**，不和主类型平分名额。
+        #    原先把所有库的片段混在一起轮流取，结果备选类型占比过高 ——
+        #    实测第8章（主 `stakeholder_ref`，备选 `report_desc`）里混进了
+        #    「1.3原则」这种**编制说明**的范文，与本章毫无关系，
+        #    白占名额还把模型的注意力带偏（业主反馈「精度要调高」）。
+        #    改成：先把主类型取完，取不满 budget 才去备选类型补。
+        def _round_robin(items: List[Dict[str, Any]], cap: int,
+                         picked: List[Dict[str, Any]], seen: set) -> int:
+            """按 `section_title` 分桶后轮流取，返回本次取了几条。"""
+            buckets: Dict[str, List[Dict[str, Any]]] = {}
+            order: List[str] = []
+            for it in items:
+                sec = str((it.get("metadata") or {}).get("section_title", "") or "").strip()
+                key = sec or f"__无小节__{it.get('collection', '')}"
+                if key not in buckets:
+                    buckets[key] = []
+                    order.append(key)
+                buckets[key].append(it)
+            added, idx = 0, 0
+            while len(picked) < cap:
+                progressed = False
+                for k in order:
+                    if idx >= len(buckets[k]):
+                        continue
+                    cand = buckets[k][idx]
+                    sig = str(cand.get("document", ""))[:200]
+                    if sig in seen:              # 同一片段可能同时命中多个库
+                        continue
+                    seen.add(sig)
+                    picked.append(cand)
+                    added += 1
+                    progressed = True
+                    if len(picked) >= cap:
+                        break
+                if not progressed:
+                    break
+                idx += 1
+            return added
+
+        picked: List[Dict[str, Any]] = []
+        seen_docs: set = set()
+        for ci, col in enumerate(collections):
+            pool = [it for it in all_items if it.get("collection") == col.name]
+            pool.sort(key=lambda x: x["distance"])
+            _round_robin(pool, budget, picked, seen_docs)
+            if len(picked) >= budget:
+                break
+        return picked
+
     def _merge_results(
         self,
         *result_groups: Any,
@@ -426,14 +531,36 @@ class RetrieverService:
     def _format_results(
         self, items: List[Dict[str, Any]], chapter_number: int
     ) -> Dict[str, Any]:
-        """Format retrieval results into structured context."""
+        """Format retrieval results into structured context.
+
+        🔴 小节对齐（B+C）：
+        - C 元数据精排：本章编号开头的小节（如"1.5.2"）优先，有标题的次之，无标题最后；
+          同小节内容稳定相邻（按小节标题分组），避免无关小节内容混在靠前位置。
+        - B 注入分组：每条片段带【小节标题】前缀，agent 写哪个小节就能对号入座，防止写偏。
+        """
         regulation_texts = []
         local_reg_texts = []    # 地方规范 (provincial/city-level standards)
         example_texts = []
         project_texts = []
         sources = []
 
-        for item in items:
+        # ── C：按小节标题元数据精排 ──
+        ch_prefix = f"{chapter_number}."
+
+        def _sec_rank(item: Dict[str, Any]) -> int:
+            sec = str((item.get("metadata") or {}).get("section_title", "") or "").strip()
+            if sec.startswith(ch_prefix) or sec.startswith(f"第{chapter_number}章"):
+                return 0  # 本章小节内容优先
+            if sec:
+                return 1  # 有标题（可能是跨章范本/条文）其次
+            return 2      # 无标题最后
+
+        ordered = sorted(
+            items,
+            key=lambda it: (_sec_rank(it), str((it.get("metadata") or {}).get("section_title", "") or "")),
+        )
+
+        for item in ordered:
             metadata = item.get("metadata", {})
             doc_type = metadata.get("document_type", "")
             doc_text = item.get("document", "")
@@ -444,6 +571,20 @@ class RetrieverService:
                                                'writing_guide', '写作', 'case_study']):
                 doc_type = "example_report"
 
+            # 🔴 `kb_*` 内容类型库**全是同类项目的报告正文**（范文），不是法规条文 ——
+            #    它们的 metadata 用的是 `kb_type`，而上面读的是 `document_type`。
+            #    读不到就掉进下面的 `else` 兜底分支，被整批塞进 `chapter_context`
+            #    （prompt 里那一段的标题是「📖 评估依据（**必须引用**以下真实规范条款）」）。
+            #    后果有两条，都是实测出来的：
+            #      ① `example_context` 恒为 0 字 —— prompt 里「✍️ 同类型内容参考」
+            #         那一整块（带「严禁照抄范文里的项目数据」约束）**永远不会出现**；
+            #      ② 十几个别的项目的地名/文号（清江浦区黄码镇、运西村…）被当作
+            #         「必须引用的规范条款」喂给模型，成了串数据的泄漏源
+            #         —— 所以要靠 `_OLD_PROJECT_FRAGMENTS` 事后兜底。
+            #    认 `kb_type` 即归位。
+            if not doc_type and metadata.get("kb_type"):
+                doc_type = "example_report"
+
             source = {
                 "title": metadata.get("section_title", metadata.get("source_file", "")),
                 "document_type": doc_type,
@@ -452,26 +593,33 @@ class RetrieverService:
                 "article_number": metadata.get("article_number", ""),
             }
 
+            # ── B：带【小节标题】前缀，注入后按小节分组，agent 写哪节看哪节 ──
+            sec = str(metadata.get("section_title", "") or "").strip()
+            labeled = f"【{sec}】\n{doc_text}" if sec else doc_text
+
             if doc_type in ("regulation", "standard"):
                 if len("\n".join(regulation_texts)) < 3000:
-                    regulation_texts.append(doc_text)
+                    regulation_texts.append(labeled)
                     sources.append(source)
             elif doc_type == "local_regulation":
                 if len("\n".join(local_reg_texts)) < 3000:
-                    local_reg_texts.append(doc_text)
+                    local_reg_texts.append(labeled)
                     sources.append(source)
             elif doc_type == "example_report":
-                if len("\n".join(example_texts)) < 3000:
-                    example_texts.append(doc_text)
+                # 🔴 上限从 3000 提到 6000：分层检索保证「每个小节都有范文」，
+                #    但 11 条片段加起来约 3500–5000 字，3000 的帽子会把后面几个小节
+                #    的范文整条切掉，等于白分层。
+                if len("\n".join(example_texts)) < 6000:
+                    example_texts.append(labeled)
                     sources.append(source)
             elif doc_type == "project_material":
                 if len("\n".join(project_texts)) < 2000:
-                    project_texts.append(doc_text)
+                    project_texts.append(labeled)
                     sources.append(source)
             else:
                 # Unknown type, add to regulation as fallback
                 if len("\n".join(regulation_texts)) < 3000:
-                    regulation_texts.append(doc_text)
+                    regulation_texts.append(labeled)
                     sources.append(source)
 
         return {

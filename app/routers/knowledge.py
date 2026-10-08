@@ -1413,3 +1413,77 @@ def _extract_text_generic(relative_path: str) -> str:
         pass
 
     raise ValueError("无法识别文件编码，请尝试上传 .txt / .md / .docx 格式的文档")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 人员库 —— 报告前置「培训证书」与「稳评工作组人员及分工情况」的数据源
+#
+# 业主口径：「把图片和人员信息存入到单独的一个数据库上，做查找和填充功能，
+#            用户选择哪些人员就可以提取出哪些人员的信息。」
+#   · 人员信息 → company_personnel 表
+#   · 人员图片 → company_personnel_images 表（培训证书/职称证书/证件照…）
+# 详见 app/services/personnel_store.py
+# ═══════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════
+# 人员库接口**已迁到 `/api/v1/company/personnel`**（app/routers/company.py）
+#
+# 🔴 为什么迁走：人员选择是**每个用户都要用**的能力（报告前置的工作组名单与
+#    培训证书取图）；而知识库按业主要求改为**管理员专属**，再放在一起
+#    普通用户就选不了人员了。
+#
+# 仍留在本模块的是**内部工具**：证书扫描件的视觉索引（扫的是我们自己的素材目录）。
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 人员证书索引 —— 「人名 → 培训证书扫描件」
+#
+# 证书扫描件的姓名是手写体、文件名看不出是谁，故一次性视觉识别后落盘
+# （storage/personnel_certs.json）。之后按人名取图是纯查表，零 LLM。
+# ═══════════════════════════════════════════════════════════════
+
+_CERT_INDEX_JOB: dict = {"status": "idle", "done": 0, "total": 0, "error": ""}
+
+
+@router.get("/personnel/certs", response_model=ApiResponse)
+async def get_personnel_certs():
+    """查看已识别的人员证书索引：{人名: [证书类型, ...]}。"""
+    from app.services.personnel_certs import load_index
+    idx = load_index()
+    by_person: dict = {}
+    for e in idx.values():
+        if e.get("is_person_cert") and e.get("person_name"):
+            by_person.setdefault(e["person_name"], []).append({
+                "cert_type": e.get("cert_type", ""),
+                "cert_no": e.get("cert_no", ""),
+                "issuer": e.get("issuer", ""),
+            })
+    return ApiResponse(
+        message=f"已识别 {len(idx)} 张素材，其中人员证书 {sum(len(v) for v in by_person.values())} 张",
+        data={"indexed": len(idx), "persons": by_person, "job": _CERT_INDEX_JOB})
+
+
+@router.post("/personnel/certs/build", response_model=ApiResponse)
+async def build_personnel_certs(force: bool = Form(False, description="忽略已有索引，全部重新识别")):
+    """构建/更新「人名 → 证书扫描件」索引（后台跑；已识别过的图不重复识别）。"""
+    import asyncio as _asyncio
+    if _CERT_INDEX_JOB.get("status") == "building":
+        return ApiResponse(message="⏳ 正在识别中，请稍候", data=_CERT_INDEX_JOB)
+
+    _CERT_INDEX_JOB.update({"status": "building", "done": 0, "total": 0, "error": ""})
+
+    async def _job():
+        try:
+            from app.services.personnel_certs import build_cert_index, _list_candidate_images
+            _CERT_INDEX_JOB["total"] = len(_list_candidate_images())
+            idx = await build_cert_index(force=force)
+            _CERT_INDEX_JOB.update({"status": "done", "done": len(idx)})
+            logger.info(f"[人员证书] 索引完成，共 {len(idx)} 张素材")
+        except Exception as e:
+            logger.error(f"[人员证书] 索引失败: {e}")
+            _CERT_INDEX_JOB.update({"status": "error", "error": str(e)[:300]})
+
+    _asyncio.create_task(_job())
+    return ApiResponse(message="⏳ 已开始识别人事证书素材（视觉识别，约需 1-2 分钟）",
+                       data={"status": "building"})

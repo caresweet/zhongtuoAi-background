@@ -6,13 +6,15 @@
 - Conversation memory: persistent multi-turn context with auto-summarization
 """
 
-import asyncio, json, time, uuid, re, os, pathlib
+import asyncio, json, time, uuid, re, os, pathlib, logging
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
-from fastapi import APIRouter, Query, UploadFile, File, HTTPException
+from fastapi import APIRouter, Query, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.deps import get_current_user_optional
+from app.models.user import User
 from app.services.llm_service import llm_service
 from app.rag.embedder import EmbedderService
 from app.rag.vector_store import VectorStoreService
@@ -20,6 +22,13 @@ from app.database.knowledge_db import async_session
 from sqlalchemy import text
 
 router = APIRouter(prefix="/api/knowledge", tags=["知识问答"])
+
+# 🔴 门户公开问答口（业主决定：知识库改管理员可见后，**门户访客仍要能用客服问答**）。
+#    匿名调用**只读**：不落会话记录、不做纠正学习（那两条都是写库路径）。
+#    受登录保护的部分（提取/审核/学习）留在上面的 `router`，由 main.py 挂鉴权。
+public_router = APIRouter(prefix="/api/knowledge", tags=["门户公开问答"])
+
+logger = logging.getLogger(__name__)
 
 
 # ── Request/Response models ──────────────────────────────────────────────────
@@ -414,12 +423,20 @@ async def extract_file_for_chat(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"文件提取失败: {e}")
 
 
-@router.post("/chat")
-async def knowledge_chat(request: KnowledgeChatRequest):
+@public_router.post("/chat")
+async def knowledge_chat(
+    request: KnowledgeChatRequest,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """RAG-powered Q&A with learning and context memory.
 
     Streams SSE events: thinking, content, done, learned, error
+
+    🔴 **匿名（未登录）调用是只读的**：门户访客可以用客服问答，但
+       ① 不落会话记录、② 不做纠正学习 —— 这两条都会写库，
+       否则任何人都能往知识库里灌内容（`/learn-report` 那条路已整体要求登录）。
     """
+    _anon = user is None
     if not llm_service.is_available:
         return StreamingResponse(
             _error_stream("LLM 服务未配置，请检查 API Key"),
@@ -431,11 +448,12 @@ async def knowledge_chat(request: KnowledgeChatRequest):
 
     async def event_generator():
         try:
-            # ── Save user message ────────────────────────────────────────
-            await _save_conversation(session_id, "user", request.message)
+            # ── Save user message（匿名只读，不落库）──────────────────────
+            if not _anon:
+                await _save_conversation(session_id, "user", request.message)
 
-            # ── 1. Check if this is a correction ───────────────────────────
-            is_correction = detect_correction(request.message)
+            # ── 1. Check if this is a correction（匿名不做学习，避免任意灌库）──
+            is_correction = (not _anon) and detect_correction(request.message)
             correction_result = None
 
             if is_correction and request.history:
@@ -557,8 +575,9 @@ async def knowledge_chat(request: KnowledgeChatRequest):
                         full_response += delta
                         yield _sse("content", {"delta": delta})
 
-            # ── 6. Save AI response ───────────────────────────────────────
-            await _save_conversation(session_id, "assistant", full_response)
+            # ── 6. Save AI response（匿名只读，不落库）────────────────────
+            if not _anon:
+                await _save_conversation(session_id, "assistant", full_response)
 
             # ── 7. Done ───────────────────────────────────────────────────
             yield _sse("done", {
@@ -902,6 +921,27 @@ def _review_format(docx_path: str) -> list:
     except Exception:
         sections.append({"name":"格式检查","category":"format","description":"无法读取DOCX格式","status":"warning","issues":[{"severity":"warning","message":"格式检查失败，请用WPS打开人工检查"}],"count":1})
     return sections
+
+
+def _review_summary(score: int, passed: bool, report: dict) -> str:
+    """纯文本报告的审核摘要（无图片/表格统计，供 /review-report 使用）。"""
+    emoji = "✅" if passed else "❌"
+    level = "达标" if score>=80 else ("基本达标" if score>=60 else "未达标")
+    cats = [("数据有效性","data_validity"),("数据溯源","fabricated"),("数值范围","numeric_ranges"),("法规引用","regulations"),("内容规范","blocking")]
+    total_issues = report.get("total_issues", 0)
+    parts = [f"## 📋 报告审核结果\n**综合评分: {score}/100 {emoji} {level}**\n"]
+    parts.append(f"**文档统计**: {report.get('chapter',0)}章 · {total_issues}个文本问题\n")
+    for n,k in cats:
+        iss = report.get(k,[])
+        parts.append(f"- {'✅' if not iss else '❌'} {n}: {'通过' if not iss else f'{len(iss)}个问题'}")
+    if total_issues > 0:
+        parts.append(f"\n### 🔍 共发现 {total_issues} 个问题")
+        for n,k in cats:
+            for i in report.get(k,[])[:3]:
+                parts.append(f"- **[{n}]** {i.get('message',i.get('description',''))}")
+    if passed and score >= 80:
+        parts.append("\n> 💡 该报告质量优秀，可存入知识库供后续学习参考。")
+    return "\n".join(parts)
 
 
 def _review_summary_ext(score: int, passed: bool, report: dict, img_count: int, tbl_count: int, total_issues: int) -> str:

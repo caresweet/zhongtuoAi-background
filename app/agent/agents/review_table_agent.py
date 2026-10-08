@@ -37,6 +37,10 @@ class ReviewTableAgent(BaseAgent):
             "extract_keys": [
                 "决策名称", "责任单位", "实施单位", "项目位置",
                 "征收面积", "土地用途", "资金测算",
+                # 🔴 江苏省统一制式评审表：决策概况 7 条 + 责任/实施单位联系人信息
+                "地块现状", "周边安置", "手续办理", "资金筹措", "实施周期", "法律政策依据",
+                "责任单位负责人", "责任单位负责人职务", "责任单位联系人", "责任单位联系电话",
+                "实施单位联系人", "实施单位联系电话",
             ]
     },
         {
@@ -44,7 +48,7 @@ class ReviewTableAgent(BaseAgent):
             "source_chapters": [3],
             "extract_keys": [
                 "调查方式", "调查人数", "支持人数", "反对人数",
-                "支持率", "主要诉求",
+                "支持率", "主要诉求", "基层组织意见", "部门意见", "利益相关者",
             ]
     },
         {
@@ -70,7 +74,7 @@ class ReviewTableAgent(BaseAgent):
             ]
     },
         {
-            "name": "措施后风险等级评估",
+            "name": "确定风险等级",
             "source_chapters": [8],
             "extract_keys": [
                 "措施后总分", "得分变化", "措施后风险等级",
@@ -161,17 +165,31 @@ class ReviewTableAgent(BaseAgent):
 
             extracted[section_name] = section_data
 
+        # 🔴 决策概况 7 条：用 LLM 从正文/预公告/勘测定界归纳（照抄/扩写正文内容）
+        try:
+            _gk = await self._summarize_decision_overview(state, extracted)
+            if _gk:
+                extracted.setdefault("项目基本情况", {}).update(_gk)
+        except Exception as e:
+            logger.warning(f"决策概况归纳失败: {e}")
+
         # Build review table as Markdown
         review_md = self._build_review_markdown(extracted, state)
 
-        # Also try to generate actual .docx if ReviewTableService is available
+        # 🔴 生成评审表 DOCX（江苏省统一制式 14 栏）
         review_table_path = None
         try:
-            from app.services.review_table_service import ReviewTableService
-            service = ReviewTableService()
-            review_table_path = await service.generate_from_chapters(state)
+            import os as _os
+            from app.services.review_table_service import generate_review_table
+            from app.config import settings as _settings
+            _sid = str(state.get("session_id", "report"))[:12]
+            _out = str(_settings.STORAGE_DIR / "generated" / f"评审表_{_sid}.docx")
+            _os.makedirs(_os.path.dirname(_out), exist_ok=True)
+            review_table_path = generate_review_table(
+                _out, state.get("filled_data", {}) or {}, state.get("chapters", {}) or {},
+                extracted=extracted)
         except Exception as e:
-            logger.warning(f"ReviewTableService.generate_from_chapters() failed: {e}")
+            logger.warning(f"评审表 DOCX 生成失败: {e}")
 
         # Emit the review table content
         await self._emit_review_table(review_md, review_table_path)
@@ -295,88 +313,176 @@ class ReviewTableAgent(BaseAgent):
 
         return ""
 
+    async def _summarize_decision_overview(self, state: dict, extracted: dict) -> dict:
+        """用 LLM 从正文/预公告/勘测定界归纳「决策概况」7 条（照抄/扩写正文，不编造）。"""
+        import json
+        chapters = state.get("chapters", {}) or {}
+        text = "\n".join(
+            (ch.get("markdown", "") if isinstance(ch, dict) else str(ch))
+            for ch in chapters.values()
+        )
+        if len(text) < 200:
+            return {}
+        prompt = (
+            "你是稳评报告审核专家。请根据下面报告正文，归纳「决策概况」的 7 个方面，"
+            "每条 80 字以内，内容直接照抄/扩写正文，不得编造：\n"
+            "1.决策地理位置 2.决策用地范围、规模及地上附着物情况 3.地块现状及周边情况 "
+            "4.周边地块安置情况 5.相关手续办理情况 6.资金筹措 7.决策实施周期\n"
+            "🔴 各条要点：\n"
+            "- 1.只写地理位置（街道/社区/村组），不要把面积、用途也塞进来；\n"
+            "- 2.只写用地范围与规模（面积、权属、用途）与地上附着物包含哪些；\n"
+            "- 3.写**现状地类与周边**（如「以林地、耕地和水域及水利设施用地为主…周边以农村"
+            "居民点和农用地为主」），**不要**写成四至/红线图；\n"
+            "- 4.写**安置**，句式仿制式模板：「根据和<社区/村>负责人沟通了解：周边地块原安置"
+            "方式是按照『征谁补谁』原则，优先从承包户中确定社会保障名额；本决策拟征收土地为"
+            "集体土地，被征地农民的安置按《江苏省被征地农民社会保障办法》…执行」；\n"
+            "- 5.写预公告的发布与公告期限；6.写资金来源与渠道；7.写实施周期起止。\n"
+            "只输出 JSON，键固定为：{\"决策地理位置\":\"\",\"规模附着物\":\"\",\"地块现状\":\"\","
+            "\"周边安置\":\"\",\"手续办理\":\"\",\"资金筹措\":\"\",\"实施周期\":\"\"}\n\n"
+            f"报告正文（节选）：\n{text[:10000]}"
+        )
+        try:
+            from app.services.llm_service import LLMService
+            resp = await LLMService().chat(messages=[{"role": "user", "content": prompt}],
+                                           max_tokens=1500, temperature=0.2)
+            content = resp if isinstance(resp, str) else (resp.get("content", "") if isinstance(resp, dict) else str(resp))
+            m = re.search(r'\{[\s\S]*\}', content or "")
+            if not m:
+                return {}
+            data = json.loads(m.group())
+            return {k: str(data[k]).strip()[:200] for k in
+                    ("决策地理位置", "规模附着物", "地块现状", "周边安置", "手续办理", "资金筹措", "实施周期")
+                    if data.get(k)}
+        except Exception as e:
+            logger.warning(f"决策概况 LLM 归纳异常: {e}")
+            return {}
+
+    async def _summarize_opinions(self, state: dict) -> dict:
+        """用 LLM 从正文归纳「基层组织意见」与「党委政府或相关部门意见」。
+
+        🔴 这两栏规则抽取时常落空（关键词对不上动态小节名），印出来就是「【待填写】」，
+           评审专家看到的是个空栏目。改由 agent 从正文归纳 —— **只能依据正文**，
+           正文里没有的部门/表态一律不写（业主：「不要胡编乱造」）。
+        """
+        import json
+        chapters = state.get("chapters", {}) or {}
+        text = "\n".join(
+            (ch.get("markdown", "") if isinstance(ch, dict) else str(ch))
+            for ch in chapters.values()
+        )
+        if len(text) < 200:
+            return {}
+        prompt = (
+            "你是稳评报告审核专家。请根据下面报告正文，归纳评审表的两栏内容：\n"
+            "①「基层组织意见」：拟征收土地所在地的乡镇/街道办事处、社区（村）居委会等"
+            "基层组织对本决策的表态与要求。\n"
+            "②「党委政府或相关部门意见」：所在区（县）党委政府及相关职能部门（自然资源、"
+            "财政、人社、信访等）的意见。\n"
+            "要求：\n"
+            "- 每条 100~200 字，用「xxx（单位）：……」的写法分别列出；\n"
+            "- **只能依据正文**：正文里没出现的单位、没表达过的表态，一律不要写；\n"
+            "- 正文若只笼统写了「相关单位均表示支持」，就据此概括，不要补具体部门名；\n"
+            "- 只输出 JSON，键固定为：{\"基层组织意见\":\"\",\"党委政府或相关部门意见\":\"\"}\n\n"
+            f"报告正文（节选）：\n{text[:12000]}"
+        )
+        try:
+            from app.services.llm_service import LLMService
+            resp = await LLMService().chat(messages=[{"role": "user", "content": prompt}],
+                                           max_tokens=1200, temperature=0.2)
+            content = resp if isinstance(resp, str) else (resp.get("content", "") if isinstance(resp, dict) else str(resp))
+            m = re.search(r'\{[\s\S]*\}', content or "")
+            if not m:
+                return {}
+            data = json.loads(m.group())
+            return {k: str(data[k]).strip()[:400] for k in
+                    ("基层组织意见", "党委政府或相关部门意见") if data.get(k)}
+        except Exception as e:
+            logger.warning(f"各方意见 LLM 归纳异常: {e}")
+            return {}
+
     def _build_review_markdown(
         self, extracted: Dict[str, Dict[str, str]], state: dict
     ) -> str:
-        """Build the review table as structured Markdown."""
+        """按江苏省统一制式评审表结构（14 栏）生成 Markdown。
+
+        栏目：决策事项名称 / 适用程序 / 稳评责任单位 / 稳评实施单位 / 参与评估单位 /
+        决策概况（7条）/ 决策法律政策依据及必要性 / 利益相关者情况 / 各方意见 /
+        主要风险因素 / 降低风险措施 / 稳评实施单位结论 / 评审意见 / 稳评结论 / 备案情况。
+        """
         title = state.get("report_title", "社会稳定风险评估报告")
-        parts = [f"# {title}\n"]
-        parts.append("## 社会稳定风险评估评审表\n")
-
-        # Section 1: Basic Info
+        filled = state.get("filled_data", {}) or {}
         basic = extracted.get("项目基本情况", {})
-        parts.append("### 一、项目基本情况\n")
-        parts.append("| 项目 | 内容 |\n|------|------|\n")
-        for key in ["决策名称", "责任单位", "实施单位", "项目位置", "征收面积", "土地用途", "资金测算"]:
-            value = basic.get(key, "【待补充】")
-            parts.append(f"| {key} | {value} |\n")
-        parts.append("\n")
-
-        # Section 2: Public Opinion
         survey = extracted.get("公众参与及意见调查情况", {})
-        parts.append("### 二、公众参与及意见调查情况\n")
-        parts.append("| 项目 | 内容 |\n|------|------|\n")
-        for key in ["调查方式", "调查人数", "支持人数", "反对人数", "支持率", "主要诉求"]:
-            value = survey.get(key, "【待补充】")
-            parts.append(f"| {key} | {value} |\n")
-        parts.append("\n")
-
-        # Section 3: Risk Identification
         risk_id = extracted.get("风险因素识别情况", {})
-        parts.append("### 三、风险因素识别情况\n")
-        risk_text = risk_id.get("风险因素", "")
-        if risk_text:
-            parts.append(f"{risk_text}\n\n")
-        else:
-            parts.append("【待从第5章提取】\n\n")
-
-        # Section 4: Pre-measure Scoring
         pre_score = extracted.get("措施前风险等级评估", {})
-        parts.append("### 四、措施前风险等级评估\n")
-        parts.append("| 维度 | 得分 |\n|------|------|\n")
-        for dim in ["合法性得分", "合理性得分", "可行性得分", "可控性得分"]:
-            value = pre_score.get(dim, "【待补充】")
-            parts.append(f"| {dim} | {value} |\n")
-        total_pre = pre_score.get("措施前总分", "【待补充】")
-        level_pre = pre_score.get("措施前风险等级", "【待补充】")
-        parts.append(f"| **总分** | **{total_pre}** |\n")
-        parts.append(f"| **风险等级** | **{level_pre}** |\n\n")
-
-        # Section 5: Mitigation Measures
         measures = extracted.get("风险防范化解措施", {})
-        parts.append("### 五、风险防范化解措施\n")
-        measure_text = measures.get("措施名称", "")
-        if measure_text:
-            parts.append(f"{measure_text}\n\n")
-        else:
-            parts.append("【待从第7章提取】\n\n")
-
-        # Section 6: Post-measure Scoring
-        post_score = extracted.get("措施后风险等级评估", {})
-        parts.append("### 六、措施后风险等级评估\n")
-        parts.append("| 项目 | 内容 |\n|------|------|\n")
-        parts.append(f"| 措施后总分 | {post_score.get('措施后总分', '【待补充】')} |\n")
-        parts.append(f"| 得分变化 | {post_score.get('得分变化', '【待补充】')} |\n")
-        parts.append(f"| 措施后风险等级 | {post_score.get('措施后风险等级', '【待补充】')} |\n\n")
-
-        # Section 7: Conclusions
         conclusions = extracted.get("评估结论与建议", {})
-        parts.append("### 七、评估结论与建议\n")
-        conclusion_text = conclusions.get("综合结论", "")
-        if conclusion_text:
-            parts.append(f"**综合结论**：{conclusion_text}\n\n")
-        else:
-            parts.append("【待从第9章提取】\n\n")
 
-        suggestions = conclusions.get("工作建议", "")
-        if suggestions:
-            parts.append(f"**工作建议**：{suggestions}\n\n")
+        def _g(d, k, default="【待补充】"):
+            v = (d or {}).get(k, "")
+            return str(v).strip() if v else default
 
-        # Footer
-        parts.append("---\n")
-        parts.append("**编制单位**：{company_name}\n")
-        parts.append("**编制日期**：2026年4月\n")
+        _name = _g(basic, "决策名称", filled.get("project_name") or filled.get("doc_reference") or "【待补充】")
+        _org = _g(basic, "责任单位", filled.get("org_name") or "【待补充】")
+        # 🔴 不再回落到写死的「江苏众拓…」—— 实施单位来自 *本报告所属公司*，
+        #    没有公司就留待填写（外部用户的报告抬头不能被印成我们的）。
+        _imp = _g(basic, "实施单位", filled.get("implement_unit") or "【待填写】")
+        _loc = _g(basic, "项目位置", filled.get("location") or "")
+        _area = _g(basic, "征收面积", filled.get("area_mu") or filled.get("area_m2") or "")
+        _use = _g(basic, "土地用途", filled.get("land_use") or "")
+        # 责任单位/实施单位联系人信息需用户提供（缺失留待补充）
+        _r_head = _g(basic, "责任单位负责人", filled.get("org_leader", "【待补充】"))
+        _r_title = _g(basic, "责任单位负责人职务", filled.get("org_leader_title", "【待补充】"))
+        _r_contact = _g(basic, "责任单位联系人", filled.get("org_contact", "【待补充】"))
+        _r_phone = _g(basic, "责任单位联系电话", filled.get("org_phone", "【待补充】"))
+        # 🔴 实施单位的联系人**不再默认「安如月」** —— 那是我们公司的人，
+        #    外部用户出报告会印上去。取不到就留占位。
+        _i_contact = _g(basic, "实施单位联系人", filled.get("impl_contact", "【待填写】"))
+        _i_phone = _g(basic, "实施单位联系电话", filled.get("impl_phone", "【待补充】"))
+        # 🔴 实施单位负责人/职务：原先在这里**写死「陈春 / 法人」**（第 457 行）。
+        #    多租户下每家公司的负责人不同，值应由**公司档案**按账号归属提供
+        #    （`companies.leader_name / leader_title` → 工作流注入 filled_data）。
+        _i_head = _g(basic, "实施单位负责人", filled.get("impl_leader", "【待填写】"))
+        _i_title = _g(basic, "实施单位负责人职务", filled.get("impl_leader_title", "【待填写】"))
 
+        # 决策概况 7 条（多数直接取自正文/预公告/勘测定界）
+        _gk = {
+            "1.决策地理位置": _g(basic, "决策地理位置", _loc or "【待补充】"),
+            "2.决策用地范围、规模及地上附着物情况": _g(basic, "规模附着物", (f"拟征收面积{_area}，土地用途{_use}。" if _area or _use else "【待补充】")),
+            "3.地块现状及周边情况": _g(basic, "地块现状", "【待补充】"),
+            "4.周边地块安置情况": _g(basic, "周边安置", "【待补充】"),
+            "5.相关手续办理情况": _g(basic, "手续办理", "【待补充】"),
+            "6.资金筹措": _g(basic, "资金筹措", filled.get("funding") or "【待补充】"),
+            "7.决策实施周期": _g(basic, "实施周期", filled.get("solicitation_period") or "自拟征地公告发布之日起至征地工作结束"),
+        }
+        _gk_text = "  ".join(f"{k} {v}" for k, v in _gk.items())
+
+        rows = [
+            ("决策事项名称", _name),
+            ("适用程序", "□简易程序　☑一般程序　□特殊程序"),
+            ("稳评责任单位", f"单位名称：{_org}；负责人：{_r_head}；职务：{_r_title}；联系人：{_r_contact}；联系电话：{_r_phone}"),
+            ("稳评实施单位", f"单位名称：{_imp}；负责人：{_i_head}；职务：{_i_title}；联系人：{_i_contact}；联系电话：{_i_phone}"),
+            ("参与评估单位", "/"),
+            ("决策概况", _gk_text),
+            ("决策法律政策依据及必要性", _g(basic, "法律政策依据", "【待从第2章提取】")),
+            ("利益相关者情况", _g(basic, "利益相关者", "【待从第1/3章提取】")),
+            ("各方意见", "利益相关者诉求：" + _g(survey, "主要诉求", "【待补充】")
+                        + "；基层组织意见：" + _g(survey, "基层组织意见", "【待补充】")
+                        + "；党委政府或相关部门意见：" + _g(survey, "部门意见", "【待补充】")),
+            ("主要风险因素", _g(risk_id, "风险因素", "【待从第5章提取】")),
+            ("降低风险措施", _g(measures, "措施名称", "【待从第7章提取】")),
+            ("稳评实施单位结论", _g(conclusions, "综合结论", "【待从第9章提取】")),
+            ("评审意见", "组长（签章）：　　　　年　　月　　日"),
+            ("稳评结论", "负责人（签章）：　　　　年　　月　　日"),
+            ("备案情况", "备案单位（签章）：　　　　年　　月　　日"),
+        ]
+
+        parts = [f"# {title}", "", "## 社会稳定风险评估评审表", ""]
+        parts.append("| 栏目 | 内容 |")
+        parts.append("|------|------|")
+        for k, v in rows:
+            parts.append(f"| **{k}** | {v} |")
+        parts.append("")
         return "\n".join(parts)
 
     async def _emit_review_table_start(self) -> None:

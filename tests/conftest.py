@@ -8,6 +8,9 @@ from pathlib import Path
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# test_fill 依赖已移除的 app.agent.fill 模块（旧模板填空功能），排除避免 collection error
+collect_ignore = ["test_fill"]
+
 from app.agent.state import create_initial_state
 
 

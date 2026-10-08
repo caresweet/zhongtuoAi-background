@@ -43,6 +43,10 @@ class Report(Base):
     # 生成时的公司归属（公司资料会变，报告需要记下当时的归属）
     company_id = Column(Integer, nullable=True)
 
+    # 报告类型域：stability（稳评）/ reclamation（复垦）。
+    # 该列之前只有稳评落 reports（投标走 MasterAgent 不落表），故默认 stability。
+    domain = Column(String(30), nullable=False, default="stability")
+
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     completed_at = Column(DateTime, nullable=True)
@@ -60,6 +64,7 @@ class Report(Base):
         Index("idx_reports_created", "created_at"),
         Index("idx_reports_session", "session_id"),
         Index("idx_reports_user", "user_id"),
+        Index("idx_reports_domain", "domain"),
     )
 
 

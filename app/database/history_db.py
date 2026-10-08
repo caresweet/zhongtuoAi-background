@@ -25,6 +25,7 @@ async def init_history_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_report_owner)
+        await conn.run_sync(_migrate_report_domain)
 
 
 def _migrate_report_owner(conn):
@@ -44,6 +45,28 @@ def _migrate_report_owner(conn):
     if "company_id" not in cols:
         conn.execute(text("ALTER TABLE reports ADD COLUMN company_id INTEGER"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id)"))
+
+
+def _migrate_report_domain(conn):
+    """幂等迁移：给 reports 补 domain 列（报告类型）并建索引。
+
+    create_all 不会 ALTER 已存在的表，必须手写；服务每次启动都会调一次，
+    所以必须可重复执行。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+    if not inspector.has_table("reports"):
+        return
+    cols = {c["name"] for c in inspector.get_columns("reports")}
+    if "domain" not in cols:
+        # 用 DEFAULT 让既有行一次性拿到 'stability'，不写第二遍 UPDATE。
+        conn.execute(text(
+            "ALTER TABLE reports ADD COLUMN domain VARCHAR(30) DEFAULT 'stability'"
+        ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_reports_domain ON reports(domain)"
+    ))
 
 
 async def backfill_report_owners() -> int:

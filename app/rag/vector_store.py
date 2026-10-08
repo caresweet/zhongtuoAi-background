@@ -5,6 +5,7 @@ Manages:
 - Session-scoped temporary collections for user-uploaded project materials
 """
 
+import logging
 import os
 import uuid
 from typing import List, Dict, Any, Optional
@@ -12,6 +13,8 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStoreService:
@@ -78,8 +81,20 @@ class VectorStoreService:
         - stability → knowledge_base（老数据不变）
         - bidding → bidding_knowledge
         - 新类型 → kb_{domain_id}（自动物理隔离）
+        - 不传 → knowledge_base（稳评路径的历史依赖，**不可改**）
         """
         if not domain_id:
+            # 漏传 domain 会静默读到稳评库 —— 记一条日志让它变得可见。
+            #
+            # 用 debug 而非 warning：稳评自身大量调用**故意不传** domain 并依赖
+            # 回落 knowledge_base，warning 会把这类正常调用变成噪声，既淹没真正
+            # 「忘传 domain」的信号，又污染测试输出。
+            # 「复垦绝不读到稳评库」的真正保障，来自复垦路径显式传 domain + 其测试，
+            # 而不是这一行日志 —— 故请勿顺手把它升回 warning。
+            logger.debug(
+                "RAG 检索未传 domain，回落 knowledge_base（稳评库）。"
+                "若非稳评路径，这是 domain 漏传，会读到稳评数据。"
+            )
             return cls.GLOBAL_COLLECTION
         return cls.DOMAIN_COLLECTIONS.get(domain_id, f"kb_{domain_id}")
 

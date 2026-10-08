@@ -33,7 +33,10 @@ def build_reclamation_config() -> DomainConfig:
         pipeline="chapter_by_chapter",
         company_name="",          # 出具单位由生成时用户选择，见 Task 10
         classify_keywords=[
-            "复垦", "土地复垦", "复垦方案", "临时用地", "表土剥离", "复垦方向",
+            # 只收「复垦专有」的表述 —— `detect_domain` 里非默认域的关键词会压过
+            # 稳评（默认域），所以宽泛词（如「临时用地」「复垦」）会把稳评对话误判成复垦。
+            # 实测「涉及临时用地补偿」「复垦保障措施」这类稳评句子必须仍归 stability。
+            "土地复垦", "复垦方案", "复垦报告", "复垦方向", "复垦工程",
         ],
         chapter_structure=RECLAMATION_CHAPTER_DEFINITIONS,
         data_categories=data_categories,

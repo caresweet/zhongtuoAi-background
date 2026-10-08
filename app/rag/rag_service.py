@@ -140,7 +140,7 @@ class RAGService:
             # 若类型库为空（本机未重建）则回退到旧 knowledge_base 检索。
             type_items = await self.retriever.retrieve_by_kb_type(
                 chapter_number, project_context=project_context,
-                main_results=8, alt_results=3,
+                main_results=8, alt_results=3, domain=domain,
             )
             if type_items:
                 general_items = type_items

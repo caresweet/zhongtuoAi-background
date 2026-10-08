@@ -390,18 +390,42 @@ class RetrieverService:
         project_context: str = "",
         main_results: int = 8,
         alt_results: int = 3,
+        domain: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """按「章节」查对应的内容类型库(kb_*)，取回该内容类型的范文正文。
+        """按「章 → 内容类型库」取范文正文。
 
+        domain=None 时沿用稳评映射（既有调用方行为不变）；
+        domain="reclamation" 时走复垦映射，库名一律 kb_reclamation_*。
         返回裸 item 列表（未经 format），供 rag_service 合并/格式化。
         """
-        from app.rag.kb_chapter_map import CHAPTER_KB_TYPES
+        # 🔴 两域的映射表**形状不同**，务必各自归一成「最终 collection 名」：
+        #    稳评 CHAPTER_KB_TYPES 的值是语义类名（risk_source…），库名要加 `kb_` 前缀；
+        #    复垦 RECLAMATION_KB_TYPES 的值是 reclamation_kb_map 的语义键，经 COLLECTIONS
+        #    取出后**已是完整库名**（kb_reclamation_preface），绝不能再套 `f"kb_{...}"`
+        #    —— 那样会得到幽灵库 kb_kb_reclamation_preface，它在 `try/except` 里静默取不到
+        #    任何东西，报告就悄悄少了范文。库名的唯一事实源是 reclamation_kb_map.COLLECTIONS。
+        #    desc_map 单独保存「查询词描述」，使稳评查询串与改动前逐字一致。
+        if domain == "reclamation":
+            from app.rag.reclamation_kb_map import RECLAMATION_KB_TYPES, COLLECTIONS
+            kb_map = {n: (COLLECTIONS[m], [COLLECTIONS[a] for a in alt])
+                      for n, (m, alt) in RECLAMATION_KB_TYPES.items()}
+            desc_map = {n: m for n, (m, _) in RECLAMATION_KB_TYPES.items()}
+            # 章号未映射时兜到复垦主入口库（对齐 domains/reclamation 的
+            # default_collection="kb_reclamation_preface"），绝不回落到稳评库
+            default_colls, default_desc = (COLLECTIONS["前言"], []), "前言"
+        else:
+            from app.rag.kb_chapter_map import CHAPTER_KB_TYPES
+            from app.rag.kb_types_config import TYPES
+            kb_map = {n: (f"kb_{m}", [f"kb_{a}" for a in alt])
+                      for n, (m, alt) in CHAPTER_KB_TYPES.items()}
+            desc_map = {n: TYPES.get(m, m) for n, (m, _) in CHAPTER_KB_TYPES.items()}
+            default_colls = ("kb_decision_info", [])
+            default_desc = TYPES.get("decision_info", "decision_info")
 
-        main_type, alt_types = CHAPTER_KB_TYPES.get(chapter_number, ("decision_info", []))
+        main_coll, alt_colls = kb_map.get(chapter_number, default_colls)
 
         # 构建语义化查询词：类型说明 + 项目关键词
-        from app.rag.kb_types_config import TYPES
-        main_desc = TYPES.get(main_type, main_type)
+        main_desc = desc_map.get(chapter_number, default_desc)
         query = f"{main_desc} {project_context[:80]}"
         query_embedding = await self.embedder.embed_text(query)
 
@@ -409,14 +433,14 @@ class RetrieverService:
         vs = self.vector_store
         collections = []
         try:
-            c = vs.get_or_create_collection(f"kb_{main_type}")
+            c = vs.get_or_create_collection(main_coll)
             if c.count():
                 collections.append(c)
         except Exception:
             pass
-        for alt in alt_types:
+        for alt in alt_colls:
             try:
-                ac = vs.get_or_create_collection(f"kb_{alt}")
+                ac = vs.get_or_create_collection(alt)
                 if ac.count():
                     collections.append(ac)
             except Exception:

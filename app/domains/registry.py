@@ -27,8 +27,10 @@ def _ensure_loaded():
         return
     from app.domains.stability import build_stability_config
     from app.domains.bidding import build_bidding_config
+    from app.domains.reclamation import build_reclamation_config
 
-    for builder in (build_stability_config, build_bidding_config):
+    for builder in (build_stability_config, build_bidding_config,
+                    build_reclamation_config):
         try:
             cfg = builder()
             _REGISTRY[cfg.domain_id] = cfg

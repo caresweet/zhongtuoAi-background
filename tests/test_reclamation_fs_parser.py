@@ -67,3 +67,22 @@ def test_unavailable_llm_returns_empty_without_call():
     llm.is_available = False
     assert asyncio.run(ReclamationFsParser(llm).parse(_LONG_TEXT)) == {}
     assert llm.calls == []
+
+
+def test_llm_transport_failure_degrades_to_empty():
+    """**传输失败也要容错** —— 模型侧偶发故障不该打断整份报告的生成。
+
+    （与参照物 tender_spec_analyzer.analyze() 一致：它把 chat 包在 try/except 里。）
+    """
+    class _Boom(_FakeLLM):
+        async def chat(self, messages, **kw):
+            raise RuntimeError("模型服务 502")
+
+    assert asyncio.run(ReclamationFsParser(_Boom("{}")).parse(_LONG_TEXT)) == {}
+
+
+def test_invalid_json_with_braces_returns_empty():
+    """有花括号但 JSON 不合法 —— 走的是 JSONDecodeError 分支，必须返回 {} 而不是抛。"""
+    llm = _FakeLLM('结果如下：{"project_name": "X",}')
+    assert asyncio.run(ReclamationFsParser(llm).parse(_LONG_TEXT)) == {}
+

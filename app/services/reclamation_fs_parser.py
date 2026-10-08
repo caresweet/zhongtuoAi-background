@@ -7,8 +7,11 @@
 """
 
 import json
+import logging
 import re
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_PROMPT = """你是土地复垦方案编制助手。下面是一份主体项目的可行性研究报告正文。
 请抽取以下字段，**只输出 JSON**，不要解释。
@@ -52,11 +55,18 @@ class ReclamationFsParser:
         # 🔴 真实接口收的是 **messages 列表**，不是裸字符串 ——
         #    见 `LLMService.chat(messages, system=None, max_tokens=…, temperature=…)`
         #    与参照物 tender_spec_analyzer.analyze() 的写法。
-        raw = await self._llm.chat(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=4000,
-            temperature=0.1,
-        )
+        try:
+            raw = await self._llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4000,
+                temperature=0.1,
+            )
+        except Exception as e:
+            # 🔴 **传输失败也要容错** —— 与参照物 tender_spec_analyzer.analyze() 一致。
+            #    本模块的定位是「抽不到就少几个字段」，不是「抽不到就崩」：
+            #    模型侧偶发故障不该把整份报告的生成打断。
+            logger.error("可研解析失败（已降级为空结果）：%s", e)
+            return {}
         data = self._parse_json_obj(raw)
         # 只保留已知字段；缺失的不给键（不编造）
         return {k: data[k] for k in _FIELDS if data.get(k)}

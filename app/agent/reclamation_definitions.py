@@ -10,6 +10,8 @@ level-1 与 level-2 在 5 份中完全一致，差异只在 level-3。
 （`cn_num_to_int` / `chapter_no_of_heading`）直接 import 稳评那份，不复制。
 """
 
+from typing import Dict
+
 RECLAMATION_TOTAL_CHAPTERS = 10
 RECLAMATION_ALL_CHAPTERS = list(range(1, RECLAMATION_TOTAL_CHAPTERS + 1))
 
@@ -122,3 +124,33 @@ def get_reclamation_chapter_title(chapter_number: int) -> str:
 
 def get_reclamation_chapter_kind(chapter_number: int) -> str:
     return RECLAMATION_CHAPTER_KIND.get(chapter_number, "fact")
+
+
+# ═══════════════════════════════════════════════════════════════
+# RAG Query Templates（与稳评 `CHAPTER_RAG_QUERIES` 同构）
+# ═══════════════════════════════════════════════════════════════
+
+RECLAMATION_CHAPTER_RAG_QUERIES: Dict[int, str] = {
+    1: "复垦 编制背景 复垦方案摘要 服务年限 土地损毁 复垦目标",
+    2: "复垦 编制目的 编制原则 编制依据 法律法规 政策文件 标准规范",
+    3: "复垦 项目概况 地理位置 自然概况 社会经济 土地利用状况",
+    4: "复垦 土地损毁 适宜性评价 水土资源平衡 复垦方向 目标任务",
+    5: "复垦 质量要求 预防控制措施 复垦措施 监测 管护",
+    6: "复垦 工程设计 工程量测算 工程技术措施 生物化学措施",
+    7: "复垦 投资估算 工程施工费 其他费用 预备费 技术经济指标",
+    8: "复垦 工作计划安排 服务年限 费用安排",
+    9: "复垦 效益分析 社会效益 生态效益 经济效益 耕地质量",
+    10: "复垦 保障措施 组织保障 监管保障 公众参与 权属调整",
+}
+
+
+def get_reclamation_chapter_rag_query(chapter_number: int) -> str:
+    """复垦某章的 RAG 检索词。
+
+    ⚠️ 兜底文案**必须**是复垦自己的措辞 —— 若沿用稳评那种
+    `f"社会稳定风险评估报告 第{n}章"`，未列章号会拉回稳评素材。
+    """
+    return RECLAMATION_CHAPTER_RAG_QUERIES.get(
+        chapter_number,
+        f"土地复垦方案 第{chapter_number}章",
+    )

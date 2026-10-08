@@ -77,18 +77,49 @@ def _legacy_agent(chapter_number: int, llm_service=None):
     return cls(llm_service=llm_service) if cls else None
 
 
+# ── 复垦（reclamation）────────────────────────────────────────
+
+def _reclamation_agent(chapter_number: int, llm_service=None):
+    """复垦章节 agent。章号越界返回 None（与稳评同约定）。
+
+    本期只实现第 1–3 章，其余章号返回 None —— 编排层遇 None 会跳过该章，
+    不会误用稳评的 agent。
+    """
+    from app.agent.reclamation_definitions import RECLAMATION_ALL_CHAPTERS
+
+    if int(chapter_number) not in RECLAMATION_ALL_CHAPTERS:
+        return None
+
+    from .reclamation_chapter_1_agent import ReclamationChapter1Agent
+    from .reclamation_chapter_2_agent import ReclamationChapter2Agent
+    from .reclamation_chapter_3_agent import ReclamationChapter3Agent
+
+    reclamation_map = {
+        1: ReclamationChapter1Agent,
+        2: ReclamationChapter2Agent,
+        3: ReclamationChapter3Agent,
+    }
+    cls = reclamation_map.get(int(chapter_number))
+    return cls(llm_service=llm_service) if cls else None
+
+
 # ── 对外入口 ──────────────────────────────────────────────────
 
-def get_chapter_agent(chapter_number: int, llm_service=None):
-    """创建某章 agent（按开关分派）。
+def get_chapter_agent(chapter_number: int, llm_service=None, domain: str = "stability"):
+    """创建某章 agent（按域与开关分派）。
 
     Args:
-        chapter_number: 1-11（正文号；评审表见 get_review_table_agent）。
+        chapter_number: 章号。
         llm_service: LLM 服务实例。
+        domain: 报告类型域。默认 "stability" —— 不传时行为与改动前完全一致。
 
     Returns:
         具备 `run(state, queue)` 的 agent 对象；章号越界返回 None。
     """
+    if domain == "reclamation":
+        # 🔴 复垦章号 1–10 与稳评 1–14 完全重合，不在此分派就会拿到稳评的 agent。
+        return _reclamation_agent(chapter_number, llm_service)
+
     from app.agent.chapter_definitions import ALL_CHAPTERS
     if int(chapter_number) not in ALL_CHAPTERS:
         return None

@@ -53,12 +53,16 @@ async def list_reports(
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    domain: Optional[str] = Query(None, description="按报告类型域过滤；不传＝全部（行为不变）"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_history_db),
 ):
     """获取历史报告列表（分页）—— **只返回当前账号自己的**（管理员看全部）。"""
     query = _scoped(select(Report), user)
 
+    # 按报告类型域过滤（stability / reclamation…）。**不传时行为与改动前逐字一致**。
+    if domain:
+        query = query.where(Report.domain == domain)
     if status:
         query = query.where(Report.status == status)
     if search:

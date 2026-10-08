@@ -37,16 +37,17 @@ def test_chapter_titles_match_the_five_samples():
 
 
 def test_word_ranges_are_evidence_based():
-    """区间下限不得低于样本最小值的一半，上限不得高于样本最大值。"""
-    # 注：第 5 章下限取 4000 与本文件 min_words 一致（brief/plan 原文给 3998，
-    #     与 impl 的 4000 相差 2，属计划书笔误；保留 impl 原文不动）。
+    """配置的区间必须**罩住**真实样本的取值范围：
+    下限不高于实测最小值（否则最轻的真实报告也达不到我们的下限），
+    上限不低于实测最大值（否则最重的真实报告会超上限）。
+    """
     expect = {1: (2132, 2768), 2: (2321, 3068), 3: (1535, 2440), 4: (7547, 8988),
-              5: (4000, 4578), 6: (1220, 1581), 7: (3110, 4815), 8: (669, 905),
+              5: (3998, 4578), 6: (1220, 1581), 7: (3110, 4815), 8: (669, 905),
               9: (934, 973), 10: (2928, 5715)}
     for n, (lo, hi) in expect.items():
         d = RECLAMATION_CHAPTER_DEFINITIONS[n]
-        assert d["min_words"] <= lo
-        assert d["max_words"] >= hi
+        assert d["min_words"] <= lo, f"第{n}章 min_words 高于实测最小值"
+        assert d["max_words"] >= hi, f"第{n}章 max_words 低于实测最大值"
 
 
 def test_chapter_kind_and_title_lookup():

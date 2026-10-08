@@ -61,6 +61,9 @@ def _seed_internal_company(conn):
     """种入我们自己（江苏众拓）的公司行 —— 文案来自 `services/internal_company.py`。
 
     幂等：按 `is_internal=1` 查，已存在就只补齐为空的字段（不覆盖人工改过的值）。
+
+    另补入第二家我司机构（江苏众拓测绘有限公司）—— **单独按 `name` 判重**，
+    与上面那条 `is_internal` 逻辑并列、互不干扰（见下方说明）。
     """
     from sqlalchemy import text as _text
     from app.services.internal_company import internal_company_defaults
@@ -77,17 +80,29 @@ def _seed_internal_company(conn):
             "VALUES (:name, 1, :short_name, :intro_text, :implement_unit, 'active', "
             "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), d)
-        return
+    else:
+        # 已存在：只给空字段补默认值，**不覆盖**人工编辑过的内容
+        sets, params = [], {}
+        if not (row[1] or "").strip():
+            sets.append("intro_text = :intro_text"); params["intro_text"] = d["intro_text"]
+        if not (row[2] or "").strip():
+            sets.append("implement_unit = :implement_unit"); params["implement_unit"] = d["implement_unit"]
+        if sets:
+            params["id"] = row[0]
+            conn.execute(_text(f"UPDATE companies SET {', '.join(sets)} WHERE id = :id"), params)
 
-    # 已存在：只给空字段补默认值，**不覆盖**人工编辑过的内容
-    sets, params = [], {}
-    if not (row[1] or "").strip():
-        sets.append("intro_text = :intro_text"); params["intro_text"] = d["intro_text"]
-    if not (row[2] or "").strip():
-        sets.append("implement_unit = :implement_unit"); params["implement_unit"] = d["implement_unit"]
-    if sets:
-        params["id"] = row[0]
-        conn.execute(_text(f"UPDATE companies SET {', '.join(sets)} WHERE id = :id"), params)
+    # 我司第二家机构 —— 复垦方案的出具单位常见为测绘公司。
+    # ⚠️ 这里**按 name 判重**，不是按 is_internal：本函数开头那条
+    #    `SELECT ... WHERE is_internal = 1 LIMIT 1` 是「只有一家内部公司」时代的写法，
+    #    照它加第二家只会查到第一家去补空字段，第二家永远进不来。
+    #    ⚠️ 必须放在 if/else **之后**：若放在开头那条查询之前，新插入的行 id 更小，
+    #       `LIMIT 1` 就会选中它，从而改变既有 `is_internal` 查询的选择结果。
+    conn.execute(_text(
+        "INSERT INTO companies (name, is_internal, short_name, status, "
+        "created_at, updated_at) "
+        "SELECT :name, 1, :short_name, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+        "WHERE NOT EXISTS (SELECT 1 FROM companies WHERE name = :name)"
+    ), {"name": "江苏众拓测绘有限公司", "short_name": "众拓测绘"})
 
 
 def _promote_bootstrap_admin(conn):

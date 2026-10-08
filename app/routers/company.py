@@ -107,6 +107,39 @@ async def update_profile(
     return ApiResponse(message="已保存", data={"company": _company_dict(c)})
 
 
+@router.get("/issuer-candidates", response_model=ApiResponse)
+async def issuer_candidates(
+    user: User = Depends(get_current_user),
+    db=Depends(get_auth_db),
+):
+    """报告可选的「出具单位」候选。
+
+    - 内部账号：我司各机构（companies.is_internal = 1 的全部）
+    - 外部账号：本账号关联的那家公司
+    - 账号未关联公司：返回空列表，**不报错**（生成流程不得被打断）
+
+    🔴 为什么不用 `company_service.internal_company_id()`
+       那个函数取的是 **id 最小** 的那一家内部公司（单公司时代的写法），
+       据此判断「是否内部」会让测绘公司下的用户被当成外部。这里改判
+       **用户自己所属公司** 的 `is_internal` 标志 —— 内部用户才能看到两家。
+    """
+    me = await _load_company(user, db)
+    if me is not None and me.is_internal:
+        rows = (await db.execute(
+            select(Company).where(Company.is_internal == True)  # noqa: E712
+            .order_by(Company.id)
+        )).scalars().all()
+    elif me is not None:
+        rows = [me]
+    else:
+        rows = []
+
+    return ApiResponse(
+        data={"companies": [{"id": c.id, "name": c.name} for c in rows]},
+        message="",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════
 # 人员库（本公司）
 # ═══════════════════════════════════════════════════════════════

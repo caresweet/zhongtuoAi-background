@@ -15,11 +15,17 @@ from typing import Any, Dict, List
 RECLAMATION_TOTAL_CHAPTERS = 10
 RECLAMATION_ALL_CHAPTERS = list(range(1, RECLAMATION_TOTAL_CHAPTERS + 1))
 
-# 章类型：fact=叙述章；table=以表格为主的章
+# 章类型：fact=叙述章（由章节 agent 生成）；table/attachment=由**组装器确定性渲染**、
+# 不经 LLM（稳评第3章评审表、第14章附件是这一类）。
+#
+# 🔴 复垦**没有任何**组装器渲染的章 —— 第 6/7 章虽然以表格为主，但正文与表格都要
+#    由 agent 生成（表格只是章内的呈现形式）。此前照搬稳评的语义把它们标成
+#    "table"，`node_chapter_generate` 会据此**直接跳过**（「由组装器渲染」），
+#    而复垦的组装器并不会补这两章 —— 成稿**静默少两章**，日志里连一行都不会有。
 RECLAMATION_CHAPTER_KIND = {
     1: "fact", 2: "fact", 3: "fact", 4: "fact", 5: "fact",
-    6: "table",    # 工程设计及工程量测算
-    7: "table",    # 投资估算
+    6: "fact",    # 工程设计及工程量测算（表多，但仍由 agent 生成）
+    7: "fact",    # 投资估算（同上）
     8: "fact", 9: "fact", 10: "fact",
 }
 

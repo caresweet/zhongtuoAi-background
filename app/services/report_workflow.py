@@ -2066,6 +2066,14 @@ class ReportWorkflowRunner:
         if existing_state:
             for k in ("_pdf_raw_text","_project_materials","_uploaded_files",
                        "_outline","_image_catalog","filled_data","_workflow_logs",
+                       # 🔴 报告域标记 —— 由 report.py 的意图识别一次性钉在会话 state 上。
+                       #    **必须在图状态起点就带上**：整条工作流里所有按域分叉的消费点
+                       #    （_standard_outline 的 14 章 vs 10 章、chapter_kind / target_words /
+                       #    sections_for_prompt、装配器、提示词工厂）都经 `domain_of_state(state)`
+                       #    取域；图状态里没有它 → 一律回落 "stability" → 复垦会话顶着稳评
+                       #    14 章大纲跑（第1章「编制说明」而非复垦的「前言」）。实测 2026-10-09。
+                       #    resume 走 LangGraph 检查点，起点带了这里就带得全。
+                       "_domain", "_conversation_domain",
                        # 🔴 用户勾选的报告人员（前置工作组名单 + 培训证书取图）
                        "selected_personnel",
                        # 🔴 「选择证书」独立多选框（最多 3 人）→ 公司资质证书区的人员证书图

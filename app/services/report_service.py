@@ -67,6 +67,12 @@ class ReportSession:
         "_extracted_tables",        # 勘测定界提取表（表6-1 等）
         "_project_materials",       # 材料解析结果（避免每次重启都重跑一遍解析）
         "_chapter_gaps",            # 缺口清单（遁词检测 + 缺数据）→ 前端「待补充 N 项」
+        # 🔴 报告域标记 —— `domain_of_state` 只认这两个下划线键（不认同名的 `domain`），
+        #    它们是**下游按域分叉的全部依据**（14 章 vs 10 章、章类型、目标字数…）。
+        #    不在这里持久化 → 每次重启后 `domain_of_state` 一律回落 "stability"，
+        #    复垦会话重建出来又顶着稳评大纲跑（本轮已修的 workgraph 起点遗漏，
+        #    在这里会被「重启」原样复现一遍）。
+        "_domain", "_conversation_domain",
     )
 
     def to_dict(self):

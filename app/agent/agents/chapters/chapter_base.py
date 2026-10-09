@@ -641,14 +641,14 @@ class ChapterAgentBase(BaseAgent):
 
         # 只对需要数据的章节尝试（可调参：默认全部开启）
         try:
-            from app.agent.chapter_catalog import tool_round_schema
+            from app.agent.chapter_catalog import (
+                tool_round_schema, tool_round_decision_system)
             from app.agent.tools import execute_tool_calls
 
-            # 🔴 工具表按域取（见 `chapter_catalog.tool_round_schema`）：注册表里的工具
-            #    **全为稳评器物**（DB32 扣分制评分 / 稳评公众·部门问卷 / 稳评勘测定界表型 /
-            #    点名「稳评规范」的 RAG 描述）。复垦拿到空表 → **整轮跳过**：连决策 prompt
-            #    与下面那句「你是稳评报告助手」的身份串都不再发给模型 —— 复垦没有对应工具，
-            #    宁可「没有」也不拿稳评的一套顶替。默认域（稳评）工具表逐字不变。
+            # 🔴 工具表与「决策」system 均按域取（见 `chapter_catalog`）：注册表按
+            #    `ToolSpec.domains` 归属域 —— 稳评拿到自己那五件（逐字不变），复垦拿到
+            #    复垦自己的（复用 RAG/勘测定界 + 工程量/投资/适宜性三件计算工具），
+            #    两边的工具与身份串互不掺和。默认域（稳评）行为逐字不变。
             tools = tool_round_schema(self.domain)
             if not tools:
                 return []
@@ -659,8 +659,7 @@ class ChapterAgentBase(BaseAgent):
             resp = await asyncio.wait_for(
                 self._llm.chat_with_reasoning(
                     messages=[{"role": "user", "content": decision_prompt}],
-                    system="你是一个稳评报告助手。判断是否需要调用工具获取真实数据。"
-                           "需要时输出 tool call；不需要则直接简短回复'无需工具'。",
+                    system=tool_round_decision_system(self.domain),
                     max_tokens=512,
                     temperature=0.2,
                     tools=tools,
@@ -695,22 +694,11 @@ class ChapterAgentBase(BaseAgent):
         }
         proj_text = "\n".join(f"- {k}: {v}" for k, v in proj.items() if v)
 
-        # 🔴 按章节给与最相关的工具引导（避免无关工具的干扰调用）
+        # 🔴 「可用工具」清单按域取（见 `chapter_catalog.tool_round_available_tools`）：
+        #    稳评那段与其工具表一一对应、逐字不变；复垦只列复垦自己的工具。
         ch = self.chapter_number
-        available = "可用工具：\n"
-        if ch in (1, 4):
-            available += "- parse_kd_table：获取地块/土地分类面积真实数据（第6章 表6-1），本表内容高度相关\n"
-        if ch == 3:
-            available += "- query_survey：获取公众问卷调查统计（身份/年龄/职业/了解/态度/诉求方式人数）\n"
-            available += "- query_dept_survey：获取部门/单位问卷调查统计\n"
-        if ch in (6, 8):
-            available += "- calc_risk_scoring：获取风险评分（扣分制）与风险等级\n"
-        else:
-            available += "- calc_risk_scoring：如需风险评分数据可调用\n"
-        available += "- retrieve_rag：正文需引用具体法规/规范/范文条文时调用"
-        if ch == 3:
-            available += "（quote法规依据、调查规范）"
-        available += "\n- parse_kd_table：如需地块/面积数据可调用\n"
+        from app.agent.chapter_catalog import tool_round_available_tools
+        available = tool_round_available_tools(self.domain, ch)
 
         return (
             f"当前项目信息：\n{proj_text or '（暂无）'}\n\n"

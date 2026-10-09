@@ -76,6 +76,10 @@ class ReclamationDataModel:
     def get(self, name: str) -> TracedValue:
         return self._values[name]
 
+    def items(self) -> List[tuple]:
+        """按登记顺序返回 `[(量名, TracedValue), ...]`（供工具序列化整本账本）。"""
+        return list(self._values.items())
+
     # ── 求值 ────────────────────────────────────────────────
 
     def _eval(self, formula: str) -> float:

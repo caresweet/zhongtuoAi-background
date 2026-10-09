@@ -646,27 +646,87 @@ def writing_guide(domain: str | None) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# `chapter_base._maybe_run_tool_round` 的工具表按域取值
+# `chapter_base._maybe_run_tool_round` 的工具表与决策提示按域取值
 # ═══════════════════════════════════════════════════════════════
-# 工具回合把后端能力（RAG 检索 / 勘测定界解析 / 风险评分 / 问卷统计）当作 LLM 可调用的
-# 工具，先让模型自己决定「这一章要不要拉数据」。注册表里的五件工具**全为稳评器物**：
-# `calc_risk_scoring` 走 DB32/T4013 扣分制、`query_survey`/`query_dept_survey` 取稳评公众/
-# 部门问卷、`retrieve_rag` 的描述点名「稳评规范（DB32/T4013-2021）」、`parse_kd_table`
-# 解的是稳评勘测定界表型。复垦**没有**对应工具（其 RAG 素材由 `act()` 统一注入、勘测定界
-# 由工艺流程解析），故复垦不开放工具回合 —— 宁可拿到「没有」也不拿稳评的一套顶替
-# （业主口径：复垦报告只允许出现复垦内容）。
+# 工具回合把后端能力当作 LLM 可调用的工具，先让模型自己决定「这一章要不要拉数据」。
+# 🔴 注册表按 `ToolSpec.domains` 归属域（见 `app/agent/tools/registry.py`）：
+#    稳评专有器物（扣分制评分 / 公众·部门问卷）标 `("stability",)`，不进复垦表；
+#    `retrieve_rag` / `parse_kd_table` 两域共用（描述按域取）；复垦三件计算工具
+#    （工程量测算 / 投资估算 / 适宜性评价）标 `("reclamation",)`，不进稳评表。
+#    稳评拿到的工具表因此**逐字不变**，复垦拿到自己的一套。
 
 def tool_round_schema(domain: str | None) -> List[Dict[str, Any]]:
     """工具回合交给模型的工具表（按域）。
 
     稳评：`app.agent.tools.ALL_TOOLS_SCHEMA` 全量（逐字不变）。
-    复垦：空表 —— 现有工具无一为复垦口径，`_maybe_run_tool_round` 见空表即整轮跳过
-          （连决策 prompt、稳评身份都不再发给模型，也不会拿到稳评评分/问卷/勘测定界表）。
+    复垦：`get_tools_schema("reclamation")` —— 复垦自己那几件（复用的 RAG 检索 /
+          勘测定界解析 + 工程量测算 / 投资估算 / 适宜性评价）。
     """
     if domain == _RECLAMATION:
-        return []
+        from app.agent.tools import get_tools_schema
+        return get_tools_schema(_RECLAMATION)
     from app.agent.tools import ALL_TOOLS_SCHEMA
     return ALL_TOOLS_SCHEMA
+
+
+def tool_round_decision_system(domain: str | None) -> str:
+    """工具回合「决策」调用的 system prompt（按域）。
+
+    原先在 `chapter_base._maybe_run_tool_round` 里写死「你是一个稳评报告助手」——
+    复垦一旦开放工具回合，这句会随决策 prompt 发给模型。稳评逐字不变；复垦换成复垦身份。
+    """
+    if domain == _RECLAMATION:
+        return ("你是一个复垦方案助手。判断是否需要调用工具获取真实数据。"
+                "需要时输出 tool call；不需要则直接简短回复'无需工具'。")
+    return ("你是一个稳评报告助手。判断是否需要调用工具获取真实数据。"
+            "需要时输出 tool call；不需要则直接简短回复'无需工具'。")
+
+
+def tool_round_available_tools(domain: str | None, chapter_number: int) -> str:
+    """工具回合决策 prompt 里「可用工具」清单（按域）。
+
+    稳评：逐字等于改动前 `chapter_base._build_tool_decision_prompt` 内联的那段。
+    复垦：只列复垦自己的工具（工程量测算/投资估算/适宜性评价 + 复用的 RAG/勘测定界）。
+    """
+    if domain == _RECLAMATION:
+        return _reclamation_available_tools(chapter_number)
+    return _stability_available_tools(chapter_number)
+
+
+def _stability_available_tools(chapter_number: int) -> str:
+    """稳评「可用工具」清单 —— 逐字搬运自改动前的内联实现。"""
+    ch = chapter_number
+    available = "可用工具：\n"
+    if ch in (1, 4):
+        available += "- parse_kd_table：获取地块/土地分类面积真实数据（第6章 表6-1），本表内容高度相关\n"
+    if ch == 3:
+        available += "- query_survey：获取公众问卷调查统计（身份/年龄/职业/了解/态度/诉求方式人数）\n"
+        available += "- query_dept_survey：获取部门/单位问卷调查统计\n"
+    if ch in (6, 8):
+        available += "- calc_risk_scoring：获取风险评分（扣分制）与风险等级\n"
+    else:
+        available += "- calc_risk_scoring：如需风险评分数据可调用\n"
+    available += "- retrieve_rag：正文需引用具体法规/规范/范文条文时调用"
+    if ch == 3:
+        available += "（quote法规依据、调查规范）"
+    available += "\n- parse_kd_table：如需地块/面积数据可调用\n"
+    return available
+
+
+def _reclamation_available_tools(chapter_number: int) -> str:
+    """复垦「可用工具」清单 —— 按复垦章（第4/6/7章是计算章）给引导。"""
+    ch = chapter_number
+    available = "可用工具：\n"
+    if ch == 4:
+        available += "- evaluate_suitability：计算评价单元适宜性加权总分与等别（一/二/三等地）\n"
+    if ch == 6:
+        available += "- calc_earthwork：按工程设计测算工程量（表土剥离/混凝土层/垫层/沟渠疏通）\n"
+    if ch == 7:
+        available += "- calc_investment：测算工程施工费/其他费用/监测管护费/预备费与静态·动态总投资\n"
+    if ch in (1, 3, 4, 6):
+        available += "- parse_kd_table：获取临时用地勘测定界地块/土地利用现状数据\n"
+    available += "- retrieve_rag：正文需引用具体法规/规范/范文条文时调用\n"
+    return available
 
 
 # ═══════════════════════════════════════════════════════════════

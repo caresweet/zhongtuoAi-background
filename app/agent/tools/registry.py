@@ -27,19 +27,33 @@ class ToolSpec:
     parameters: Dict[str, Any]        # JSON Schema for parameters
     handler: Callable[..., Awaitable[str]]  # async (ctx, **kwargs) -> str
     needs_context: bool = True        # whether handler needs the project context dict
+    # 该工具对哪些域开放。None = 不限定（历史工具默认，等同稳定期）。稳评拿到的工具表
+    # 由此过滤后**逐字不变**；复垦只拿到标了 "reclamation" 的那几件。
+    domains: Optional[tuple] = None
+    # 同一件工具按域给不同描述（如 `retrieve_rag` 的规范名：稳评点名 DB32/T4013、
+    # 复垦点名《土地复垦条例》/TD/T 1031）。缺省域回落到 `description`。
+    description_by_domain: Optional[Dict[str, str]] = None
 
 
 # Registry mapping tool name -> spec
 TOOL_REGISTRY: Dict[str, ToolSpec] = {}
 
 
-def register_tool(name: str, description: str, parameters: Dict[str, Any]):
-    """Decorator to register an async handler as a tool."""
+def register_tool(name: str, description: str, parameters: Dict[str, Any],
+                  domains: Optional[tuple] = None,
+                  description_by_domain: Optional[Dict[str, str]] = None):
+    """Decorator to register an async handler as a tool.
+
+    Args:
+        domains: 该工具开放的域；None = 不限定。
+        description_by_domain: 按域覆盖描述文本（缺省域用 `description`）。
+    """
 
     def decorator(fn: Callable[..., Awaitable[str]]):
         TOOL_REGISTRY[name] = ToolSpec(
             name=name, description=description,
             parameters=parameters, handler=fn,
+            domains=domains, description_by_domain=description_by_domain,
         )
         return fn
 
@@ -56,6 +70,18 @@ def register_tool(name: str, description: str, parameters: Dict[str, Any]):
         "当正文需要引用具体法规依据（如土地管理法第几条）、稳评规范（DB32/T4013-2021）、"
         "或参考范文表述时调用。返回检索到的文本片段，可直接引用或被概括。"
     ),
+    # 🔴 检索本身已按域隔离（`retrieve_hybrid(domain=...)`），两域共用一件工具即可；
+    #    但描述里点名的规范（稳评 DB32/T4013）对复垦是错的 —— 复垦用 `description_by_domain`
+    #    换成它自己的编制依据。稳评那份 `description` 逐字不变。
+    domains=("stability", "reclamation"),
+    description_by_domain={
+        "reclamation": (
+            "从知识库检索法规、政策、官方范文、案例的原文片段。"
+            "当正文需要引用具体法规依据（如《土地复垦条例》第几条）、复垦编制规范"
+            "（TD/T 1031 系列编制规程）、或参考范文表述时调用。"
+            "返回检索到的文本片段，可直接引用或被概括。"
+        ),
+    },
     parameters={
         "type": "object",
         "properties": {
@@ -110,6 +136,18 @@ async def _retrieve_rag(ctx: dict, query: str = "", n_results: int = 5) -> str:
         "和表4-1 土地分类面积表（按权属单位×地类大类）。"
         "当正文需要真实的地块信息或土地分类面积数据时调用。返回表格的结构化文本。"
     ),
+    # 勘测定界报告两域都要用（复垦的临时用地勘测定界表型见
+    # `land_survey_parser.RECLAMATION_PROFILE`），故 `domains` 含两域；
+    # 复垦描述改口径（表4-1 → 临时用地土地利用现状统计表）。稳评描述逐字不变。
+    domains=("stability", "reclamation"),
+    description_by_domain={
+        "reclamation": (
+            "解析临时用地勘测定界报告中的表格数据：勘测定界地块汇总表"
+            "（地块号/坐落/用途/面积/界址点数）和临时用地土地利用现状统计表"
+            "（按权属单位×地类）。当正文需要真实的地块信息或土地利用现状数据时调用。"
+            "返回表格的结构化文本。"
+        ),
+    },
     parameters={
         "type": "object",
         "properties": {
@@ -123,7 +161,8 @@ async def _retrieve_rag(ctx: dict, query: str = "", n_results: int = 5) -> str:
 )
 async def _parse_kd_table(ctx: dict, pdf_path: str = "") -> str:
     """解析勘测定界报告，返回可直接引用的地块与地类数据。"""
-    from app.services.land_survey_parser import parse_land_survey, format_for_prompt
+    from app.services.land_survey_parser import (
+        parse_land_survey, format_for_prompt, DEFAULT_PROFILE, RECLAMATION_PROFILE)
 
     # 找到勘测定界报告 PDF（显式传入 → ctx → 上传列表）
     target = pdf_path or ctx.get("survey_report_path") or ""
@@ -135,7 +174,10 @@ async def _parse_kd_table(ctx: dict, pdf_path: str = "") -> str:
     if not target:
         return "【勘测定界】未找到勘测定界报告 PDF。请传入 pdf_path 或检查本批上传材料。"
 
-    parsed = parse_land_survey(target)
+    # 🔴 表头「方言」按域取：复垦勘测定界是「临时用地」表型。稳评（默认域）用
+    #    DEFAULT_PROFILE —— 与改动前 `parse_land_survey(target)` 的默认值一致，行为不变。
+    profile = RECLAMATION_PROFILE if ctx.get("domain") == "reclamation" else DEFAULT_PROFILE
+    parsed = parse_land_survey(target, profile=profile)
     if not parsed:
         return "【勘测定界】未能从该文件中解析出地块表格，请确认是勘测定界报告（含地块情况汇总表/土地分类面积表）。"
     return format_for_prompt(parsed)
@@ -147,6 +189,8 @@ async def _parse_kd_table(ctx: dict, pdf_path: str = "") -> str:
         "当正文（第六章/第八章）需要具体的风险评分数据或风险等级判定时调用。"
         "返回扣分制评分明细（含各维度扣分小计与风险等级）。"
     ),
+    # 🔴 扣分制是稳评专有口径 —— 只对稳评开放，不进复垦工具表。
+    domains=("stability",),
     parameters={
         "type": "object",
         "properties": {
@@ -192,6 +236,8 @@ async def _calc_risk_scoring(ctx: dict, support_rate: float = 100) -> str:
         "并按六维度返回各选项人数（身份/年龄/职业/了解程度/态度/解决诉求方式）。"
         "当正文（第三章）需要调查样本量、支持率、人群结构分布时调用。"
     ),
+    # 🔴 公众问卷是稳评器物（复垦无公众问卷章）—— 只对稳评开放。
+    domains=("stability",),
     parameters={
         "type": "object",
         "properties": {
@@ -241,6 +287,8 @@ async def _query_survey(ctx: dict, include_dimensions: bool = True) -> str:
         "（了解程度、宣传公示满意度、政策理解、风险研判、支持态度等）。"
         "当正文（第三章）需要部门意见调查数据时调用。"
     ),
+    # 🔴 部门问卷是稳评器物（复垦无部门问卷章）—— 只对稳评开放。
+    domains=("stability",),
     parameters={
         "type": "object",
         "properties": {},
@@ -279,19 +327,29 @@ async def _query_dept_survey(ctx: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════
 # Schema 导出 + 执行器
 # ═══════════════════════════════════════════════════════════════════
-def get_tools_schema() -> List[Dict[str, Any]]:
-    """返回 OpenAI-format tools 列表，供 LLM 调用。"""
-    return [
-        {
+def get_tools_schema(domain: str = "stability") -> List[Dict[str, Any]]:
+    """返回该域可用的 OpenAI-format tools 列表，供 LLM 调用。
+
+    按 `ToolSpec.domains` 过滤：未标注域的（历史工具）对所有域开放；标了域的只对
+    其中所列域开放。描述按 `description_by_domain` 覆盖（缺省域用 `description`）。
+
+    🔴 默认域（稳评）拿到的**逐字等于**过滤前那五件 —— `ALL_TOOLS_SCHEMA` 即由此
+       取默认域构建，故稳评工具表不变。
+    """
+    out: List[Dict[str, Any]] = []
+    for spec in TOOL_REGISTRY.values():
+        if spec.domains is not None and domain not in spec.domains:
+            continue
+        desc = (spec.description_by_domain or {}).get(domain, spec.description)
+        out.append({
             "type": "function",
             "function": {
                 "name": spec.name,
-                "description": spec.description,
+                "description": desc,
                 "parameters": spec.parameters,
             },
-        }
-        for spec in TOOL_REGISTRY.values()
-    ]
+        })
+    return out
 
 
 async def execute_tool_calls(

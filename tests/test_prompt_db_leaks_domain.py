@@ -184,22 +184,42 @@ def test_cached_learning_hints_reads_domain_bucket(monkeypatch):
 # 5. 工具回合按域取值
 # ═══════════════════════════════════════════════════════════════
 
-def test_tool_round_schema_stability_full_and_reclamation_empty():
+def test_tool_round_schema_stability_full_and_reclamation_own_tools():
+    """稳评工具表＝全量五件（逐字不变）；复垦＝复垦自己那几件，不含稳评专有器物。"""
     from app.agent.tools import ALL_TOOLS_SCHEMA
     assert catalog.tool_round_schema("stability") is ALL_TOOLS_SCHEMA
-    assert catalog.tool_round_schema("reclamation") == []
+
+    rec = catalog.tool_round_schema("reclamation")
+    names = [f["function"]["name"] for f in rec]
+    assert names == ["retrieve_rag", "parse_kd_table",
+                     "calc_earthwork", "calc_investment", "evaluate_suitability"]
+    # 稳评专有器物（扣分制评分 / 公众·部门问卷）不得进复垦工具表
+    assert "calc_risk_scoring" not in names
+    assert "query_survey" not in names
+    assert "query_dept_survey" not in names
 
 
-def test_tool_round_skipped_for_reclamation(monkeypatch):
-    """复垦域：工具表为空 → 整轮直接跳过，不发决策 prompt、不调 LLM。"""
+def test_tool_round_runs_for_reclamation_with_reclamation_identity():
+    """复垦域：有自己的工具表 → 发起工具回合，且决策调用用的是复垦身份（非稳评）。"""
     import app.agent.agents.chapters.reclamation_chapter_base as rcb
     a = rcb.ReclamationChapterAgentBase()
-    a.chapter_number = 3
-    a._llm = object()   # 非 None，确保不是被「无 LLM」这条挡掉
+    a.chapter_number = 6
+    captured = {}
 
-    async def _boom(*args, **kwargs):
-        raise AssertionError("复垦不应发起工具回合（不应调用 LLM）")
+    class _L:
+        async def chat_with_reasoning(self, **kwargs):
+            captured["system"] = kwargs.get("system", "")
+            captured["tools"] = [t["function"]["name"] for t in (kwargs.get("tools") or [])]
+            return {"content": "无需工具", "reasoning": "", "tool_calls": []}
 
-    a._llm = type("L", (), {"chat_with_reasoning": staticmethod(_boom)})()
+    a._llm = _L()
+    a._emit_thinking = _noop_async
     out = asyncio.run(a._maybe_run_tool_round({}, "USER", "SYS"))
     assert out == []
+    assert "复垦" in captured["system"] and "稳评" not in captured["system"]
+    assert "calc_earthwork" in captured["tools"] and "calc_risk_scoring" not in captured["tools"]
+
+
+async def _noop_async(*args, **kwargs):
+    return None
+

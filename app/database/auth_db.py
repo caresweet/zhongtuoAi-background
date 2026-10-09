@@ -31,6 +31,7 @@ async def init_auth_db():
         # 🔴 create_all 只建**新表**，从不 ALTER 已存在的表 —— 老库（开发机上的
         #    auth.db）不会自动获得新列。下面三步照抄 knowledge_db.py 的幂等迁移范式。
         await conn.run_sync(_migrate_user_columns)
+        await conn.run_sync(_migrate_company_columns)
         await conn.run_sync(_seed_internal_company)
         await conn.run_sync(_promote_bootstrap_admin)
 
@@ -55,6 +56,31 @@ def _migrate_user_columns(conn):
             conn.execute(text(ddl))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_company ON users(company_id)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active)"))
+
+
+def _migrate_company_columns(conn):
+    """幂等迁移：给已存在的 `companies` 表补「负责人」两列。
+
+    🔴 模型 `Company` 里声明了 `leader_name` / `leader_title`，但**建表时没落地** ——
+       `create_all` 只建新表、从不 ALTER 老表，开发机上的 `companies` 一直没有这两列。
+       于是**每一次**公司档案读取都是 `SELECT companies.…, companies.leader_name, …`
+       → OperationalError → 被 `company_service` 吞成一句 warning、档案整份为空 →
+       报告里「公司简介 / 编写单位 / 实施单位负责人」**全部显示「待填写」**
+       （实测日志：读取公司档案失败（company_id=1）：no such column: companies.leader_name）。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+    if not inspector.has_table("companies"):
+        return
+    cols = {c["name"] for c in inspector.get_columns("companies")}
+    additions = {
+        "leader_name": "ALTER TABLE companies ADD COLUMN leader_name VARCHAR(100)",
+        "leader_title": "ALTER TABLE companies ADD COLUMN leader_title VARCHAR(100)",
+    }
+    for column, ddl in additions.items():
+        if column not in cols:
+            conn.execute(text(ddl))
 
 
 def _seed_internal_company(conn):

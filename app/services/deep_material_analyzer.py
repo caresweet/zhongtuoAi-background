@@ -613,13 +613,62 @@ async def analyze_all_materials(
     return result
 
 
+# ── 面积抽取：必须区分「用地面积」与「建筑面积」 ─────────────────────────
+# 量词里出现这些 → 不是用地面积，直接跳过
+_AREA_DENY = ("建筑面积", "地上建筑", "地下建筑", "计容", "不计容",
+              "绿地面", "硬化面", "外墙面积", "总建筑")
+# 量词里出现这些 → 明确就是用地面积，优先采信
+_AREA_LAND_HINT = ("用地", "占地", "实测面积", "总用地", "复垦面积",
+                   "损毁面积", "土地面积", "征收面积", "用地总面积")
+_AREA_RE = re.compile(r'(\d{1,7}(?:\.\d{1,2})?)\s*(?:平方米|㎡|m2|m²)')
+
+
+def _extract_area(text: str, unit: str) -> str:
+    """抽用地面积（unit="m2" 取平方米 / "mu" 取亩）。
+
+    🔴 两个坑，本项目实测都踩到了：
+      ① 原正则写死 `\\d{5,7}` —— 勘测定界原文是「实测面积为 **8070.0** 平方米
+         （合 12.10 亩）」，**只有 4 位**，被宽度限制排除在外；
+      ② 没有量词语义判断 —— 于是接着匹配到环保批文里的
+         「地下建筑面积 166323.59m² / **总建筑面积 661303.26m²**」，
+         报告于是写成「临时用地面积 661303 平方米，折合 12.1 亩」：
+         661303㎡ ≈ 992 亩，与同一批材料里勘测定界的 12.10 亩**自相矛盾**。
+
+    规则：含建筑/计容类量词 → 跳过；含用地/实测/占地类 → 立即采信；
+    都没有则记下第一个非建筑候选作兜底。
+    """
+    if unit == "mu":
+        rx = re.compile(r'(\d{1,7}(?:\.\d{1,2})?)\s*亩')
+    elif unit == "ha":
+        rx = re.compile(r'(\d{1,7}(?:\.\d{1,4})?)\s*公顷')
+    else:
+        rx = _AREA_RE
+    fallback = ""
+    for m in rx.finditer(text):
+        ctx = text[max(0, m.start() - 28):m.end() + 6]
+        if any(d in ctx for d in _AREA_DENY):
+            continue
+        if any(h in ctx for h in _AREA_LAND_HINT):
+            return m.group(1)
+        if not fallback:
+            fallback = m.group(1)
+    return fallback
+
+
 def _extract_data_from_text(text: str) -> Dict[str, str]:
     """Extract structured project data from PDF text using regex patterns."""
     updates = {}
 
+    # 🔴 面积单独走 `_extract_area`：旧的两条正则会吃到「总建筑面积」、
+    #    又会因 `\d{5,7}` 的宽度限制漏掉 4 位的真实用地面积。详见该函数注释。
+    _m2 = _extract_area(text, "m2")
+    if _m2:
+        updates["area_m2"] = _m2
+    _mu = _extract_area(text, "mu")
+    if _mu:
+        updates["area_mu"] = _mu
+
     patterns = [
-        (r'(\d{5,7})\s*(?:平方米|㎡)', 'area_m2'),
-        (r'(\d+\.?\d*)\s*亩', 'area_mu'),
         (r'(?:位于|坐落|位置)[：:]?\s*(.{5,60}?)(?:。|\n)', 'location'),
         (r'(?:用途|地类)[：:]?\s*(\S{2,30})', 'land_use'),
         (r'(?:涉及|共|共计)\s*(\d+)\s*(?:户|农户)', 'household_count'),

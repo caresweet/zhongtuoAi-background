@@ -416,12 +416,13 @@ class WorkflowService:
         if not isinstance(ch_data, dict):
             return {"chapter": chapter, "status": "pending", "title": "", "markdown": ""}
 
-        from app.agent.state import CHAPTER_DEFINITIONS
-        ch_def = CHAPTER_DEFINITIONS.get(chapter, {})
+        from app.agent.chapter_catalog import chapter_title as _ct
+        from app.domains import domain_of_state
+        _title = ch_data.get("title") or _ct(domain_of_state(state), chapter)
 
         return {
             "chapter": chapter,
-            "title": ch_data.get("title", ch_def.get("title", "")),
+            "title": _title,
             "status": ch_data.get("status", "pending"),
             "markdown": ch_data.get("markdown", ""),
             "tables": ch_data.get("tables", []),
@@ -431,10 +432,15 @@ class WorkflowService:
         }
 
     def get_all_chapters_status(self, session) -> Dict[str, Any]:
-        """Get status of all 10 chapters."""
+        """Get status of all chapters (按域：稳评 14 章 / 复垦 10 章)."""
         state = session.state
+        # 🔴 章号集合必须按域取：写死稳评的 ALL_CHAPTERS(14) 会让复垦会话多出
+        #    「分析预测风险源/确定风险等级/防范和化解风险的工作建议/附件」四章
+        #    幽灵条目（前端章节目录里直接看得见）。
+        from app.agent.chapter_catalog import all_chapters as _all_ch
+        from app.domains import domain_of_state
         result = {}
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _all_ch(domain_of_state(state)):
             result[ch_num] = self.get_chapter_status(session, ch_num)
 
         return {

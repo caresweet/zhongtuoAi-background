@@ -196,6 +196,30 @@ def target_words(chapter_no: int) -> tuple:
     return max(800, int(hi * 0.6)), hi
 
 
+# 🔴 稳评「数据字段 → 中文标注」映射（单一事实源）。
+#    由 `chapter_catalog.key_labels("stability")` 取用；复垦另有一份复垦口径的映射。
+_STABILITY_KEY_LABELS = {
+    "org_name": "责任单位（稳评责任单位）",
+    "implement_unit": "稳评实施单位",
+    "project_name": "项目名称",
+    "location": "项目位置",
+    "area_mu": "征收面积（亩）",
+    "area_m2": "征收面积（平方米）",
+    "land_use": "土地用途",
+    "compensation_standard": "补偿标准",
+    "household_count": "涉及户数",
+    "population_count": "涉及人数",
+    "total_samples": "问卷总数",
+    "support_rate": "支持率",
+    "doc_reference": "公告文号",
+}
+
+
+def stability_key_labels() -> dict:
+    """返回稳评的「数据字段 → 中文标注」映射副本。"""
+    return dict(_STABILITY_KEY_LABELS)
+
+
 def build_project_card(filled_data: Dict[str, Any]) -> str:
     """构建「项目事实卡」：只含已确认的真实项目事实（唯一事实源）。
 
@@ -553,8 +577,18 @@ def build_chapter_prompt(
     materials_summary: str = "",
     outline_context: dict = None,
     state: dict = None,
+    domain: str = "stability",
 ) -> str:
-    """主Agent为单个章节编写专属提示词。"""
+    """主Agent为单个章节编写专属提示词。
+
+    `domain` 决定「结构类」注入项（字数区间 / 二级标题规范 / 表格参考 / 字段中文
+    标注 / 身份首句 / 评分块 / 逐章特定要求）取哪一套 —— 一律经
+    `app.agent.chapter_catalog` 按域解析。末段「写作要求」块按域择一：复垦取
+    catalog 给的复垦文本，稳评沿用本函数内联的那份（逐字不变）。
+    默认 "stability"：不传时提示词逐字等于改动前（稳评护栏）。
+    """
+    from app.agent import chapter_catalog as _catalog
+
     num = chapter_def.get("num", 0)
     title = chapter_def.get("title", f"第{num}章")
     key_points = chapter_def.get("key_points", [])
@@ -565,22 +599,8 @@ def build_chapter_prompt(
     # 🔴 本项目事实卡：每章都带同一份「唯一事实源」，根治旧项目串数据
     project_card = build_project_card(filled_data)
 
-    # 🔴 字段中文标注：让 LLM 明确知道每个字段对应报告里的哪个小节
-    _KEY_LABELS = {
-        "org_name": "责任单位（稳评责任单位）",
-        "implement_unit": "稳评实施单位",
-        "project_name": "项目名称",
-        "location": "项目位置",
-        "area_mu": "征收面积（亩）",
-        "area_m2": "征收面积（平方米）",
-        "land_use": "土地用途",
-        "compensation_standard": "补偿标准",
-        "household_count": "涉及户数",
-        "population_count": "涉及人数",
-        "total_samples": "问卷总数",
-        "support_rate": "支持率",
-        "doc_reference": "公告文号",
-    }
+    # 🔴 字段中文标注（按域取）：让 LLM 明确知道每个字段对应报告里的哪个小节
+    _KEY_LABELS = _catalog.key_labels(domain)
     data_lines = []
     pdf_table_data = ""
     # 🔴 直接从 filled_data 里找 _pdf_table_data（不管是否在 data_needed 里）
@@ -610,25 +630,11 @@ def build_chapter_prompt(
         if overall:
             arg_flow += f"\n**整份报告论证主线**：{overall}\n"
 
-    # 🔴 旧项目禁用块（提前拼好）：Python 3.11 的 f-string 表达式内不能含反斜杠，
-    # 若在下方大 f-string 里内嵌带 \n 的 f-string 会触发 SyntaxError。
-    _old_project_block = ""
-    if data_lines:
-        _frag_lines = "\n".join(f"  - {f}" for f in _OLD_PROJECT_FRAGMENTS)
-        _old_project_block = (
-            "## 🚫 其他项目残留（铁律）\n"
-            "🔴 通用铁律：**凡「🔗 本项目事实卡」中未出现的具体事实**——村组/社区/乡镇/街道名、区县市名、"
-            "项目文号、日期、百分比、金额、地块编号——一律视为**其他项目残留**，"
-            "在本章正文、表格、图注、附件说明中**都不得出现**，需要引用时改写为通称（如「拟征收地块」「项目所在地」）。\n"
-            "项目具体名称、区划层级（可能是街道/镇/乡/开发区/园区/林场等，以事实卡为准）、文号、日期、"
-            "占比、金额一律以「🔗 本项目事实卡」为准。\n"
-            + (f"以下片段已确认来自其他项目，尤其禁止：\n{_frag_lines}\n" if _frag_lines else "")
-        )
+    # 🔴 身份首句（按域取）：稳评逐字不变；复垦用其域配置的专业口吻，避免复垦提示词里
+    #    顶着「稳评专家」的身份写复垦方案。
+    _persona = _catalog.report_persona(domain)
 
-    # 🔴 可引用法规白名单：**不写死**，按项目所在地区从 data/regulation_whitelist.json 选取
-    _regulation_whitelist = build_regulation_whitelist(filled_data)
-
-    prompt = f"""你是社会稳定风险评估报告的资深编写专家。
+    prompt = f"""{_persona}
 撰写报告第{num}章「{title}」。
 
 {project_card}
@@ -665,7 +671,8 @@ def build_chapter_prompt(
 
     # Scoring chapters: add scoring guidelines (扣分制, 严禁百分制)
     scoring_guidance = ""
-    if any(kw in title for kw in ['风险', '评分', '等级', '研判', '措施']):
+    if _catalog.has_scoring_guidance(domain) and \
+            any(kw in title for kw in ['风险', '评分', '等级', '研判', '措施']):
         scoring_guidance = """
 ## 评分规则（严格遵守 — DB32/T4013-2021 扣分制）
 - 采用**扣分制**：按合法性/合理性/可行性/可控性四大类测评项目逐项扣分，稳评总分 = 各项目扣分之和，扣分越少风险越低。严禁使用「0-100 打分、≥80 分=低风险、措施前 60-85 分」这类百分制口径。
@@ -686,7 +693,7 @@ def build_chapter_prompt(
     #    现在按**模板各章的实际字数**定「目标字数」= 上限，下限取 60%。
     #    ⚠️ 上下限**必须同源**：中途只加上限、不改下限，出现过第6章
     #       「下限 2200 / 上限 1500」这种上限低于下限的矛盾，模型无所适从。
-    min_words, max_words = target_words(num)
+    min_words, max_words = _catalog.target_words(domain, num)
 
     prompt += scoring_guidance
 
@@ -695,15 +702,14 @@ def build_chapter_prompt(
     #    导致 `chapter_definitions` 里定义的三级标题（4.2.1 / 8.4.1 / 9.2.1 …）
     #    从没进过提示词，LLM 只能自己编「（一）（二）」式小标题。
     try:
-        from app.agent.chapter_definitions import format_sections_for_prompt
-        _sec = format_sections_for_prompt(num)
+        _sec = _catalog.sections_for_prompt(domain, num)
         if _sec:
             prompt += "\n" + _sec + "\n"
     except Exception as _se:
         logger.warning(f"章节结构规范注入失败 ch{num}: {_se}")
 
-    # 🔴 表格格式参考（仅格式，内容与数量由 agent 根据数据决定）
-    table_ref = get_table_format_reference(num)
+    # 🔴 表格格式参考（仅格式，内容与数量由 agent 根据数据决定；按域取）
+    table_ref = _catalog.table_format_reference(domain, num)
     if table_ref:
         prompt += "\n" + table_ref + "\n"
 
@@ -716,7 +722,32 @@ def build_chapter_prompt(
         except Exception as _me:
             logger.warning(f"[材料摘录] 第{num}章注入失败: {_me}")
 
-    prompt += f"""
+    # ── 末段「写作要求」块：稳评 / 复垦各一套，互不掺和 ──
+    # 🔴 复垦：经 catalog 取复垦口径的要求文本（不含稳评规范/口径与稳评 DB 反馈）。
+    # 🔴 稳评：沿用下面这份内联正文 —— 逐字保持不变（稳评护栏）。
+    _req_block = _catalog.requirements_block(domain, min_words, max_words)
+    if _req_block:
+        prompt += _req_block
+    else:
+        # 🔴 旧项目禁用块（提前拼好）：Python 3.11 的 f-string 表达式内不能含反斜杠，
+        # 若在下方大 f-string 里内嵌带 \n 的 f-string 会触发 SyntaxError。
+        _old_project_block = ""
+        if data_lines:
+            _frag_lines = "\n".join(f"  - {f}" for f in _OLD_PROJECT_FRAGMENTS)
+            _old_project_block = (
+                "## 🚫 其他项目残留（铁律）\n"
+                "🔴 通用铁律：**凡「🔗 本项目事实卡」中未出现的具体事实**——村组/社区/乡镇/街道名、区县市名、"
+                "项目文号、日期、百分比、金额、地块编号——一律视为**其他项目残留**，"
+                "在本章正文、表格、图注、附件说明中**都不得出现**，需要引用时改写为通称（如「拟征收地块」「项目所在地」）。\n"
+                "项目具体名称、区划层级（可能是街道/镇/乡/开发区/园区/林场等，以事实卡为准）、文号、日期、"
+                "占比、金额一律以「🔗 本项目事实卡」为准。\n"
+                + (f"以下片段已确认来自其他项目，尤其禁止：\n{_frag_lines}\n" if _frag_lines else "")
+            )
+        # 🔴 可引用法规白名单：**不写死**，按项目所在地区从 data/regulation_whitelist.json 选取
+        _regulation_whitelist = build_regulation_whitelist(filled_data)
+        # 🔴 逐章「本章特定要求」（稳评专有的逐章结构说明，如第3章=江苏省统一制式评审表）
+        _ch_specific = _get_chapter_specific_requirements(num)
+        prompt += f"""
 ## 要求
 - 🔴 本章必须达到{min_words}字以上
 - 🔴 **本章不要超过 {max_words} 字** —— 这是硬上限（同类模板报告本章就是这么多）。
@@ -729,7 +760,7 @@ def build_chapter_prompt(
     * 标题「稳评责任单位」→ 正文必须写：责任单位具体名称（取「🔗 本项目事实卡」的"责任单位"）+ 其在该项目中的具体职责
     * 标题「稳评实施单位」→ 正文直接写实施单位名称（取「🔗 本项目事实卡」的「稳评实施单位」）。只写单位名称即可，不要写资质、专业能力、人员等说明。**事实卡里没有实施单位时写「待填写」，不得写入任何具体公司名**
     * 标题「征收位置」→ 正文必须写具体位置（取「🔗 本项目事实卡」的"项目位置"），不写泛泛的"位置合理"
-{_get_chapter_specific_requirements(num)}
+{_ch_specific}
 - 🔴 表格铁律（一票否决）：表格不固定，由你根据实际数据灵活设计。**有数据支撑才写表格，没有数据就写规范文字描述（不得出现【待补充】占位符），绝不写空表格或编造数据填表**。规则：
     * 用 markdown 表格语法（| 列1 | 列2 |）写表格，格式参考下面的「表格格式参考」
     * 每张表格必须每个单元格都有真实数据来源；🔴「事实卡」里有实数的**必须填实数**，不得用"以现状调查确认结果为准"搪塞；只有该项数据事实卡确实没有时才用规范文字，**不得写【待补充】**

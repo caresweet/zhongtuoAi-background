@@ -15,7 +15,13 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from lxml import etree
-from app.agent.chapter_definitions import ALL_CHAPTERS, chapter_no_of_heading
+from app.agent.chapter_definitions import chapter_no_of_heading
+from app.agent.chapter_catalog import (
+    all_chapters, total_chapters, chapter_title,
+    has_review_table, appendix_chapter_no,
+    report_kind_name, cover_type_line, cover_fallback_title,
+)
+from app.domains.registry import domain_of_state
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +352,11 @@ _PDF_DOC_LABELS = [
 class ReportAssembler:
     """Assembles generated chapter markdown into a properly formatted DOCX report."""
 
+    # 🔴 报告域缺省值。装配时由 `assemble()` 按 state 覆盖；单章导出
+    #    （scripts/export_chapter.py 直接调 `_add_chapter`）不设时回落稳评，
+    #    保证「不传域 = 稳评」的旧行为。
+    _domain = "stability"
+
     def __init__(self, storage_dir: Optional[Path] = None):
         from app.config import settings
         self.storage_dir = storage_dir or settings.STORAGE_DIR
@@ -381,6 +392,13 @@ class ReportAssembler:
         session_id = state.get("session_id", "report")
         chapters = state.get("chapters", {})
         filled = state.get("filled_data", {})
+
+        # 🔴 报告域：决定本报告按哪个域的章节目录装配（章号/标题/是否有评审表章/
+        #    是否有附件章）。缺省回落稳评 —— 老调用点（脚本）不传 `_domain` 时
+        #    行为与改动前完全一致。
+        self._domain = domain_of_state(state)
+        _chapters = all_chapters(self._domain)   # 本域章号列表
+        _total = total_chapters(self._domain)    # 本域总章数
 
         # 🔴 用户在「选择报告人员」多选框里勾选的人员姓名（决定前置工作组名单 + 培训证书取图）
         #    优先级：会话 state → filled_data 透传（脚本生成走这条）→ 空表示"未选，用全部在职人员"
@@ -443,7 +461,7 @@ class ReportAssembler:
             doc_num_match = re.search(r'(\d+)\s*号', correct_doc)
             if doc_num_match:
                 correct_num = doc_num_match.group(1)
-                for ch_num in ALL_CHAPTERS:
+                for ch_num in _chapters:
                     ch_data = chapters.get(ch_num, {})
                     if isinstance(ch_data, dict) and ch_data.get("markdown"):
                         md = ch_data["markdown"]
@@ -519,7 +537,7 @@ class ReportAssembler:
             logger.debug(f"第7章预处理跳过: {_e7}")
 
         # Cleanup placeholders
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _chapters:
             ch_data = chapters.get(ch_num, {})
             if isinstance(ch_data, dict) and ch_data.get("markdown"):
                 md = ch_data["markdown"]
@@ -564,11 +582,13 @@ class ReportAssembler:
         # 🔴 图片放置记录：ch_num → [{path, caption, fname}]，供审核 agent 观察图片位置/命名
         self._image_placements = {}
         self._current_chapter = 0
-        from app.agent.chapter_definitions import TOTAL_CHAPTERS
-        for ch_num in ALL_CHAPTERS:
+        # 🔴 评审表是**稳评专有**的第3章（表格章，数据驱动渲染，不由 LLM 写正文）。
+        #    复垦没有评审表章 —— 其第3章是「项目概况」（叙述章），走下面普通正文分支。
+        _has_review_table = has_review_table(self._domain)
+        for ch_num in _chapters:
             self._current_chapter = ch_num
-            # 🔴 第3章 = 评审表（表格章，数据驱动渲染，不由 LLM 写正文）
-            if ch_num == 3:
+            # 🔴 第3章 = 评审表（稳评专有）
+            if ch_num == 3 and _has_review_table:
                 self._add_chapter_title_page(doc, _cn_num(3), self._get_chapter_title(3))
                 # 🔴 评审表那页**不做整体居中**（业主 2026-09-17 改口径）：
                 #    「章节的最后一页内容不需要上下左右居中，按照正常的正文从上到下就行」。
@@ -606,22 +626,26 @@ class ReportAssembler:
                 markdown = ch_data["markdown"]
                 self._add_chapter(doc, ch_num, markdown, image_files, survey_stats,
                                   extracted_tables.get(ch_num, []), filled)
-                if ch_num < TOTAL_CHAPTERS:
+                if ch_num < _total:
                     doc.add_page_break()
         self._current_chapter = 0
         # 把图片放置记录写回 state，供审核 agent 读取
         state["_image_placements"] = self._image_placements
         state["_unmatched_images"] = self._unmatched_image_markers
 
-        # ── 第14章 附件（按清单顺序挂载实际文件/图片；章标题由 _add_appendices 内部输出）──
+        # ── 附件章（稳评第14章；按清单顺序挂载实际文件/图片；章标题由 _add_appendices 内部输出）──
         #    （章标题由 _add_appendices 内部输出，避免与「附件清单」重复）
         # 🔴 不再加分页：附件章标题页用「节分隔符(新页)」实现，重复分页会多出空白页
-        # 🔴 附件区图号必须按**附件章（14）**编：循环结束时 `_current_chapter` 被重置为 0，
+        # 🔴 附件区图号必须按**附件章**编：循环结束时 `_current_chapter` 被重置为 0，
         #    不设回去的话附件里全是「图0-26」这种编号，交付稿不能看。
-        self._current_chapter = TOTAL_CHAPTERS
-        self._chapter_image_counter[TOTAL_CHAPTERS] = 0
-        self._add_appendices(doc, survey_stats, image_files, filled)
-        self._current_chapter = 0
+        # 🔴 附件章是稳评专有（复垦 10 章无附件章），按域取章号；无附件章则不挂附件 ——
+        #    复垦报告里绝不能出现稳评的「附件1机构资质／附件2问卷／附件3评审…」。
+        _appendix_no = appendix_chapter_no(self._domain)
+        if _appendix_no is not None:
+            self._current_chapter = _appendix_no
+            self._chapter_image_counter[_appendix_no] = 0
+            self._add_appendices(doc, survey_stats, image_files, filled)
+            self._current_chapter = 0
 
         # ── Post-generation review: fix common issues ──
         self._pre_assembly_review(doc, filled)
@@ -663,9 +687,9 @@ class ReportAssembler:
         # 🔴 页眉抬头 + 页脚页码：必须放在**所有节创建完之后**
         #    （章节标题页/附件都会 add_section，早设会被后建的空节覆盖掉）。
         try:
-            _hdr = (str(filled.get("project_name") or doc_ref or "").strip()
-                    + "社会稳定风险评估报告")
-            if _hdr == "社会稳定风险评估报告":
+            _kind = report_kind_name(self._domain)   # 按域取：稳评/复垦
+            _hdr = (str(filled.get("project_name") or doc_ref or "").strip() + _kind)
+            if _hdr == _kind:
                 _hdr = ""     # 连项目名都没有时不如不加抬头
             self._setup_header_footer(doc, _hdr)
             logger.info(f"[HDR] 页眉页脚已设置（抬头={'有' if _hdr else '无'}，页码=正文起第1页）")
@@ -676,7 +700,7 @@ class ReportAssembler:
         filename = f"{session_id}_report.docx"
         if doc_ref:
             safe_name = re.sub(r'[\\/:*?"<>|]', '_', doc_ref)
-            filename = f"{safe_name}_社会稳定风险评估报告.docx"
+            filename = f"{safe_name}_{report_kind_name(self._domain)}.docx"
 
         from datetime import datetime
         ts = datetime.now().strftime('%m%d_%H%M')
@@ -1981,8 +2005,8 @@ class ReportAssembler:
 
         pn = (project_name or doc_ref or '').strip()
         if not pn or '示意图' in pn or '位置图' in pn:
-            # 无项目名时才用通用标题兜底
-            pn = '土地征收决策'
+            # 无项目名时才用通用标题兜底（按域取：稳评「土地征收决策」/复垦「土地复垦方案」）
+            pn = cover_fallback_title(self._domain)
 
         # ── 标题：两行、同字号、居中 ──
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1995,8 +2019,8 @@ class ReportAssembler:
         p.paragraph_format.space_after = Pt(0)
         # 🔴 业主口径（2026-09-21）：第二行写《社会稳定性风险评估》。
         #    参照件《白马湖农场1号》是裸的「社会稳定风险评估」，业主明确要求改，
-        #    以业主口径为准。
-        _set_run_font(p.add_run('《社会稳定性风险评估》'), FONT_COVER_TITLE, size=Pt(26),
+        #    以业主口径为准。该行是**报告类型**，按域取（复垦为《土地复垦方案》）。
+        _set_run_font(p.add_run(cover_type_line(self._domain)), FONT_COVER_TITLE, size=Pt(26),
                       bold=True, ascii_font=FONT_ASCII)
 
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
@@ -2418,12 +2442,11 @@ class ReportAssembler:
     # ═══════════════════════════════════════════════════════════════
     # Chapter titles (template-aligned)
     # ═══════════════════════════════════════════════════════════════
-    # Chapter titles — 单一事实源：app/agent/chapter_definitions.py
-    from app.agent.chapter_definitions import get_all_chapter_titles
-    _CHAPTER_TITLES = get_all_chapter_titles()
+    # Chapter titles — 单一事实源：按域取 `app.agent.chapter_catalog.chapter_title`。
+    # 稳评（默认域）逐字等于改动前 `get_all_chapter_titles()` 的取值。
 
     def _get_chapter_title(self, ch_num):
-        return self._CHAPTER_TITLES.get(ch_num, f"第{ch_num}章")
+        return chapter_title(self._domain, ch_num)
 
     # ═══════════════════════════════════════════════════════════════
     # Tables
@@ -4118,7 +4141,9 @@ class ReportAssembler:
         # 🔴 附件**只放图片**（业主口径 2026-09-21）：原来打头的
         #    「附件1 机构及人员资质材料」「附件2 问卷调查统计分析」正文里已经有了、
         #    而且不是图片，一并删掉。
-        from app.agent.chapter_definitions import TOTAL_CHAPTERS as _TOTAL
+        # 🔴 附件章章号按域取（稳评=14）。本方法只在「该域有附件章」时被调用
+        #    （见 assemble() 的 `appendix_chapter_no` 判断），故此处必不为 None。
+        _TOTAL = appendix_chapter_no(domain) or total_chapters(domain)
 
         cert_images = self._load_company_certificate_images(domain=domain)
         cert_paths = set(p for p, _ in cert_images)

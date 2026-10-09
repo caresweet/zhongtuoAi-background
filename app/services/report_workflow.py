@@ -1253,7 +1253,8 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     prompt = build_chapter_prompt(ch_def, filled,
                                   previous_chapters=state.get("chapters", {}),
                                   feedback=feedback if feedback else None,
-                                  outline_context=outline_context, state=state)
+                                  outline_context=outline_context, state=state,
+                                  domain=_domain)
     agent = get_chapter_agent(ch_num, llm_service=llm, domain=_domain)
     # 🔴 这里的 agent_state 以前只给「本章依赖子集」(`ch_data`)，比脚本路径
     #    （scripts/gen_full_report.py）少三样东西，界面产出因此系统性偏差：

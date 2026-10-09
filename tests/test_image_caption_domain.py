@@ -1,8 +1,8 @@
-"""正文配图图注按域取：稳评逐字不变；复垦绝不复用稳评图注。
+"""正文配图「章→图规格 / 图注 / 图片→章」按域取：稳评逐字不变；复垦走真规格。
 
-复垦的「章 → 图片类型」规格是**业主尚未定的设计**，本仓不臆造 ——
-故复垦图注一律取「该复垦章的标题 + 示意图」（域中立），而非稳评的器物名
-（如「社会稳定风险评估流程图」「拟征收地块位置示意图」）。
+复垦的章→图规格 `RECLAMATION_IMAGE_SPECS` 由业主 5 份真实复垦方案逐图提取
+（ch1 1/5、ch3 5/5、ch4 5/5、ch5 1/5；ch2/6/7/8/9/10 无图）。绑定按该规格的
+关键词判定，图注取规格自己的图名，绝不复用稳评器物名。
 """
 import os
 import tempfile
@@ -16,13 +16,16 @@ _JPEG = bytes.fromhex('ffd8ffe000104a46494600010100000100010000ffd9')
 
 
 def _img_in(folder: str, filename: str = "a.jpg") -> str:
-    """在临时目录的 `folder/` 下放一张最小 JPEG，返回其路径。"""
+    """在临时目录的 `folder/` 下放一张最小 JPEG，返回其路径。
+
+    内容带上文件夹名 —— 让不同文件夹的图**指纹不同**，避免被内容去重干掉。
+    """
     tmp = tempfile.mkdtemp()
     d = os.path.join(tmp, folder)
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, filename)
     with open(p, "wb") as f:
-        f.write(_JPEG)
+        f.write(_JPEG + folder.encode("utf-8"))
     return p
 
 
@@ -46,47 +49,79 @@ def test_stability_flowchart_caption_unchanged():
     assert [i["label"] for i in cat["by_chapter"].get(7, [])] == ["社会稳定风险评估流程图"]
 
 
-def test_reclamation_caption_is_reclamation_chapter_title():
-    """复垦：同两张图，图注改为**复垦章的标题 + 示意图**，绝无稳评器物名。"""
-    p = _img_in("位置图")
+def test_reclamation_location_map_binds_to_chapter3():
+    """复垦：位置示意图 → 第3章「项目概况」（不是稳评口径的第6章），图注取规格图名。"""
+    p = _img_in("项目地理位置示意图")
     cat = build_image_catalog([p], domain="reclamation")
-    labels = [i["label"] for i in cat["by_chapter"].get(6, [])]
-    assert labels == ["土地复垦工程设计及工程量测算示意图"]
+    labels = [i["label"] for i in cat["by_chapter"].get(3, [])]
+    assert labels == ["项目地理位置示意图"]
     assert "社会稳定风险评估" not in labels[0]
+    assert not cat["by_chapter"].get(6)
 
 
-def test_reclamation_flowchart_never_gets_stability_caption():
-    """复垦：稳评流程图那档类别，绝不再印「社会稳定风险评估流程图」。"""
+def test_reclamation_measure_layout_beats_generic_location():
+    """『表土堆放区位置示意图』归第4章「措施类」，不被第3章泛名『位置示意图』抢走。"""
+    p = _img_in("表土堆放区位置示意图")
+    cat = build_image_catalog([p], domain="reclamation")
+    assert [i["label"] for i in cat["by_chapter"].get(4, [])] == ["表土堆放区位置示意图"]
+    assert not cat["by_chapter"].get(3)
+
+
+def test_reclamation_ch4_three_kinds_bind():
+    """第4章三类图各按关键词落到自己的图名：损毁分析 / 占用情况。"""
+    p1 = _img_in("临时用地现场照片")
+    p2 = _img_in("临时用地占用生态红线示意图")
+    cat = build_image_catalog([p1, p2], domain="reclamation")
+    ch4 = [i["label"] for i in cat["by_chapter"].get(4, [])]
+    assert "临时用地现场照片" in ch4
+    assert "临时用地占用永久基本农田示意图" in ch4
+
+
+def test_reclamation_weak_evidence_chapters_bind():
+    """第1章、第5章的弱证据图（各 1/5 样本）也能按名绑定到本域章。"""
+    c1 = build_image_catalog([_img_in("各类土地面积关系图")], domain="reclamation")
+    c5 = build_image_catalog([_img_in("临时用地硬化层断面示意图")], domain="reclamation")
+    assert [i["label"] for i in c1["by_chapter"].get(1, [])] == ["各类土地面积关系图"]
+    assert [i["label"] for i in c5["by_chapter"].get(5, [])] == ["临时用地硬化层断面示意图"]
+
+
+def test_reclamation_never_gets_stability_caption():
+    """复垦：只有稳评口径的图（评估流程图）不绑任何正文章，也绝无稳评图注。"""
     p = _img_in("评估流程")
     stab = build_image_catalog([p], domain="stability")
     assert [i["label"] for i in stab["by_chapter"].get(7, [])] == ["社会稳定风险评估流程图"]
 
     rec = build_image_catalog([p], domain="reclamation")
-    rec_labels = [i["label"] for i in rec["by_chapter"].get(7, [])]
-    assert rec_labels == ["土地复垦投资估算示意图"]
-    assert "社会稳定风险评估流程图" not in rec_labels
+    rec_labels = [i["label"] for imgs in rec["by_chapter"].values() for i in imgs]
+    assert all("社会稳定风险评估" not in lb for lb in rec_labels)
 
 
-def test_reclamation_caption_formula_chapter_title_plus_schematic():
-    """图注公式 = 章标题 + 「示意图」（以第3章「项目概况」为例）。
-
-    直呼 `chapter_catalog.image_caption`，不依赖图片能否绑定到该章。
-    """
+def test_reclamation_caption_formula_fallback():
+    """未命中规格时，图注退回「章标题 + 示意图」的中性兜底（直呼 image_caption）。"""
     assert catalog.chapter_title("reclamation", 3) == "项目概况"
     assert catalog.image_caption("reclamation", 3, "map") == "项目概况示意图"
+    # 命中规格时用规格图名，而非泛化的章标题
+    assert catalog.image_caption("reclamation", 3, "location_map",
+                                 spec_label="项目地理位置示意图") == "项目地理位置示意图"
 
 
-def test_chapter_image_specs_empty_plan_for_reclamation():
-    """复垦无「章→图类型」规格：不回落稳评那张表，且规格不限定类别。"""
+def test_chapter_image_specs_reclamation_from_samples():
+    """复垦配图规格：真表（非中性兜底），据样本落地的章号、图名与关键词。"""
     rec = catalog.chapter_image_specs("reclamation")
-    assert set(rec) == set(catalog.all_chapters("reclamation"))
+    # 只有样本支持的章（1/3/4/5）有条目；其余章缺省＝无正文图
+    assert set(rec) == {1, 3, 4, 5}
     for specs in rec.values():
-        assert len(specs) == 1
-        # 中性规格：不限定图片类别（不建立任何「类型↔章」对应）
-        assert specs[0]["type"] not in {
-            "map", "survey_map", "planning", "flowchart", "announcement",
-            "photo", "meeting", "sentiment", "review", "opinion", "survey",
-        }
+        for s in specs:
+            assert set(s) >= {"type", "label", "min", "max", "keywords"}
+            assert s["min"] == 0 and s["max"] >= 1
+            assert s["keywords"]
+    # 第3章：单一位置图，正名 + 变体关键词
+    (loc,) = rec[3]
+    assert loc["label"] == "项目地理位置示意图"
+    assert "位置示意图" in loc["keywords"] and "工程位置" in loc["keywords"]
+    # 第4章：三类图（损毁分析 / 占用情况 / 措施）
+    labels4 = {s["label"] for s in rec[4]}
+    assert {"临时用地现场照片", "临时用地占用永久基本农田示意图",
+            "表土堆放区位置示意图"} <= labels4
     # 稳评仍是原表（同一对象，逐字不变）
-    assert catalog.chapter_image_specs("stability") is not None
     assert set(catalog.chapter_image_specs("stability")) == {6, 7, 8, 9}

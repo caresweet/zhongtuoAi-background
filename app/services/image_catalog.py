@@ -287,9 +287,10 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         "catalog": [{path, name, category, display_name}, ...]
     }
     """
-    # 🔴 章→图规格、图注一律按域取（收口在 chapter_catalog，不在此处写 `if domain==...`）。
-    from app.agent.chapter_catalog import chapter_image_specs, image_caption
-    _specs = chapter_image_specs(domain)
+    # 🔴 章→图规格、图注、图片→章绑定一律按域取（收口在 chapter_catalog，
+    #    不在此处写 `if domain==...`）。
+    from app.agent import chapter_catalog as _catalog
+    _specs = _catalog.chapter_image_specs(domain)
 
     # Build AI classification lookup: path → ai_category
     ai_lookup = {}
@@ -384,12 +385,10 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             folder_hint = '/'.join(parts[:-1])  # All folder parts as context
 
         # ── Classification priority ──
-        # ① 材料规则 / PDF 页规则 —— 确定性判定，优先级最高
+        # ① 材料规则 / PDF 页规则 —— 确定性判定，优先级最高（按域取，见 chapter_catalog）
         _rule_label = ""
-        if _pp:
-            chapter_hint, cat, _rule_label = _pdf_page_rule(_pp[0], _pp[1])
-        else:
-            chapter_hint, cat, _rule_label = _match_material_rule(name, folder_hint)
+        chapter_hint, cat, _rule_label = _catalog.material_image_rule(
+            domain, name, folder_hint, pdf_page=_pp)
 
         # ② 规则没识别出来，才退回原来的「AI 视觉分类 + 文件名关键词」
         if not cat:
@@ -406,7 +405,8 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             elif any(k in _nl for k in ('流程图', '评估流程')):
                 cat = "flowchart"
 
-            chapter_hint = _classify_chapter_hint(name, folder_hint)
+            # 🔴 图片→章绑定也按域取：复垦不借稳评那套写死 6/7/8/9 章的文件夹提示。
+            chapter_hint = _catalog.image_chapter_hint(domain, name, folder_hint)
 
         display_name = _rule_label or _clean_display_name(name, cat)
 
@@ -452,8 +452,8 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         # 优先挂到能匹配 category 的 spec；匹配不上就用第一个 spec 的 label
         matched = next((s for s in specs if s["type"] == img["category"]), None)
         # 🔴 图注**按域取**（稳评=材料规则标签 > 命中规格标签 > 按类别兜底表 > 首规格标签；
-        #    复垦=「章标题+示意图」，绝不复用稳评图注）。见 chapter_catalog.image_caption。
-        label = image_caption(
+        #    复垦=命中规格图名，未命中则「章标题+示意图」）。见 chapter_catalog.image_caption。
+        label = _catalog.image_caption(
             domain, hint, img["category"],
             rule_label=img.get("rule_label", ""),
             spec_label=(matched or {}).get("label", ""),

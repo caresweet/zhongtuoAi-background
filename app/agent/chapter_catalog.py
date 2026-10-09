@@ -340,30 +340,21 @@ def requirements_block(domain: str | None, min_words: int, max_words: int) -> st
 # ═══════════════════════════════════════════════════════════════
 # 正文配图（image_catalog.build_image_catalog）按域取值
 # ═══════════════════════════════════════════════════════════════
-# 复垦无「章 → 图片类型」规格（哪一章配哪类图，是业主尚未定的设计，本模块不臆造）。
-# 但图片若要落进正文，binding 时必须有条**不限定类别**的中性规格兜底 —— 只声明
-# 「本章可容纳若干张图」，不声明是哪类图。🔴 这不是复垦配图方案：它不建立任何
-# 「类型↔章」的对应，只为让图片不因缺规格而全部落空，且图注一律由 `image_caption`
-# 生成为域中立文案。
-_NEUTRAL_IMAGE_TYPE = "figure"
-_NEUTRAL_IMAGE_MAX = 4
-
+# 「章 → 图规格」「图注」「图片 → 章」三件事都在此按域收口，调用点（image_catalog）
+# 不写任何 `if domain == ...` 分支。稳评逐字委托既有实现；复垦走复垦自己的规格
+# （`RECLAMATION_IMAGE_SPECS`，由业主 5 份真实方案逐图提取），绝不复用稳评那张表。
 
 def chapter_image_specs(domain: str | None) -> Dict[int, List[Dict[str, Any]]]:
-    """该域正文各章的「配图规格」表 `{章号: [{type,label,min,max}, ...]}`。
+    """该域正文各章的「配图规格」表 `{章号: [{type,label,min,max,keywords}, ...]}`。
 
     稳评：委托 `image_catalog.CHAPTER_IMAGE_SPECS`（逐字不变）。
-    复垦：没有章→图规格，每章给一条中性兜底规格（见 `_NEUTRAL_IMAGE_TYPE` 注释）。
+    复垦：取 `reclamation_definitions.RECLAMATION_IMAGE_SPECS`（章号 1/3/4/5 有条目，
+          其余章缺省＝无正文图）。
     🔴 复垦绝不回落稳评那张表 —— 否则图片会被盖上「社会稳定风险评估流程图」这类稳评图注。
     """
     if domain == _RECLAMATION:
-        from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
-        return {
-            n: [{"type": _NEUTRAL_IMAGE_TYPE,
-                 "label": f"{d.get('title', '')}示意图",
-                 "min": 0, "max": _NEUTRAL_IMAGE_MAX}]
-            for n, d in RECLAMATION_CHAPTER_DEFINITIONS.items()
-        }
+        from app.agent.reclamation_definitions import RECLAMATION_IMAGE_SPECS
+        return RECLAMATION_IMAGE_SPECS
     from app.services.image_catalog import CHAPTER_IMAGE_SPECS
     return CHAPTER_IMAGE_SPECS
 
@@ -382,11 +373,12 @@ def image_caption(
     稳评：保持历史三档优先级 —— 材料规则标签 > 命中规格的标签 >
           按类别的兜底表（`IMAGE_CAPTION_FALLBACK`）> 首条规格标签。
           逐字等于改动前 `build_image_catalog` 的取值。
-    复垦：一律「章标题 + 示意图」（如第 3 章「项目概况」→「项目概况示意图」）——
-          域中立，绝不点名稳评器物（如「社会稳定风险评估流程图」）。
+    复垦：命中规格 → 用规格自己的图名（如第3章「项目地理位置示意图」）；
+          未命中任何规格 → 退回「章标题 + 示意图」的中性兜底
+          （如第3章无规格命中时「项目概况示意图」）。绝不点名稳评器物。
     """
     if domain == _RECLAMATION:
-        return f"{chapter_title(domain, chapter_number)}示意图"
+        return spec_label or rule_label or f"{chapter_title(domain, chapter_number)}示意图"
     from app.services.image_catalog import IMAGE_CAPTION_FALLBACK
     return (
         rule_label
@@ -394,3 +386,71 @@ def image_caption(
         or IMAGE_CAPTION_FALLBACK.get(category)
         or first_spec_label
     )
+
+
+def material_image_rule(
+    domain: str | None,
+    name: str,
+    folder_hint: str = "",
+    pdf_page=None,
+) -> tuple:
+    """① 确定性材料规则 → `(目标章号|None, 类别, 材料规则标签)`。
+
+    稳评：委托 `image_catalog` 既有的 PDF 页规则 / 材料规则（逐字不变）。
+    复垦：按复垦配图规格的关键词判定（复垦无「PDF 装订页序」口径，PDF 页不套规则）。
+    """
+    if domain == _RECLAMATION:
+        return _reclamation_material_rule(name, folder_hint)
+    from app.services.image_catalog import _pdf_page_rule, _match_material_rule
+    if pdf_page:
+        return _pdf_page_rule(pdf_page[0], pdf_page[1])
+    return _match_material_rule(name, folder_hint)
+
+
+def image_chapter_hint(domain: str | None, name: str, folder_hint: str = "") -> Optional[int]:
+    """② 材料规则未命中时，按文件名/文件夹推「图片 → 正文目标章」；识别不出返回 None。
+
+    稳评：委托 `image_catalog._classify_chapter_hint`（逐字不变）。
+    复垦：关键词已在 `material_image_rule` 判过，此处不再判 —— 绝不借稳评那套
+          写死第 6/7/8/9 章的文件夹提示，否则复垦图会被错绑到复垦的同号章。
+    """
+    if domain == _RECLAMATION:
+        return None
+    from app.services.image_catalog import _classify_chapter_hint
+    return _classify_chapter_hint(name, folder_hint)
+
+
+# 🔴 复垦绑定扫描的「泛名」章：第3章的『位置示意图』会被第4章『表土堆放区位置示意图』
+#    里的同名片段误命中，故把第3章留到最后扫 —— 专名先落袋，泛名兜底。
+_RECLAMATION_GENERIC_CHAPTER = 3
+
+
+def _reclamation_hint_chapters() -> List[int]:
+    """复垦绑定扫描的章顺序：第3章（泛名位置图）排最后，其余章升序在前。
+
+    新增章自动纳入，无需手工维护顺序；只要不出现「专名里含另一章泛名关键词」的新情况，
+    这个次序即稳。
+    """
+    from app.agent.reclamation_definitions import RECLAMATION_IMAGE_SPECS
+    chs = sorted(RECLAMATION_IMAGE_SPECS)
+    if _RECLAMATION_GENERIC_CHAPTER in chs:
+        chs.remove(_RECLAMATION_GENERIC_CHAPTER)
+        chs.append(_RECLAMATION_GENERIC_CHAPTER)
+    return chs
+
+
+def _reclamation_material_rule(name: str, folder_hint: str = "") -> tuple:
+    """复垦：文件名 + 文件夹 → `(章号, 规格类别, 规格图名)`；识别不出 `(None, "", "")`。
+
+    匹配文本 = **最后一级文件夹名 + 文件名**（与稳评 `_basename_text` 同口径）——
+    不用整条路径，免得 `/资料/位置示意图/…` 里的上级目录名盖过真名。
+    扫描顺序见 `_reclamation_hint_chapters`（专名章先、泛名章后）。
+    """
+    from app.agent.reclamation_definitions import RECLAMATION_IMAGE_SPECS
+    parts = [p for p in str(folder_hint or "").replace("\\", "/").split("/") if p]
+    text = f"{parts[-1] if parts else ''} {name or ''}".lower()
+    for ch in _reclamation_hint_chapters():
+        for spec in RECLAMATION_IMAGE_SPECS.get(ch, []):
+            if any(k in text for k in spec["keywords"]):
+                return (ch, spec["type"], spec["label"])
+    return (None, "", "")

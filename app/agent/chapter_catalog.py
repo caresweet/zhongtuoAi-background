@@ -290,6 +290,22 @@ def report_kind_name(domain: str | None) -> str:
     return "社会稳定风险评估报告"
 
 
+def template_name(domain: str | None) -> str:
+    """建会话时钉进 `state["template_name"]` 的「模板显示名」（按域取）。
+
+    这个名字是给用户看的「报告结构」抬头 —— 起始响应、历史库落库、主 Agent 的
+    模板上下文都读它。旧实现里 `report.py` 与 `state.create_initial_state` 各写死一份
+    「内置十四章案卷标准结构」类字样，复垦会话顶着它即是同一类泄漏（复垦是 10 章、
+    没有「案卷」概念）。
+
+    稳评（默认域）逐字等于改动前 `report.py` 里写死的那个串 —— 这是「稳评行为不变」
+    的依据；复垦换成复垦口径。
+    """
+    if domain == _RECLAMATION:
+        return "内置复垦方案标准结构（知识库综合生成）"
+    return "内置十四章案卷标准结构（知识库综合生成）"
+
+
 def cover_type_line(domain: str | None) -> str:
     """封面副标题（报告类型那一行，带书名号）。
 

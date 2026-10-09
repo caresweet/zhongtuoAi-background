@@ -184,6 +184,7 @@ def create_initial_state(
     session_id: str,
     report_title: str = "",
     project_context: str = "",
+    domain: str = "stability",
 ) -> AgentState:
     """Create a fresh agent state for a new report generation session.
 
@@ -191,16 +192,26 @@ def create_initial_state(
         session_id: Unique session identifier.
         report_title: User-provided report title.
         project_context: User-provided project context/information.
+        domain: 报告域（"stability" / "reclamation" / …）。默认稳评，老调用点不变。
+            章集合 / 兜底标题 / 模板显示名一律按域取 —— 否则复垦会话一建出来
+            就顶着稳评的 14 章与「社会稳定风险评估报告」抬头。
 
     Returns:
         Initialized AgentState dict.
     """
-    # Initialize all chapters as pending
+    # 🔴 章目录/标题/模板名按域取，收口在 `chapter_catalog`（本分支唯一的域差异缝隙）。
+    #    这里**不写** `if domain == ...` 分支，也不再从本模块的稳评章目录铺章 ——
+    #    那份写死了 14 章，复垦会话会因此长出稳评的章节列表。
+    from app.agent.chapter_catalog import (
+        chapter_titles, report_kind_name, template_name as _catalog_template_name,
+    )
+
+    # Initialize all chapters as pending（按域取章集合：稳评 14 / 复垦 10）
     chapters: Dict[int, ChapterContent] = {}
-    for num, defn in CHAPTER_DEFINITIONS.items():
+    for num, title in chapter_titles(domain).items():
         chapters[num] = ChapterContent(
             number=num,
-            title=defn["title"],
+            title=title,
             status="pending",
             markdown="",
             rag_sources=[],
@@ -212,9 +223,9 @@ def create_initial_state(
 
     return AgentState(
         session_id=session_id,
-        report_title=report_title or "社会稳定风险评估报告",
+        report_title=report_title or report_kind_name(domain),
         template_id=0,
-        template_name="内置十四章案卷标准结构",
+        template_name=_catalog_template_name(domain),
         template_path="",
         preserved_sections=[],
         template_placeholders=[],

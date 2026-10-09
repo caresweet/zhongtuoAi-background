@@ -29,6 +29,11 @@ from app.services.report_service import report_service
 from app.services.file_service import file_service
 from app.services.workflow_service import workflow_service
 from app.config import settings
+# 🔴 报告域相关取值（类型名/模板名）一律经此缝隙按域取，调用点不写 `if domain == ...`。
+from app.agent.chapter_catalog import (
+    report_kind_name as _kind_name, template_name as _catalog_template_name,
+    chapter_title as _chapter_title,
+)
 from app.utils.sse import (
     sse_event, sse_message, sse_progress, sse_status,
     sse_data_filled, sse_error, sse_complete,
@@ -692,7 +697,6 @@ async def start_generation(
     # Chapter agents generate content from knowledge base RAG + user data.
     # Templates in DB are only used as formatting/style reference.
     template_id = 0
-    template_name = "内置十四章案卷标准结构（知识库综合生成）"
     template_path = ""
     templates = []  # Initialize before try block
 
@@ -704,6 +708,9 @@ async def start_generation(
 
     domain_id = detect_domain(message=user_msg, explicit=explicit_intent or None)
     domain_cfg = get_domain(domain_id)      # 未知时自动回落默认域
+
+    # 模板显示名按域取 —— 收口在 chapter_catalog（复垦不得顶着稳评的「十四章」字样）。
+    template_name = _catalog_template_name(domain_id)
 
     # Load template list from DB only for reference (available_templates)
     try:
@@ -745,15 +752,16 @@ async def start_generation(
 
     # Initialize state with new AgentState — report_title starts empty,
     # will be collected from user in first interaction
+    # 🔴 章集合 / 兜底标题 / 模板名按域在建 state 时就定好：复垦不得长出稳评的 14 章。
     state = create_initial_state(
         session_id=session.session_id,
         report_title="",  # Will be collected via first chat message
         project_context=request.initial_message or "",
+        domain=domain_id,
     )
 
-    # Set template info in state
+    # Set template info in state（template_name 已由 create_initial_state 按域写入，见上）
     state["template_id"] = template_id
-    state["template_name"] = template_name
     state["template_path"] = template_path
     state["_available_templates"] = available_templates  # For region-based matching
     state["workflow_mode"] = "step_wizard"
@@ -990,7 +998,13 @@ async def chat_with_agent(
                 # Only treat as title when: has a doc ID, or looks like an actual report title
                 _is_likely_title = _has_doc_id or (_is_real_title and len(user_message) < 80)
 
-                if (not current_title or current_title.strip() == "" or current_title == "社会稳定风险评估报告") and _is_likely_title:
+                # 🔴 「标题尚未被用户填过」的判据按域取：兜底标题即该域的报告类型名
+                #    （稳评「社会稳定风险评估报告」/ 复垦「土地复垦方案」）。写死稳评名
+                #    会让复垦的兜底标题挡掉用户首条消息里的标题录入。
+                _default_title = _kind_name(
+                    session.state.get("_domain") or session.state.get("_conversation_domain")
+                )
+                if (not current_title or current_title.strip() == "" or current_title == _default_title) and _is_likely_title:
                     # User is providing the report title — extract cleanly
                     title = user_message.strip()
                     if "\n" in title:
@@ -2593,7 +2607,11 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest, user: U
 
     materials_dir = request.materials_dir or ""
     project_context = request.project_context or ""
-    report_title = request.report_title or "社会稳定风险评估报告"
+    # 🔴 无标题时的兜底按域取（稳评「社会稳定风险评估报告」/ 复垦「土地复垦方案」），
+    #    否则复垦会话没传标题就顶着稳评抬头跑完整条工作流。
+    report_title = request.report_title or _kind_name(
+        state.get("_domain") or state.get("_conversation_domain")
+    )
 
     # Take snapshot
     sid = session_id
@@ -2723,7 +2741,9 @@ async def resume_workflow(session_id: str, request: WorkflowResumeRequest, user:
 
     # 🔴 Re-run background task with updated data — will skip analysis and go straight to generation
     uploaded = list(state.get("_uploaded_files", []) or [])
-    report_title = state.get("report_title", filled.get("project_name", "社会稳定风险评估报告"))
+    report_title = state.get("report_title",
+                            filled.get("project_name")
+                            or _kind_name(state.get("_domain") or state.get("_conversation_domain")))
     materials_dir = state.get("materials_dir", "")
     project_context = state.get("project_context", "")
     import asyncio as _asyncio
@@ -3301,8 +3321,9 @@ async def get_human_queue(session_id: str, user: User = Depends(get_current_user
     except Exception:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from app.agent.state import CHAPTER_DEFINITIONS
     state = session.state
+    # 🔴 章标题按域取（复垦的章号与稳评重合但标题不同），不能读死稳评的 CHAPTER_DEFINITIONS。
+    _dom = state.get("_domain") or state.get("_conversation_domain")
     queue = state.get("human_queue", []) or []
     # 🔴 键归一化：session 持久化后 dict 键变成字符串（"6"≠6），统一转 int 再读
     human_items = {int(k): v for k, v in (state.get("human_items", {}) or {}).items()}
@@ -3313,7 +3334,7 @@ async def get_human_queue(session_id: str, user: User = Depends(get_current_user
         hi = human_items.get(int(ch), {})
         items.append({
             "chapter": ch,
-            "title": CHAPTER_DEFINITIONS.get(int(ch), {}).get("title", f"第{ch}章"),
+            "title": _chapter_title(_dom, int(ch)),
             "status": hi.get("status", "queued"),
             "retry_count": hi.get("retry_count", 0),
             "max_retry": hi.get("max_retry", 0),

@@ -1755,9 +1755,18 @@ async def node_gap_review(state: ReportWorkflowState) -> ReportWorkflowState:
 
 
 def route_after_gap(state: ReportWorkflowState) -> str:
-    """缺口核对后的路由：补了素材就回写那几章，否则去评审表。"""
+    """缺口核对后的路由：补了素材就回写那几章；否则去评审表。
+
+    🔴 「评审表环节」是**稳评专有** —— 稳评第 3 章是江苏省制式评审表，且这一步会
+       **停下来问**「评审表专用字段」（负责人/职务/联系人/电话）。复垦没有评审表章，
+       走进去就停在提问上等输入，**永远到不了组装**。按域直连组装。
+    """
     _a = state.get("_next_action", "assemble")
-    return "quality_rewrite" if _a == "quality_rewrite" else "review_table"
+    if _a == "quality_rewrite":
+        return "quality_rewrite"
+    from app.agent.chapter_catalog import has_review_table
+    from app.domains import domain_of_state
+    return "review_table" if has_review_table(domain_of_state(state)) else "assemble"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2050,6 +2059,8 @@ def build_report_workflow() -> StateGraph:
         {
             "quality_rewrite": "chapter_generate",
             "review_table": "review_table",
+            # 🔴 无评审表的域（复垦）直连组装，见 route_after_gap
+            "assemble": "assemble_final_report",
         },
     )
     # 🔴 评审表环节：缺口核对后，先生成评审表（含按需询问评审表专用字段），再组装报告

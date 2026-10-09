@@ -29,6 +29,35 @@ from app.agent.chapter_definitions import ALL_CHAPTERS
 logger = logging.getLogger(__name__)
 
 
+def _review_scope(state: dict) -> Dict[str, Any]:
+    """本域的质量审核范围：章号 / 字数下限 / 期望表格 / 必备表述。
+
+    🔴 稳评（默认域）**逐字**等于改动前 —— 直接回类上的那几个常量。
+
+    🔴 复垦必须取复垦口径。此前这几项一律取稳评的，后果不是「审不出问题」而是
+       「审出一堆修不掉的假问题」：复垦第 3 章被拿稳评的「拟征收土地基本情况表」
+       去比对、第 11~14 章（复垦根本没有）被逐个审判 → `regenerate_chapters`
+       永远非空 → 质量门永远不过 → 报告停在质量审查、**永远走不到组装**。
+    """
+    from app.domains import domain_of_state
+    if domain_of_state(state) != "reclamation":
+        return {"chapters": list(ALL_CHAPTERS),
+                "min_words": QualityReviewAgent.MIN_WORDS,
+                "expected_tables": QualityReviewAgent.EXPECTED_TABLES,
+                "required_patterns": QualityReviewAgent.REQUIRED_PATTERNS}
+
+    from app.agent.chapter_catalog import all_chapters
+    from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS as _RD
+    return {
+        "chapters": list(all_chapters("reclamation")),
+        "min_words": {n: int(d.get("min_words", 300)) for n, d in _RD.items()},
+        "expected_tables": {n: list(d.get("key_tables") or []) for n, d in _RD.items()},
+        # 复垦没有「正文必须出现某固定表述」的清单 —— 空表 = 不产生这类问题，
+        # 也绝不把稳评的必备表述（如「评估主体与评估事项」）套到复垦章上。
+        "required_patterns": {},
+    }
+
+
 class QualityReviewAgent(BaseAgent):
     """Post-generation data merge + quality audit + auto-rewrite agent.
 
@@ -189,7 +218,7 @@ class QualityReviewAgent(BaseAgent):
         # ═══════════════════════════════════════════════════════════
         # Step 2: Per-chapter format + content checks
         # ═══════════════════════════════════════════════════════════
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _review_scope(state)["chapters"]:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -207,7 +236,7 @@ class QualityReviewAgent(BaseAgent):
 
             # Word count
             word_count = len(markdown.replace('\n', '').replace(' ', ''))
-            min_words = self.MIN_WORDS.get(ch_num, 300)
+            min_words = _review_scope(state)["min_words"].get(ch_num, 300)
             if word_count < min_words:
                 chapter_issues.setdefault(ch_num, []).append({
                     "chapter": ch_num,
@@ -218,7 +247,7 @@ class QualityReviewAgent(BaseAgent):
                 })
 
             # Required patterns
-            for pattern in self.REQUIRED_PATTERNS.get(ch_num, []):
+            for pattern in _review_scope(state)["required_patterns"].get(ch_num, []):
                 if not re.search(pattern, markdown):
                     chapter_issues.setdefault(ch_num, []).append({
                         "chapter": ch_num,
@@ -305,7 +334,7 @@ class QualityReviewAgent(BaseAgent):
             if isinstance(pdf_texts, dict):
                 pdf_raw_text = " ".join(str(v)[:5000] for v in pdf_texts.values() if v)
 
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _review_scope(state)["chapters"]:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -390,7 +419,8 @@ class QualityReviewAgent(BaseAgent):
         # ═══════════════════════════════════════════════════════════
         # Step 4: Table completeness check
         # ═══════════════════════════════════════════════════════════
-        table_issues = self._check_table_completeness(merged_data)
+        table_issues = self._check_table_completeness(
+            merged_data, _review_scope(state)["expected_tables"])
 
         # ═══════════════════════════════════════════════════════════
         # Step 4.5: Integrate Collaboration Agents results
@@ -439,7 +469,7 @@ class QualityReviewAgent(BaseAgent):
                 fixed_count += 1
 
         # Re-check for remaining 【待补充】 after fixes
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _review_scope(state)["chapters"]:
             ch_data = chapters.get(ch_num, {})
             if isinstance(ch_data, dict):
                 md = ch_data.get("markdown", "")
@@ -539,7 +569,7 @@ class QualityReviewAgent(BaseAgent):
         total_words = 0
         extracted_values = {}
 
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _review_scope(state)["chapters"]:
             ch_data = chapters.get(ch_num, {})
             if not isinstance(ch_data, dict):
                 continue
@@ -975,7 +1005,8 @@ class QualityReviewAgent(BaseAgent):
     # Table Completeness
     # ═══════════════════════════════════════════════════════════════
 
-    def _check_table_completeness(self, merged: Dict) -> List[Dict]:
+    def _check_table_completeness(self, merged: Dict,
+                                  expected_tables: Dict = None) -> List[Dict]:
         """Check that each chapter has its expected tables."""
         issues = []
         all_tables = merged.get("all_tables", [])
@@ -985,7 +1016,9 @@ class QualityReviewAgent(BaseAgent):
             ch = t.get("chapter", 0)
             chapters_with_tables.setdefault(ch, [])
 
-        for ch_num, expected_names in self.EXPECTED_TABLES.items():
+        for ch_num, expected_names in (
+                expected_tables if expected_tables is not None
+                else self.EXPECTED_TABLES).items():
             if not expected_names:
                 continue
 
@@ -1169,7 +1202,7 @@ class QualityReviewAgent(BaseAgent):
             f"## 各章摘要\n"
         )
 
-        for ch_num in ALL_CHAPTERS:
+        for ch_num in _review_scope(state)["chapters"]:
             summary = chapter_summaries.get(ch_num, {})
             review_prompt += (
                 f"第{ch_num}章「{summary.get('title', '')}」："

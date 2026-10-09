@@ -222,11 +222,20 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
         # Extract key fields with regex
         import re as _re_data
         extracts = {}
-        # Area
-        m = _re_data.search(r'(\d{5,7})\s*(?:平方米|㎡)', txt)
-        if m: extracts['area_m2'] = m.group(1)
-        m = _re_data.search(r'(\d+\.?\d*)\s*亩', txt)
-        if m: extracts['area_mu'] = m.group(1)
+        # 🔴 面积走**统一的** `_extract_area`（含「用地/实测」语义优先、排除建筑类量词）。
+        #    这里原先自己抄了一份 `(\d{5,7})\s*(?:平方米|㎡)`，两个坑都在：
+        #      · 勘测定界那条「实测面积为 8070.0 平方米（合 12.10 亩）」只有 4 位，
+        #        被宽度限制漏掉 → 该材料**没产出 area_m2** → 让给了后面的材料；
+        #      · 于是抓到规划许可证的「建设规模 约 661303 平方米」
+        #        （= 总建筑面积，不是用地面积）。成稿因此写成
+        #        「临时用地面积 661303 平方米，折合 12.1 亩」（差 ~80 倍）。
+        #    实测日志：明远一期建设用地规划许可证 用地面积 108533.4 平方米（带小数，
+        #    旧正则同样匹配不到），紧跟着的建设规模 661303 平方米被当成了用地面积。
+        from app.services.deep_material_analyzer import _extract_area as _area_of
+        _v = _area_of(txt, "m2")
+        if _v: extracts['area_m2'] = _v
+        _v = _area_of(txt, "mu")
+        if _v: extracts['area_mu'] = _v
         # Location / 文号（🔴 通用：不写死「X街道/X镇」行政区划层级，不写死「拟征告」前缀，
         #    权威来源＝用户上传的预公告逐字文本）
         # 🔴 预公告**完整解析**：正文五个部分的段落都是有效内容（征收目的/征收范围/

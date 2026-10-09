@@ -104,6 +104,36 @@ _PROJECT_CARD_LABELS = {
     "conclusion_text": "座谈会结论（记录原文）",
 }
 
+# 🔴 稳评「事实卡字段清单」（**顺序即渲染顺序**）—— 单一事实源。
+#    由 `chapter_catalog.project_card_keys("stability")` 取用；复垦另有其字段清单
+#    （`RECLAMATION_CARD_KEYS`，经同一个缝隙函数解析）。默认域逐字等于改动前
+#    `build_project_card` 内联的那份 —— 这是「稳评行为不变」的依据。
+#    凡不在本表里的字段，即便 `filled_data` 里有值也**不进**事实卡（模型看不见 → 不编造）。
+_PROJECT_CARD_KEYS = [
+    "project_name", "org_name", "decision_unit", "implement_unit",
+    "location", "area_mu", "area_m2", "land_use", "land_acquisition_purpose",
+    "doc_reference", "compensation_standard", "household_count",
+    "population_count", "total_samples", "survey_total_count",
+    "support_rate", "oppose_rate", "dept_survey_count",
+    "solicitation_period", "assessment_agency", "workgroup",
+    # 🔴 日期（同 `_PROJECT_CARD_LABELS`）：不列在这里 = 用户填的日期
+    #    进不了提示词 = 永远写不进正文
+    "commission_date", "plan_date",
+    "notice_date", "notice_end_date", "survey_date", "symposium_date",
+    "risk_predict_date", "risk_predict_end_date",
+    "report_draft_date", "report_draft_end_date",
+    "review_date", "review_end_date", "plan_approve_date",
+    "publicity_start_date", "publicity_end_date", "report_month",
+    # 🔴 资料解析产出的字段（此前解析出来但从未进事实卡，见 _PROJECT_CARD_LABELS 注释）
+    "town", "village", "land_classification", "land_ownership", "boundary_desc",
+    "symposium_location", "symposium_date_text", "symposium_time",
+    "survey_date_text", "questionnaire_date", "questionnaire_date_text",
+    "dept_questionnaire_date",
+    "review_meeting_date", "review_meeting_location", "review_meeting_attendees",
+    "map_plots", "map_scale", "map_date", "work_scope",
+    "funding", "funding_amount", "notice_publish_date",
+]
+
 # 🔴 「其他项目残留」禁用片段：**不在代码里写死**，从 data/legacy_fragments.json 读取
 #    （运维可随时增删；默认为空）。同时见下方铁律：事实卡未出现的一切具体事实均禁止写入。
 def _load_legacy_fragments() -> list:
@@ -230,6 +260,16 @@ def stability_project_card_labels() -> dict:
     return dict(_PROJECT_CARD_LABELS)
 
 
+def stability_project_card_keys() -> list:
+    """返回稳评的「事实卡字段清单」副本（顺序即渲染顺序）。
+
+    由 `chapter_catalog.project_card_keys("stability")` 取用；复垦另有其清单
+    （`RECLAMATION_CARD_KEYS`）。默认域逐字等于改动前 `build_project_card` 内联的
+    那份 —— 这是「稳评行为不变」的依据。
+    """
+    return list(_PROJECT_CARD_KEYS)
+
+
 def build_project_card(filled_data: Dict[str, Any], domain: str | None = None) -> str:
     """构建「项目事实卡」：只含已确认的真实项目事实（唯一事实源）。
 
@@ -237,8 +277,8 @@ def build_project_card(filled_data: Dict[str, Any], domain: str | None = None) -
     - 「待补充」值一律过滤，绝不以占位符形式进卡片
     - 每个值都标注来源出处（文档/用户提供/AI分析），供后续人工核验
 
-    `domain` 决定**字段标注**与三个附带小节（预公告摘录 / 勘测定界明细 / 座谈会记录）
-    的抬头取哪一套 —— 一律经 `app.agent.chapter_catalog` 按域解析（调用点不写
+    `domain` 决定**字段清单**、**字段标注**与三个附带小节（预公告摘录 / 勘测定界明细 /
+    座谈会记录）的抬头取哪一套 —— 一律经 `app.agent.chapter_catalog` 按域解析（调用点不写
     `if domain == ...`）。默认 None = 稳评：不传时输出逐字等于改动前（稳评护栏）。
     """
     from app.validation.content_guardrails import _norm_num
@@ -248,30 +288,11 @@ def build_project_card(filled_data: Dict[str, Any], domain: str | None = None) -
     _labels = _lex["fields"]
 
     lines = []
-    keys = [
-        "project_name", "org_name", "decision_unit", "implement_unit",
-        "location", "area_mu", "area_m2", "land_use", "land_acquisition_purpose",
-        "doc_reference", "compensation_standard", "household_count",
-        "population_count", "total_samples", "survey_total_count",
-        "support_rate", "oppose_rate", "dept_survey_count",
-        "solicitation_period", "assessment_agency", "workgroup",
-        # 🔴 日期（同 `_PROJECT_CARD_LABELS`）：不列在这里 = 用户填的日期
-        #    进不了提示词 = 永远写不进正文
-        "commission_date", "plan_date",
-        "notice_date", "notice_end_date", "survey_date", "symposium_date",
-        "risk_predict_date", "risk_predict_end_date",
-        "report_draft_date", "report_draft_end_date",
-        "review_date", "review_end_date", "plan_approve_date",
-        "publicity_start_date", "publicity_end_date", "report_month",
-        # 🔴 资料解析产出的字段（此前解析出来但从未进事实卡，见 _PROJECT_CARD_LABELS 注释）
-        "town", "village", "land_classification", "land_ownership", "boundary_desc",
-        "symposium_location", "symposium_date_text", "symposium_time",
-        "survey_date_text", "questionnaire_date", "questionnaire_date_text",
-        "dept_questionnaire_date",
-        "review_meeting_date", "review_meeting_location", "review_meeting_attendees",
-        "map_plots", "map_scale", "map_date", "work_scope",
-        "funding", "funding_amount", "notice_publish_date",
-    ]
+    # 🔴 字段清单按域取（`chapter_catalog.project_card_keys`）：稳评逐字等于改动前那份
+    #    （59 键、顺序不变，见 `_PROJECT_CARD_KEYS`）；复垦换成自己那份
+    #    （`RECLAMATION_CARD_KEYS`）—— 复垦独有的字段（服务年限/复垦方向/动态总投资…）
+    #    这才进得了事实卡。凡清单外的字段，即便有值也不进卡片。
+    keys = _lex["keys"]
     for k in keys:
         v = filled_data.get(k)
         if v is None or str(v).strip() == "" or str(v).strip() == "【待补充】":

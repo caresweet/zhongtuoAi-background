@@ -290,15 +290,35 @@ def project_card_labels(domain: str | None) -> Dict[str, str]:
     return stability_project_card_labels()
 
 
+def project_card_keys(domain: str | None) -> List[str]:
+    """该域「事实卡字段清单」（顺序即渲染顺序）。
+
+    事实卡原先渲染一份**写死 59 键的稳评清单** —— 复垦自己的字段（服务年限 / 复垦方向 /
+    动态总投资 / 建设单位…）不在其中，即便有值也**进不了**事实卡、到不了模型眼前。
+    这里按域取：
+
+    🔴 稳评（默认域）逐字等于改动前 `build_project_card` 内联的那份
+       （委托 `stability_project_card_keys`，不复制第二份）。
+    🔴 复垦取 `RECLAMATION_CARD_KEYS` —— 业主 2026-10-09 核准过的复垦字段清单
+       （项目 / 勘测定界 / 复垦方向 / 工程量与钱 / 图件与附件 / 日期 六组）。
+    """
+    if domain == _RECLAMATION:
+        from app.agent.reclamation_definitions import RECLAMATION_CARD_KEYS
+        return list(RECLAMATION_CARD_KEYS)
+    from app.services.master_orchestrator import stability_project_card_keys
+    return stability_project_card_keys()
+
+
 def project_card_lexicon(domain: str | None) -> Dict[str, Any]:
     """`master_orchestrator.build_project_card` 里「随域而变」的全部字串。
 
-    除字段标注（见 `project_card_labels`）外，事实卡还有三个**附带小节**：
-    征收土地预公告正文摘录 / 勘测定界明细 / 座谈会记录。它们的抬头与小节字段标注
-    原先也写死稳评口径 ——「征收土地预公告」「稳评公示期」「（第9章 各方意见汇总采集）」
-    之类会随事实卡进入复垦章的提示词。
+    除**字段清单**（见 `project_card_keys`）与字段标注（见 `project_card_labels`）外，
+    事实卡还有三个**附带小节**：征收土地预公告正文摘录 / 勘测定界明细 / 座谈会记录。
+    它们的抬头与小节字段标注原先也写死稳评口径 ——「征收土地预公告」「稳评公示期」
+    「（第9章 各方意见汇总采集）」之类会随事实卡进入复垦章的提示词。
 
     返回：
+      keys          —— 字段清单（顺序即渲染顺序）
       fields        —— {字段 key: 中文标注}
       ann_heading / ann_fields    —— 预公告摘录小节（fields 为 [(key,label)]，空 = 整块不出现）
       land_heading                —— 勘测定界明细小节抬头（该小节各行标注域中立，留在调用点）
@@ -310,12 +330,14 @@ def project_card_lexicon(domain: str | None) -> Dict[str, Any]:
     """
     if domain == _RECLAMATION:
         return {
+            "keys": project_card_keys(domain),
             "fields": project_card_labels(domain),
             "ann_heading": "", "ann_fields": [],
             "land_heading": "  —— 勘测定界明细 ——",
             "meet_heading": "", "meet_fields": [],
         }
     return {
+        "keys": project_card_keys(domain),
         "fields": project_card_labels(domain),
         "ann_heading": "  —— 征收土地预公告正文摘录 ——",
         "ann_fields": [

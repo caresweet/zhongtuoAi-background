@@ -117,7 +117,7 @@ RECLAMATION_CHAPTER_DEFINITIONS = {
 }
 
 
-# 数据字段 → 中文标注（供单章提示词里标注「每个字段对应正文里的哪一节」）。
+# 数据字段 → 中文标注（供单章提示词「可用数据」标注 + 事实卡字段标注共用）。
 # 与稳评 `master_orchestrator._STABILITY_KEY_LABELS` 同构，但用**复垦**口径
 # （「临时用地面积」而非「征收面积」）。字段名与复垦数据层一致。
 RECLAMATION_KEY_LABELS: Dict[str, str] = {
@@ -133,7 +133,70 @@ RECLAMATION_KEY_LABELS: Dict[str, str] = {
     "doc_reference": "批复/备案文号",
     "reclamation_direction": "复垦方向",
     "dynamic_total_investment": "动态总投资",
+    # ── 以下为事实卡（`RECLAMATION_CARD_KEYS`）新启用的字段标注 ──
+    #    与上面 12 键同表，是因为事实卡标注与单章提示词「可用数据」标注**同源**
+    #    （都经 `chapter_catalog.key_labels/project_card_labels`）。这些字段的
+    #    取数管线尚未建（见 `RECLAMATION_CARD_KEYS` 注释），故当前对正文无可见影响。
+    "boundary_desc": "四至",
+    "plot_count": "地块数",
+    "damage_type": "损毁方式",
+    "damage_degree": "损毁程度",
+    "suitability_grade": "适宜性等别",
+    "topsoil_thickness": "剥离厚度",
+    "reclamation_target": "复垦目标",
+    "earthwork_volume": "工程量",
+    "unit_price": "综合单价",
+    "construction_cost": "工程施工费",
+    "other_cost": "其他费用",
+    "map_plots": "图斑",
+    "map_scale": "比例尺",
+    "map_date": "制图日期",
+    "rights_holder_opinion": "权属人意见",
+    "build_start_date": "开工",
+    "build_end_date": "竣工",
+    "reclaim_start_date": "复垦开始",
+    "reclaim_end_date": "复垦结束",
+    "acceptance_date": "验收",
 }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 事实卡字段清单（复垦口径）—— 唯一事实源
+# ═══════════════════════════════════════════════════════════════
+# 🔴 事实卡（`master_orchestrator.build_project_card`）原先只渲染一份写死 59 键的
+#    稳评字段清单 —— 复垦自己的字段不在其中，即便有值也**进不了**事实卡、到不了模型
+#    眼前（模型看不见的数字只会写「待补充」，不会编造，但也写不出真的）。
+#    业主 2026-10-09 核准本清单（按六组给出）；`chapter_catalog.project_card_keys`
+#    按域取用它。**顺序即渲染顺序**。
+#
+# 🔴 与稳评 `_PROJECT_CARD_KEYS` 的关系：互不复用。复垦没有的稳评字段（户数/支持率/
+#    预公告文号/各评审日期…）一个都不带过来；复垦独有的（服务年限/复垦方向/动态总投资…）
+#    才进得来。**键名**凡复垦取数管线已存在的（见 `RECLAMATION_KEY_LABELS`、
+#    勘测定界解析器 `land_survey_parser`、可研解析器 `reclamation_fs_parser`）
+#    一律沿用既有的、**不造同义词**。
+#
+# ⚠️ 复垦的**取数管线尚未建成** —— 目前没有任何代码写这些键，故该清单今日**渲染为空**
+#    （`build_project_card` 过滤无值字段）。本轮只落「键 + 标注」契约；待字段抽取落地，
+#    事实卡即随之渲染，无需再动这里。
+RECLAMATION_CARD_KEYS: List[str] = [
+    # 项目 —— build_unit/location 复用可研解析器键；service_years 复用既有键
+    "project_name", "build_unit", "location", "land_use", "service_years",
+    "doc_reference",
+    # 勘测定界 —— 临时用地面积复用既有 `area_m2`/`area_mu`（勘测定界解析器只出 ㎡）
+    "area_m2", "area_mu",
+    "land_classification", "land_ownership", "boundary_desc", "plot_count",
+    # 复垦方向
+    "reclamation_direction", "damage_type", "damage_degree", "suitability_grade",
+    "topsoil_thickness", "reclamation_target",
+    # 工程量与钱
+    "earthwork_volume", "unit_price", "construction_cost", "other_cost",
+    "dynamic_total_investment",
+    # 图件与附件 —— map_plots/map_scale/map_date 复用既有键（复垦图件口径）
+    "map_plots", "map_scale", "map_date", "rights_holder_opinion",
+    # 日期
+    "build_start_date", "build_end_date", "reclaim_start_date", "reclaim_end_date",
+    "acceptance_date",
+]
 
 
 def get_reclamation_chapter_title(chapter_number: int) -> str:

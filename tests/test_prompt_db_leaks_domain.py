@@ -33,6 +33,60 @@ def test_project_card_labels_reclamation_reuses_key_labels():
     assert catalog.project_card_labels("reclamation") == RECLAMATION_KEY_LABELS
 
 
+def test_project_card_keys_seam_stability_is_the_stored_list():
+    """稳评字段清单逐字等于 `_PROJECT_CARD_KEYS`（单源，未复制第二份）。"""
+    assert catalog.project_card_keys("stability") == mo._PROJECT_CARD_KEYS
+    assert catalog.project_card_keys(None) == mo._PROJECT_CARD_KEYS
+    assert len(mo._PROJECT_CARD_KEYS) == 59
+
+
+def test_project_card_keys_reclamation_is_its_own_list():
+    """复垦字段清单＝业主核准的 `RECLAMATION_CARD_KEYS`，与稳评那份不同。"""
+    from app.agent.reclamation_definitions import RECLAMATION_CARD_KEYS
+    assert catalog.project_card_keys("reclamation") == RECLAMATION_CARD_KEYS
+    # 复垦独有字段在；稳评专有字段不在
+    for k in ("service_years", "reclamation_direction", "dynamic_total_investment",
+              "damage_type", "earthwork_volume", "construction_cost"):
+        assert k in RECLAMATION_CARD_KEYS
+    for k in ("household_count", "support_rate", "doc_reference_nonexistent"):
+        assert k not in RECLAMATION_CARD_KEYS
+    # 每个字段都有中文标注（不留裸 key）
+    lex = catalog.project_card_lexicon("reclamation")
+    assert all(k in lex["fields"] for k in RECLAMATION_CARD_KEYS)
+
+
+def test_project_card_lexicon_exposes_keys_for_both_domains():
+    assert catalog.project_card_lexicon("stability")["keys"] == mo._PROJECT_CARD_KEYS
+    from app.agent.reclamation_definitions import RECLAMATION_CARD_KEYS
+    assert catalog.project_card_lexicon("reclamation")["keys"] == RECLAMATION_CARD_KEYS
+
+
+def test_reclamation_card_renders_own_fields_with_reclamation_labels():
+    """复垦自有字段（有值时）**进得了**事实卡，且用复垦标注（此前它们进不来）。"""
+    card = mo.build_project_card({
+        "project_name": "某某项目", "build_unit": "某某公司", "service_years": "3年",
+        "reclamation_direction": "耕地", "dynamic_total_investment": "120.5万元",
+        "plot_count": "2", "topsoil_thickness": "0.3m",
+    }, "reclamation")
+    assert "项目名称：某某项目" in card
+    assert "建设单位（复垦义务人）：某某公司" in card
+    assert "复垦服务年限：3年" in card
+    assert "复垦方向：耕地" in card
+    assert "动态总投资：120.5万元" in card
+    assert "地块数：2" in card
+    assert "剥离厚度：0.3m" in card
+
+
+def test_reclamation_card_empty_renders_neutral_fallback_not_labels():
+    """复垦无数据时渲染中性兜底（同稳评空卡），**不是**一串空标注。"""
+    card = mo.build_project_card({}, "reclamation")
+    assert card == mo.build_project_card({}, "stability")
+    assert "尚未掌握任何可确认的项目事实" in card
+    # 不得把任一复垦字段标注印成空值行
+    for label in ("项目名称：", "复垦方向：", "动态总投资："):
+        assert label not in card
+
+
 def test_stability_card_text_unchanged_for_known_fields():
     """稳评事实卡：字段标注仍是稳评口径（护栏，非目测）。"""
     card = mo.build_project_card({

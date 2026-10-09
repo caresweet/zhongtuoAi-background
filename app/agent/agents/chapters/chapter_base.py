@@ -200,7 +200,9 @@ class ChapterAgentBase(BaseAgent):
         if state.get("_use_custom_prompt") and state.get("_custom_prompt"):
             # 🔴 不写死公司名：外部用户出报告时，提示词里的公司名会被模型抄进正文。
             #    实施单位一律取自事实卡（已按本报告所属公司填好）。
-            system_prompt = "你是一位资深稳评工程师。"
+            #    身份兜底按域取（复垦不顶着「资深稳评工程师」）—— 经 chapter_catalog 收口。
+            from app.agent import chapter_catalog
+            system_prompt = chapter_catalog.custom_prompt_persona(self.domain)
             user_prompt = state["_custom_prompt"]
             # 🔴 自定义 prompt 路径此前会**丢掉 think() 检索到的 RAG** ——
             #    LLM 只能凭记忆写，于是编造法规名称/规划名称/同类项目。
@@ -225,9 +227,11 @@ class ChapterAgentBase(BaseAgent):
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
         # 🔴 标准小标题约束（无论哪套 prompt 都注入，保证章节内小标题结构稳定）
+        #    按域取（经 chapter_catalog）—— 复垦的小节名已并入「本章结构规范」，此处空，
+        #    否则会把**稳评**的子标题（如 4.1 合法性分析）塞进复垦章。
         try:
-            from app.agent.template_headings import format_headings_for_prompt
-            heading_hint = format_headings_for_prompt(self.chapter_number)
+            from app.agent import chapter_catalog
+            heading_hint = chapter_catalog.headings_for_prompt(self.domain, self.chapter_number)
             if heading_hint and heading_hint not in user_prompt:
                 user_prompt = user_prompt + "\n\n" + heading_hint
         except Exception:
@@ -369,18 +373,10 @@ class ChapterAgentBase(BaseAgent):
                     await asyncio.sleep(3 + attempt * 3)  # 3s, 6s, 9s backoff for API rate limits
 
                 # 🔴 Guidance — agent decides structure based on professional experience
-                writing_guide = (
-                    "\n\n## 要求\n"
-                    "1. 你是一位资深稳评工程师，根据专业知识决定本章每个小节下的内容深度\n"
-                    "2. 数据用「材料3：本项目数据」中提供的，没有的不编造\n"
-                    "3. 地名/村名/社区名必须来自项目数据，禁止使用LLM内部知识中的地名\n"
-                    "4. 写短句，像老工程师写报告，不要AI翻译腔\n"
-                    "5. 不用「第一/第二/第三」排比，不用「具有重要/切实/有力」等套词\n"
-                    "6. 🔴 子标题结构：严格用下方「本章结构规范」/「本章必须使用的子标题」给出的编号标题"
-                    "（如 4.1 合法性分析、6.1 量化评分指标体系）。禁止自创数字编号标题，"
-                    "禁止用「六、」「八、」中文序号标题；更细的分点用（一）（二）（三）写在正文里，不用编号标题。\n"
-                    "7. 表格只在必要时使用，不要为填模板而加表\n"
-                )
+                #    按域取（经 chapter_catalog）：复垦不顶着「资深稳评工程师」身份、
+                #    不套稳评小节示例（4.1 合法性分析 / 6.1 量化评分指标体系）。
+                from app.agent import chapter_catalog
+                writing_guide = chapter_catalog.writing_guide(self.domain)
                 system_prompt = system_prompt + writing_guide
 
                 result = await asyncio.wait_for(
@@ -1885,7 +1881,16 @@ class ChapterAgentBase(BaseAgent):
         rag_context: Dict[str, Any],
         user_data: Dict[str, Any],
     ) -> str:
-        """Default user prompt for chapter generation."""
+        """Default user prompt for chapter generation.
+
+        🔴 随域而变的三处（材料1 抬头 / 模板写法示例 / 表格骨架）一律经
+           `chapter_catalog` 收口，本文件不写 `if domain == ...`；domain 取类属性
+           `self.domain`（复垦章基类覆盖为 "reclamation"）。稳评（默认域）逐字不变。
+        """
+        from app.agent import chapter_catalog
+
+        domain = self.domain
+
         # RAG context
         chapter_ctx = rag_context.get("chapter_context", "")
         example_ctx = rag_context.get("example_context", "")
@@ -1918,9 +1923,8 @@ class ChapterAgentBase(BaseAgent):
         # 🔴 Build the table format enforcement (at END for recency bias)
         #    表格骨架按域取（经 chapter_catalog）—— 复垦无稳评模板骨架，不注入
         #    「拟征收土地基本情况表」这类稳评表名。
-        from app.agent import chapter_catalog
         table_enforcement = ""
-        skeletons = chapter_catalog.table_skeletons(self.domain, self.chapter_number)
+        skeletons = chapter_catalog.table_skeletons(domain, self.chapter_number)
         if skeletons:
             table_names = list(skeletons.keys())
             table_enforcement = (
@@ -1936,29 +1940,15 @@ class ChapterAgentBase(BaseAgent):
                 table_enforcement += f"- **{tname}**: 必须{ncols}列 — {' | '.join(cols)}\n"
             table_enforcement += "\n**如果你输出2列表格，系统将判定为不合格，需要重新生成！**\n"
 
-        # 🔴 Template content reuse — extract matching sections from historical report
-        template_content = ""
-        try:
-            from app.agent.template_content import template_content_provider
-            template_content = template_content_provider.build_template_prompt(
-                self.chapter_number, state.get("filled_data", {})
-            )
-        except Exception:
-            pass
-
-        seed_ctx = self._build_seed_context()
-        template_content = ""
-        try:
-            from app.agent.template_content import template_content_provider
-            template_content = template_content_provider.build_template_prompt(
-                self.chapter_number, state.get("filled_data", {})
-            )
-        except Exception:
-            pass
+        # 🔴 模板报告写法示例（按域，经 chapter_catalog）：稳评从 template_chapters.json
+        #    取本章模板段落当写作标杆；复垦无对标模板库 → 空，绝不注入稳评模板段落。
+        template_content = chapter_catalog.template_reference_for_prompt(
+            domain, self.chapter_number, state.get("filled_data", {})
+        )
 
         return (
             f"## 写作材料（按优先级排列）\n\n"
-            f"### 材料1：DB32/T4013-2021规范 + 优秀范文（最重要，优先参考）\n"
+            f"{chapter_catalog.material_heading(domain)}"
             f"{example_ctx[:8000] if example_ctx else '（无）'}\n"
             f"{template_content}\n"
             f"{dynamic_examples}\n\n"
@@ -1992,44 +1982,6 @@ class ChapterAgentBase(BaseAgent):
             f"{_get_cached_learning_hints(self.chapter_number)}"
             f"{table_enforcement}"
         )
-
-    @staticmethod
-    def _build_seed_context() -> str:
-        """Load relevant seed data for injection into chapter prompts."""
-        try:
-            from pathlib import Path
-            seed_dir = Path(__file__).parent.parent.parent.parent.parent / "seed_data"
-            parts = []
-
-            # DB32/T 4937-2024 — land acquisition specific standard
-            f = seed_dir / "db32_4937_2024_land_acquisition.md"
-            if f.exists():
-                parts.append(f.read_text(encoding='utf-8')[:3000])
-
-            # National guideline 428
-            f = seed_dir / "national_guideline_428.md"
-            if f.exists():
-                parts.append(f.read_text(encoding='utf-8')[:3000])
-
-            # Professional methodology
-            f = seed_dir / "professional_methodology.md"
-            if f.exists():
-                parts.append(f.read_text(encoding='utf-8')[:2000])
-
-            # Case study templates
-            f = seed_dir / "case_study_templates.md"
-            if f.exists():
-                parts.append(f.read_text(encoding='utf-8')[:2000])
-
-            # Social risk theory
-            f = seed_dir / "social_risk_theory.md"
-            if f.exists():
-                parts.append(f.read_text(encoding='utf-8')[:1500])
-
-            combined = "\n\n".join(parts)
-            return combined[:12000] if combined.strip() else ""
-        except Exception:
-            return ""
 
     @staticmethod
     def _build_local_regulation_context(state: dict, rag_context: dict) -> str:

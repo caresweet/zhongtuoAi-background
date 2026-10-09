@@ -12,6 +12,8 @@ master_orchestrator）按域取章集合/章标题/章类型/章结构文本的�
   · `target_words` / `sections_for_prompt` / `table_format_reference` /
     `key_labels` / `report_persona` / `has_scoring_guidance` /
     `has_chapter_specific_requirements`（单章提示词用）
+  · `material_heading` / `template_reference_for_prompt` /
+    `custom_prompt_persona` / `writing_guide`（默认单章 user prompt 与 act() 公共下游用）
 
 🔴 默认域（stability）的取值逐字等于改动前的实现 —— 这是「稳评行为不变」的依据。
    故上列多数函数在稳评分支**直接委托**给既有实现，不复制第二份。
@@ -477,6 +479,97 @@ def table_skeletons(domain: str | None, chapter_number: int) -> Dict[str, Any]:
         return {}
     from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
     return TEMPLATE_TABLE_SKELETONS.get(chapter_number, {})
+
+
+# ═══════════════════════════════════════════════════════════════
+# 默认单章 user prompt（`chapter_base._default_user_prompt`）按域取值
+# ═══════════════════════════════════════════════════════════════
+# 这条提示词把「写作材料」按优先级排开：材料1 = 规范 + 优秀范文、材料2 = 法规标准、
+# 材料3 = 本项目数据、材料4 = 原始文件。原先「材料1」抬头**写死 DB32/T4013-2021**
+#   （**稳评**的规范）**并往里注入 `data/template_chapters.json` 切出的稳评模板段落** ——
+# 复垦章据此「优先参考稳评规范 + 稳评模板范文」写复垦正文，正是要消除的掺兑。
+# 下面把这两处按域收口；稳评（默认域）取值逐字等于改动前。
+
+def material_heading(domain: str | None) -> str:
+    """默认单章 user prompt「材料1」抬头行（按域，**含行尾换行**）。
+
+    稳评逐字等于改动前（DB32/T4013-2021 + 优秀范文）；
+    复垦点名其编制依据（《土地复垦条例》《土地复垦条例实施办法》与 TD/T 1031 系列
+    编制规程，见 `reclamation.py` 的 `RECLAMATION_IDENTITY_PROMPT`），不再顶着稳评规范。
+    「优秀范文」保留 —— 复垦范文来自其**自有** RAG（`kb_reclamation_*`，5 份真实方案）。
+    """
+    if domain == _RECLAMATION:
+        return ("### 材料1：复垦编制规范（《土地复垦条例》《土地复垦条例实施办法》"
+                "与 TD/T 1031 系列编制规程）+ 优秀范文（最重要，优先参考）\n")
+    return "### 材料1：DB32/T4013-2021规范 + 优秀范文（最重要，优先参考）\n"
+
+
+def template_reference_for_prompt(
+    domain: str | None, chapter_number: int, filled_data: dict,
+) -> str:
+    """默认单章 user prompt 的「模板报告写法示例」块（按域）。
+
+    稳评：委托 `template_content.TemplateContentProvider.build_template_prompt`
+          （逐字不变）—— 从 `data/template_chapters.json` 取本章最长的模板段落当写作标杆。
+    复垦：**不注入** —— `template_chapters.json` 是稳评产物（12 条，按稳评章号建键），
+          复垦没有对标模板库，其素材来自**自有** RAG（`kb_reclamation_*`）。此处返回空串，
+          绝不拿稳评模板段落冒充复垦的「写作标杆」，也不拿别的东西替。
+    """
+    if domain == _RECLAMATION:
+        return ""
+    from app.agent.template_content import template_content_provider
+    return template_content_provider.build_template_prompt(chapter_number, filled_data)
+
+
+# ═══════════════════════════════════════════════════════════════
+# `chapter_base.act()` 公共下游「按域」的两处（自定义 prompt 兜底身份 / 写作要求）
+# ═══════════════════════════════════════════════════════════════
+
+def custom_prompt_persona(domain: str | None) -> str:
+    """自定义 prompt 分支（`_use_custom_prompt`）兜底 system prompt 的身份句（按域）。
+
+    该分支用主编排给的 `_custom_prompt`（`master_orchestrator.build_chapter_prompt`
+    已按域写好身份），这里的 `system_prompt` 只是兜底 —— 原先写死「你是一位资深稳评
+    工程师。」，复垦会话顶着稳评身份。稳评逐字不变；复垦取其域 `identity_prompt`。
+    """
+    if domain == _RECLAMATION:
+        from app.domains.registry import get_domain
+        return get_domain(domain).identity_prompt
+    return "你是一位资深稳评工程师。"
+
+
+def writing_guide(domain: str | None) -> str:
+    """`act()` 每次生成前置的「## 要求」写作引导块（按域，含首尾换行）。
+
+    原先在 `act()` 里内联，第 1 条身份写死「资深稳评工程师」、第 6 条结构示例写死稳评
+    二级标题（4.1 合法性分析 / 6.1 量化评分指标体系）—— 复垦章顶着稳评身份、按稳评
+    小节编号写。稳评逐字等于改动前；复垦换成复垦身份与复垦小节示例。
+    """
+    if domain == _RECLAMATION:
+        return (
+            "\n\n## 要求\n"
+            "1. 你是土地复垦方案编制专家，根据专业知识决定本章每个小节下的内容深度\n"
+            "2. 数据用「材料3：本项目数据」中提供的，没有的不编造\n"
+            "3. 地名/村名/地块名必须来自项目数据，禁止使用LLM内部知识中的地名\n"
+            "4. 写短句，像老工程师写报告，不要AI翻译腔\n"
+            "5. 不用「第一/第二/第三」排比，不用「具有重要/切实/有力」等套词\n"
+            "6. 🔴 子标题结构：严格用下方「本章结构规范」给出的编号标题"
+            "（如 3.1 项目简介、3.4 项目区土地利用状况）。禁止自创数字编号标题，"
+            "禁止用「六、」「八、」中文序号标题；更细的分点用（一）（二）（三）写在正文里，不用编号标题。\n"
+            "7. 表格只在必要时使用，不要为填模板而加表\n"
+        )
+    return (
+        "\n\n## 要求\n"
+        "1. 你是一位资深稳评工程师，根据专业知识决定本章每个小节下的内容深度\n"
+        "2. 数据用「材料3：本项目数据」中提供的，没有的不编造\n"
+        "3. 地名/村名/社区名必须来自项目数据，禁止使用LLM内部知识中的地名\n"
+        "4. 写短句，像老工程师写报告，不要AI翻译腔\n"
+        "5. 不用「第一/第二/第三」排比，不用「具有重要/切实/有力」等套词\n"
+        "6. 🔴 子标题结构：严格用下方「本章结构规范」/「本章必须使用的子标题」给出的编号标题"
+        "（如 4.1 合法性分析、6.1 量化评分指标体系）。禁止自创数字编号标题，"
+        "禁止用「六、」「八、」中文序号标题；更细的分点用（一）（二）（三）写在正文里，不用编号标题。\n"
+        "7. 表格只在必要时使用，不要为填模板而加表\n"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════

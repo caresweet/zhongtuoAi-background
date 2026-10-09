@@ -1124,7 +1124,8 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             elif isinstance(f, str):
                 uploaded_items.append(f)
         state["_img_catalog"] = build_image_catalog(
-            uploaded_items, ai_classifications=state.get("_classified_images"))
+            uploaded_items, ai_classifications=state.get("_classified_images"),
+            domain=domain_of_state(state))
         state["_gen_prepared"] = True
 
     # 🔴 RAG 素材不在这里检索 —— 每个章节 agent 自己按小节检索并注入

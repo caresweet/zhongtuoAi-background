@@ -37,3 +37,31 @@ def test_default_domain_behaves_like_before():
     """不传 domain 时与改动前一致 —— 稳评的护栏。"""
     text = "本项目问卷调查支持率为98%，反对率2%。"
     assert full_guardrail_check(text) == full_guardrail_check(text, domain="stability")
+
+
+def test_stability_total_issues_immune_to_domain_guardrails(monkeypatch):
+    """稳评调用**读不到** `DomainConfig.guardrails` —— 逐字节等于改动前。
+
+    `DomainConfig.guardrails` 在新分支出现前从未被稳评读过。这里往稳评域塞一条
+    **逐字出现在正文里**的护栏：若门控失效（稳评也跑该块），`total_issues` 会 +1；
+    门控有效则整份结果与基线逐字节相同。反证给复垦域同一护栏 —— 它**会**被计入。
+    """
+    import app.domains as domains_pkg
+
+    text = "社会稳定风险评估流程图"
+    stab_baseline = full_guardrail_check(text, domain="stability")
+    rec_baseline = full_guardrail_check(text, domain="reclamation")
+
+    class _Cfg:
+        guardrails = [text]                 # 故意逐字命中正文
+
+    monkeypatch.setattr(domains_pkg, "get_domain", lambda *a, **k: _Cfg())
+
+    stab_after = full_guardrail_check(text, domain="stability")
+    rec_after = full_guardrail_check(text, domain="reclamation")
+
+    # 稳评：注入的护栏命中正文，但整份结果与 total_issues 均逐字节不变。
+    assert stab_after == stab_baseline
+    assert stab_after["total_issues"] == stab_baseline["total_issues"]
+    # 反证：同一护栏在复垦域**会**被计入 —— 证明门控存在且只跳过稳评。
+    assert rec_after["total_issues"] == rec_baseline["total_issues"] + 1

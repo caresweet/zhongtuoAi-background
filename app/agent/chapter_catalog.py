@@ -335,3 +335,62 @@ def requirements_block(domain: str | None, min_words: int, max_words: int) -> st
         from app.agent.reclamation_definitions import render_reclamation_requirements
         return render_reclamation_requirements(min_words, max_words)
     return ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 正文配图（image_catalog.build_image_catalog）按域取值
+# ═══════════════════════════════════════════════════════════════
+# 复垦无「章 → 图片类型」规格（哪一章配哪类图，是业主尚未定的设计，本模块不臆造）。
+# 但图片若要落进正文，binding 时必须有条**不限定类别**的中性规格兜底 —— 只声明
+# 「本章可容纳若干张图」，不声明是哪类图。🔴 这不是复垦配图方案：它不建立任何
+# 「类型↔章」的对应，只为让图片不因缺规格而全部落空，且图注一律由 `image_caption`
+# 生成为域中立文案。
+_NEUTRAL_IMAGE_TYPE = "figure"
+_NEUTRAL_IMAGE_MAX = 4
+
+
+def chapter_image_specs(domain: str | None) -> Dict[int, List[Dict[str, Any]]]:
+    """该域正文各章的「配图规格」表 `{章号: [{type,label,min,max}, ...]}`。
+
+    稳评：委托 `image_catalog.CHAPTER_IMAGE_SPECS`（逐字不变）。
+    复垦：没有章→图规格，每章给一条中性兜底规格（见 `_NEUTRAL_IMAGE_TYPE` 注释）。
+    🔴 复垦绝不回落稳评那张表 —— 否则图片会被盖上「社会稳定风险评估流程图」这类稳评图注。
+    """
+    if domain == _RECLAMATION:
+        from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
+        return {
+            n: [{"type": _NEUTRAL_IMAGE_TYPE,
+                 "label": f"{d.get('title', '')}示意图",
+                 "min": 0, "max": _NEUTRAL_IMAGE_MAX}]
+            for n, d in RECLAMATION_CHAPTER_DEFINITIONS.items()
+        }
+    from app.services.image_catalog import CHAPTER_IMAGE_SPECS
+    return CHAPTER_IMAGE_SPECS
+
+
+def image_caption(
+    domain: str | None,
+    chapter_number: int,
+    category: str,
+    *,
+    rule_label: str = "",
+    spec_label: str = "",
+    first_spec_label: str = "",
+) -> str:
+    """已绑定到 `(域, 章号)` 的一张正文图该印什么图注。
+
+    稳评：保持历史三档优先级 —— 材料规则标签 > 命中规格的标签 >
+          按类别的兜底表（`IMAGE_CAPTION_FALLBACK`）> 首条规格标签。
+          逐字等于改动前 `build_image_catalog` 的取值。
+    复垦：一律「章标题 + 示意图」（如第 3 章「项目概况」→「项目概况示意图」）——
+          域中立，绝不点名稳评器物（如「社会稳定风险评估流程图」）。
+    """
+    if domain == _RECLAMATION:
+        return f"{chapter_title(domain, chapter_number)}示意图"
+    from app.services.image_catalog import IMAGE_CAPTION_FALLBACK
+    return (
+        rule_label
+        or spec_label
+        or IMAGE_CAPTION_FALLBACK.get(category)
+        or first_spec_label
+    )

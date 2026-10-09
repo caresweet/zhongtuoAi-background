@@ -68,6 +68,18 @@ CHAPTER_IMAGE_SPECS = {
     ],
 }
 
+# 🔴 稳评正文配图的**按类别兜底图注**（当某章没有匹配到规格、也无材料规则标签时用）。
+#    这些名字全是稳评口径（「拟征收土地」「位置示意图（公告附图）」…），
+#    **只对稳评有效** —— 按域取用统一走 `app.agent.chapter_catalog.image_caption`，
+#    复垦域不会读到这张表（否则复垦图片会被盖上稳评图注）。
+IMAGE_CAPTION_FALLBACK = {
+    "announcement": "拟征收土地位置示意图（公告附图）",
+    "photo": "现场调查照片", "meeting": "群众座谈会照片",
+    "review": "专家评审会照片", "opinion": "专家评审意见",
+    "survey": "调查表", "map": "拟征收地块位置示意图",
+    "survey_map": "拟征收地块勘测定界图",
+}
+
 # 🔴 附件图片分类（权威规范：其余图片按此进附件）
 APPENDIX_IMAGE_CATEGORIES = [
     ("附件1 征地红线图", ["红线", "红线图"]),
@@ -256,13 +268,17 @@ def _classify_appendix(name: str, folder_hint: str = "") -> str:
     return "其他资料图片"
 
 
-def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict] = None) -> Dict:
+def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict] = None,
+                        domain: str = "stability") -> Dict:
     """Scan all user-uploaded files and build a structured image catalog.
 
     Args:
         uploaded_files: List of file paths or dicts with path/original_name.
         ai_classifications: Optional AI vision classification results from deep_material_analyzer.
             Format: {"map": [path, ...], "announcement": [...], "photo": [...], ...}
+        domain: 报告域。`章→图规格` 与 `图注` 均**按域取**（见
+            `app.agent.chapter_catalog.chapter_image_specs` / `.image_caption`）——
+            稳评(默认)逐字不变；复垦不复用稳评的图注。
 
     Returns: {
         "total": N,
@@ -271,6 +287,10 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         "catalog": [{path, name, category, display_name}, ...]
     }
     """
+    # 🔴 章→图规格、图注一律按域取（收口在 chapter_catalog，不在此处写 `if domain==...`）。
+    from app.agent.chapter_catalog import chapter_image_specs, image_caption
+    _specs = chapter_image_specs(domain)
+
     # Build AI classification lookup: path → ai_category
     ai_lookup = {}
     if ai_classifications:
@@ -424,28 +444,21 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
     # 🔴 第一遍：有「文件夹→章节」确定性提示的图，直接绑定到对应章节，不参与竞争
     for img in catalog:
         hint = img.get("chapter_hint")
-        if not hint or hint not in CHAPTER_IMAGE_SPECS:
+        if not hint or hint not in _specs:
             continue
         ch_images = by_chapter.setdefault(hint, [])
         # 找到该章节里 type 匹配的 spec，用于取 label
-        specs = CHAPTER_IMAGE_SPECS[hint]
+        specs = _specs[hint]
         # 优先挂到能匹配 category 的 spec；匹配不上就用第一个 spec 的 label
         matched = next((s for s in specs if s["type"] == img["category"]), None)
-        if img.get("rule_label"):
-            # 🔴 材料规则已经给出了确定性的图注标签（公示照片 / 调查表 / 网络舆情搜索截图…），
-            #    直接用，不再按类别猜 —— 猜的结果就是把「座谈会签到表」标成「调查表」。
-            label = img["rule_label"]
-        elif matched:
-            label = matched["label"]
-        else:
-            # 🔴 类别在本书没有对应规格时，别一律套 specs[0] 的标签——
-            #    否则「位置示意图」和「公告附图」会重名（图1-1/图1-2 同名）。
-            _FALLBACK = {"announcement": "拟征收土地位置示意图（公告附图）",
-                         "photo": "现场调查照片", "meeting": "群众座谈会照片",
-                         "review": "专家评审会照片", "opinion": "专家评审意见",
-                         "survey": "调查表", "map": "拟征收地块位置示意图",
-                         "survey_map": "拟征收地块勘测定界图"}
-            label = _FALLBACK.get(img["category"]) or specs[0]["label"]
+        # 🔴 图注**按域取**（稳评=材料规则标签 > 命中规格标签 > 按类别兜底表 > 首规格标签；
+        #    复垦=「章标题+示意图」，绝不复用稳评图注）。见 chapter_catalog.image_caption。
+        label = image_caption(
+            domain, hint, img["category"],
+            rule_label=img.get("rule_label", ""),
+            spec_label=(matched or {}).get("label", ""),
+            first_spec_label=(specs[0]["label"] if specs else ""),
+        )
         # 不超过该 spec 的 max
         existing_of_label = sum(1 for x in ch_images if x["label"] == label)
         max_of_label = (matched or specs[0]).get("max", 3)
@@ -457,11 +470,11 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
 
     # 🔴 第二遍：无提示的图走类别竞争兜底（维持原逻辑）
     # Process chapters with most specific requirements first
-    chapter_order = sorted(CHAPTER_IMAGE_SPECS.keys(),
-                           key=lambda ch: sum(s["max"] for s in CHAPTER_IMAGE_SPECS[ch]))
+    chapter_order = sorted(_specs.keys(),
+                           key=lambda ch: sum(s["max"] for s in _specs[ch]))
 
     for ch_num in chapter_order:
-        specs = CHAPTER_IMAGE_SPECS[ch_num]
+        specs = _specs[ch_num]
         ch_images = by_chapter.setdefault(ch_num, [])
         for spec in specs:
             # 🔴 先算当前该 label 已绑定数（第一遍 hint 绑定 + 本遍已填），不超过 max
@@ -484,7 +497,7 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
 
     # 🔴 Find missing (accounting for dedup)
     missing = []
-    for ch_num, specs in CHAPTER_IMAGE_SPECS.items():
+    for ch_num, specs in _specs.items():
         ch_imgs = by_chapter.get(ch_num, [])
         for spec in specs:
             count = sum(1 for img in ch_imgs if img["type"] == spec["type"])

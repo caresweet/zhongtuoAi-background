@@ -75,7 +75,8 @@ async def build_state(materials: Path):
     # 图片目录（章节归属）
     try:
         state["_img_catalog"] = build_image_catalog(
-            files, ai_classifications=state.get("_classified_images"))
+            files, ai_classifications=state.get("_classified_images"),
+            domain=state.get("_domain", "stability"))
         _bc = state["_img_catalog"].get("by_chapter", {})
         print("🖼️ 图片归属：" + (", ".join(f"第{k}章 {len(v)} 张" for k, v in sorted(_bc.items())) or "无"))
     except Exception as e:

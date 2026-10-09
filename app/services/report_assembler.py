@@ -4740,7 +4740,8 @@ class ReportAssembler:
                                        "original_name": item.get("original_name")
                                                         or os.path.basename(str(item["path"]))})
         img_catalog = build_image_catalog(uploaded_items,
-                                          ai_classifications=state.get("_classified_images"))
+                                          ai_classifications=state.get("_classified_images"),
+                                          domain=self._domain)
         # 🔴 图片**按类别各自限量**，不做「全局优先级截断」。
         #    旧做法把全部图按 map>announcement>photo>… 排序截断到 N 张，
         #    结果公示/现场/座谈照片（photo）被公告与 PDF 内嵌图挤掉，正文一张图都没有。

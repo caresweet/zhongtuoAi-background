@@ -638,14 +638,20 @@ def full_guardrail_check(
                                      check_required_materials, fixed_assets)
 
     # 域自定义护栏（DomainConfig.guardrails 早已存在，此前无人读）
+    #
+    # 🔴 只对非稳评域生效：稳评的 `DomainConfig.guardrails` 在本分支出现前**从未被读过**，
+    #    它的两条（空串 + 一句不会逐字出现在报告里的话）本就不参与 `total_issues`。
+    #    本分支若对稳评也跑一遍，就成了「首次读取」——即便当下计数不变，也破坏了
+    #    「稳评调用逐字节等于改动前」这一硬约束。故稳评直接跳过：不读、不计。
     domain_issues = []
-    try:
-        from app.domains import get_domain
-        for rule in (get_domain(domain).guardrails or []):
-            if rule and rule in markdown:
-                domain_issues.append(f"[{domain}] 命中域护栏：{rule}")
-    except Exception:
-        pass
+    if domain != "stability":
+        try:
+            from app.domains import get_domain
+            for rule in (get_domain(domain).guardrails or []):
+                if rule and rule in markdown:
+                    domain_issues.append(f"[{domain}] 命中域护栏：{rule}")
+        except Exception:
+            pass
 
     # Count total issues
     report["total_issues"] = (

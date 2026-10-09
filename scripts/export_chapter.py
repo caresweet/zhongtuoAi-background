@@ -45,6 +45,10 @@ def main():
         if not md and not _is_review:
             print(f"第{n}章无内容"); continue
         a = ReportAssembler()
+        # 🔴 按会话 state 钉住域 —— 否则 `_prepare_image_catalog` 会用类默认值
+        #    "stability"，复垦单章导出会被盖上稳评图注（`assemble()` 里同样一行）。
+        from app.domains import domain_of_state
+        a._domain = domain_of_state(state)
         a._inserted_images = set(); a._chapter_image_counter = {}
         a._system_rendered_tables = set(); a._rendered_extracted_tbls = set()
         a._session_state = state

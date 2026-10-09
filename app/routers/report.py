@@ -2200,7 +2200,6 @@ async def generate_chapter(session_id: str, request: dict, user: User = Depends(
         raise HTTPException(status_code=404, detail="Session not found")
 
     async def event_generator():
-        from app.services.workflow_service import workflow_service
         from app.services.llm_service import llm_service
         from app.agent.agents.chapter_orchestrator import ChapterOrchestrator
 
@@ -2208,12 +2207,23 @@ async def generate_chapter(session_id: str, request: dict, user: User = Depends(
         stream_queue = asyncio.Queue()
 
         orchestrator = ChapterOrchestrator(llm_service=llm_service)
+        # 🔴 逐章生成边跑边推的事件，走的是**编排器自身的** `_stream_queue`
+        #    （`run_full_pipeline` 里就是这么挂的），它**不是** `_generate_single_chapter`
+        #    的参数。不在这里挂上队列，生成照跑但事件全落空，前端只能干等「生成中...」。
+        orchestrator._stream_queue = stream_queue
+
+        # 🔴 `_generate_single_chapter(ch_num, state, chapter_data_packages)` 的**第三个参数是
+        #    本章数据包 dict（键=章号）**，不是事件队列 —— 与 `_generate_all_chapters_parallel`
+        #    和质量审查重写两处既有调用点同源，取值点同为 `state["_chapter_data_packages"]`。
+        chapter_data_packages = state.get("_chapter_data_packages") or {}
 
         task = asyncio.create_task(
-            orchestrator.generate_single_chapter(chapter, state, stream_queue)
+            orchestrator._generate_single_chapter(chapter, state, chapter_data_packages)
         )
 
-        while not task.done():
+        # 任务结束的瞬间队列里往往还剩尾部事件（章节流结尾、validation_result 等），
+        # 故必须排空队列再退出，否则前端看不到本章收尾。
+        while not (task.done() and stream_queue.empty()):
             try:
                 event_data = await asyncio.wait_for(stream_queue.get(), timeout=5.0)
                 event_type = event_data.get("event", "message")
@@ -2225,8 +2235,9 @@ async def generate_chapter(session_id: str, request: dict, user: User = Depends(
                 yield f"event: thinking\ndata: {json.dumps({'content': '⏳ 生成中...'}, ensure_ascii=False)}\n\n"
 
         try:
-            state = await task
-            session.state = state
+            # `_generate_single_chapter` 就地写回 state（章节内容/知识缓存等），且 state 与
+            # session.state 是同一对象，无需再赋值 —— 它返回的是 bool，不是 state。
+            await task
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'message': str(e), 'recoverable': True}, ensure_ascii=False)}\n\n"
 

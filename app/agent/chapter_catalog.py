@@ -354,6 +354,132 @@ def requirements_block(domain: str | None, min_words: int, max_words: int) -> st
 
 
 # ═══════════════════════════════════════════════════════════════
+# 默认单章 system prompt（`chapter_base._default_system_prompt`）按域取值
+# ═══════════════════════════════════════════════════════════════
+# `ChapterOrchestrator` 路径（前端「生成某章」走的就是它）**不设** `_use_custom_prompt`，
+# 故这套默认提示词就是模型实际收到的 system prompt —— 它原先满篇稳评：身份叫「资深稳评
+# 工程师」、规范写 DB32/T4013、结构/小标题/模板底稿/表格骨架全取自稳评目录，于是复垦章
+# 由稳评工程师按稳评章结构写出来。下面把**随域而变**的几处收口到这里；通用规则
+# （AI 套词禁令、第一/第二/第三禁令、禁编造、真人工程师口吻、实施单位提示、结构注入
+# 机制）在 chapter_base 原地保留、逐字不变。稳评（默认域）取值逐字等于改动前。
+
+def chapter_persona(domain: str | None) -> str:
+    """默认单章 system prompt 的「身份首句」（按域）。
+
+    🔴 与 `report_persona` 不同：那是 `master_orchestrator.build_chapter_prompt`
+       那条路的身份串；这里是 `ChapterOrchestrator` 默认提示词的身份串 —— 稳评那份是
+       「你是一位资深稳评工程师，长期做土地征收社会稳定风险评估。」（逐字不变）。
+       复垦取其域配置的 `identity_prompt`（= `RECLAMATION_IDENTITY_PROMPT`）。
+    """
+    if domain == _RECLAMATION:
+        from app.domains.reclamation import RECLAMATION_IDENTITY_PROMPT
+        return RECLAMATION_IDENTITY_PROMPT
+    return "你是一位资深稳评工程师，长期做土地征收社会稳定风险评估。"
+
+
+def chapter_principle_lead(domain: str | None) -> str:
+    """「核心原则」首条 —— 组织内容所依据的规范（按域）。
+
+    稳评逐字等于改动前首条（DB32/T4013-2021）；复垦换成其编制依据
+    （《土地复垦条例》《土地复垦条例实施办法》与 TD/T 1031 系列编制规程，
+    见 `reclamation.py` 的 `RECLAMATION_IDENTITY_PROMPT`）。
+    """
+    if domain == _RECLAMATION:
+        return ("依据《土地复垦条例》《土地复垦条例实施办法》与 TD/T 1031 系列"
+                "编制规程，结合复垦方案编制经验组织内容")
+    return "根据DB32/T4013-2021规范和你8年的实战经验来组织内容"
+
+
+def chapter_transition_examples(domain: str | None) -> str:
+    """「鼓励」块里的基层过渡语示例行（按域，含行首 `- ` 与行尾换行）。
+
+    稳评的「入户走访/社区书记」是土地征收稳评的公众参与语汇；复垦换成它的
+    现场作业与权属人口径（「现场查勘」对应勘测定界，「权属人意见」见
+    `reclamation.py` 的 data_categories）。稳评逐字不变。
+    """
+    if domain == _RECLAMATION:
+        return "- 基层过渡语：「结合现场查勘」「根据权属人意见」\n"
+    return "- 基层过渡语：「结合入户走访」「根据社区书记反馈」\n"
+
+
+# 「数据归位铁律」块（按域）—— 告诉模型「哪类数据该落在哪一章」。
+# 🔴 稳评那份逐字等于改动前 `chapter_base` 内联的七行（含块尾换行、块后无空行）。
+#    复垦那份由 `reclamation_definitions` 的十章节结构逐条推导，**不复用稳评章号**；
+#    稳评里没有复垦对应物的规则（如「四性分析」「问卷/座谈支持率」）一律不带过来。
+_STABILITY_DATA_IRON_RULE = (
+    "## 🔴 数据归位铁律（本报告各章数据各归其位，不得越界、不得重复）\n"
+    "- 项目概况类数据（征收面积/地类面积/四至/户数）只在第4章「决策事项基本情况」出现，后续章节不得重复罗列\n"
+    "- 勘测定界数据（各地类/各权属单位面积）只属于第4章，不得出现在第7章四性分析\n"
+    "- 问卷/座谈数据（份数、支持率、参会人数、诉求）只属于第6章「各利益相关者对决策事项的反映」\n"
+    "- 风险因素与评分只属于第8章「分析预测风险源」；防范化解措施只属于第9章\n"
+    "- 文号（如洪拟征告〔2026〕X号）必须严格来自「可用数据」里的真实文号，绝不编造、不改号、不抄范文里的文号\n"
+    "- 同一数据全文只写一次，避免同一组数字在多章反复出现\n"
+)
+
+# 复垦版：逐条对应 RECLAMATION_CHAPTER_DEFINITIONS 的章名与「key_tables / sections」。
+_RECLAMATION_DATA_IRON_RULE = (
+    "## 🔴 数据归位铁律（本报告各章数据各归其位，不得越界、不得重复）\n"
+    "- 第1章「前言」的复垦方案摘要只作概述：服务年限、各类土地面积、土地损毁情况、复垦目标、投资情况各以结论性数字点到为止，明细归各自专章，不得展开\n"
+    "- 项目基础信息（项目名称、建设单位/复垦义务人、临时用地位置、服务年限）在第3章「项目概况」集中交代，后续章节需要时以通称指代，不再重复罗列\n"
+    "- 土地利用现状与地类构成只在第3章「项目概况·项目区土地利用状况」与第4章「复垦区土地利用状况」出现，其他章不得重复罗列地类面积明细\n"
+    "- 土地损毁分析与评定、复垦适宜性评价、水土资源平衡、生态保护红线及生态空间管控分析、复垦的目标任务只属于第4章「土地复垦方向可行性分析」\n"
+    "- 复垦质量要求与预防控制、复垦（工程/生物化学/永久基本农田）、监测、管护各项措施只属于第5章「土地复垦质量要求与复垦措施」\n"
+    "- 工程设计及工程量测算数据只属于第6章「土地复垦工程设计及工程量测算」\n"
+    "- 投资估算数据（工程施工费、设备购置费、其他费用、监测管护费、预备费、动态总投资）只属于第7章「土地复垦投资估算」，其他章只能引用其结论数字，不得重复估算过程与费用明细\n"
+    "- 复垦工作计划与费用安排（分期、进度）只属于第8章「土地复垦工作计划安排」\n"
+    "- 效益数据（社会效益、生态效益、经济效益、复垦后耕地质量）只属于第9章「土地复垦效益分析」\n"
+    "- 文号（批复/备案文号）必须严格来自「可用数据」里的真实文号，绝不编造、不改号、不抄范文里的文号\n"
+    "- 同一数据全文只写一次，避免同一组数字在多章反复出现\n"
+)
+
+
+def chapter_data_iron_rule(domain: str | None) -> str:
+    """默认单章 system prompt 的「数据归位铁律」块（按域，含块尾换行）。"""
+    if domain == _RECLAMATION:
+        return _RECLAMATION_DATA_IRON_RULE
+    return _STABILITY_DATA_IRON_RULE
+
+
+def headings_for_prompt(domain: str | None, chapter_number: int) -> str:
+    """默认单章 system prompt 的「标准子标题」块（按域）。
+
+    稳评：委托 `template_headings.format_headings_for_prompt`（逐字不变）。
+    复垦：不单独给子标题 —— 其小节名与 `X.Y` 编号已由 `sections_for_prompt`
+          （「本章结构规范」块）逐条列出，再出一份就是重复，故返回空串。
+    """
+    if domain == _RECLAMATION:
+        return ""
+    from app.agent.template_headings import format_headings_for_prompt
+    return format_headings_for_prompt(chapter_number)
+
+
+def template_block_for_prompt(domain: str | None, chapter_number: int) -> str:
+    """默认单章 system prompt 的「人工模板底稿」块（按域）。
+
+    稳评：委托 `template_chapter_chunker.build_template_block_for_prompt`（逐字不变）。
+    复垦：公司标准模板库目前只有稳评模板，复垦无底稿 —— 返回空串，绝不把
+          稳评模板底稿当作复垦章的「行文基准」注入。
+    """
+    if domain == _RECLAMATION:
+        return ""
+    from app.services.template_chapter_chunker import build_template_block_for_prompt
+    return build_template_block_for_prompt(chapter_number)
+
+
+def table_skeletons(domain: str | None, chapter_number: int) -> Dict[str, Any]:
+    """该域某章的「模板表格骨架」表 `{表名: {columns, fill_types, ...}}`（按域）。
+
+    稳评：`knowledge_agent.TEMPLATE_TABLE_SKELETONS`（逐字不变）。
+    复垦：该表是从稳评报告模板里提取的（如第3章「拟征收土地基本情况表」），
+          复垦无对应骨架 —— 返回 `{}`，绝不把稳评表结构塞进复垦章。
+    """
+    if domain == _RECLAMATION:
+        return {}
+    from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
+    return TEMPLATE_TABLE_SKELETONS.get(chapter_number, {})
+
+
+# ═══════════════════════════════════════════════════════════════
 # 主对话「身份串」按域取值（master 问候 / report.py 聊天兜底 system prompt）
 # ═══════════════════════════════════════════════════════════════
 # 这两处原先各写死一句稳评自我介绍 —— 复垦会话说「你好」会被当成「社会稳定风险评估

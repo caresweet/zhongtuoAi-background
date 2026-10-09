@@ -108,6 +108,10 @@ class ChapterAgentBase(BaseAgent):
     # 子类若已自带完整的检索词（如复垦章），置 True 以免再拼上稳评那份的查询模板。
     # 默认 False —— 稳评章的检索串与改动前逐字一致。
     rag_query_complete: bool = False
+    # 报告域标识 —— `_default_system_prompt` 据此经 `chapter_catalog` 取身份/规范/
+    # 结构来源（本文件不写 `if domain == ...`）。默认 stability，与改动前逐字一致；
+    # 复垦章基类覆盖为 "reclamation"。
+    domain: str = "stability"
 
     def __init__(self, llm_service=None):
         super().__init__(llm_service=llm_service)
@@ -1787,8 +1791,16 @@ class ChapterAgentBase(BaseAgent):
     # ---- Default Prompt Templates ----
 
     def _default_system_prompt(self, state: dict) -> str:
-        """Default system prompt for chapter generation — 去AI化风格."""
-        project_name = state.get("report_title", "本项目")
+        """Default system prompt for chapter generation — 去AI化风格.
+
+        🔴 随域而变的部分（身份/规范/数据归位铁律/结构来源）一律经 `chapter_catalog`
+           收口，本文件不写 `if domain == ...`；domain 取类属性 `self.domain`
+           （复垦章基类覆盖为 "reclamation"）。通用规则原地保留、逐字不变，
+           稳评（默认域）整段等于改动前。
+        """
+        from app.agent import chapter_catalog
+
+        domain = self.domain
 
         # 🔴 实施单位取**本报告所属公司**（字段校验阶段已按公司填好）；
         #    取不到就明确告诉模型「不要写具体单位名」——
@@ -1796,17 +1808,8 @@ class ChapterAgentBase(BaseAgent):
         _impl_unit_hint = str(((state.get("filled_data") or {}).get("implement_unit")) or "").strip() \
             or "（本报告未提供实施单位，相关位置写「待填写」，不得写入任何具体公司名）"
 
-        kb_ctx = get_knowledge_context_for_chapter(state, self.chapter_number)
-        kb_spec = kb_ctx.get("structure_spec", {})
-        kb_constraints = kb_ctx.get("writing_constraints", {})
-
-        sections_list = kb_constraints.get("sections", [])
-        required_tables = kb_constraints.get("required_tables", [])
-        min_w = kb_constraints.get("min_words", 600)
-        max_w = kb_constraints.get("max_words", 3500)
-
-        from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
-        has_skeletons = bool(TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {}))
+        # 🔴 表格骨架（按域）：复垦无稳评模板骨架 → 空，不注入「表格填充规则」。
+        has_skeletons = bool(chapter_catalog.table_skeletons(domain, self.chapter_number))
 
         skeleton_rule = ""
         if has_skeletons:
@@ -1816,31 +1819,29 @@ class ChapterAgentBase(BaseAgent):
                 "固定列一字不改，数据列缺失填【待补充】。\n"
             )
 
+        # 🔴 标准小标题约束（按域；复垦的小节名已并入「本章结构规范」→ 空）
         try:
-            from app.agent.template_headings import format_headings_for_prompt
-            heading_constraint = format_headings_for_prompt(self.chapter_number)
+            heading_constraint = chapter_catalog.headings_for_prompt(domain, self.chapter_number)
         except Exception:
             heading_constraint = ""
 
-        # 🔴 章节二级标题结构规范（含每节内容要点/数据/图片规格）
+        # 🔴 章节二级标题结构规范（含每节内容要点/数据/图片规格，按域）
         try:
-            from app.agent.chapter_definitions import format_sections_for_prompt
-            section_spec = format_sections_for_prompt(self.chapter_number)
+            section_spec = chapter_catalog.sections_for_prompt(domain, self.chapter_number)
         except Exception:
             section_spec = ""
 
-        # 🔴 本章「人工模板底稿」：从公司标准模板切出本章对应文本，作为结构与行文基准
+        # 🔴 本章「人工模板底稿」：从公司标准模板切出本章对应文本，作为结构与行文基准（按域）
         try:
-            from app.services.template_chapter_chunker import build_template_block_for_prompt
-            template_block = build_template_block_for_prompt(self.chapter_number)
+            template_block = chapter_catalog.template_block_for_prompt(domain, self.chapter_number)
         except Exception:
             template_block = ""
 
         return (
-            f"你是一位资深稳评工程师，长期做土地征收社会稳定风险评估。\n"
+            f"{chapter_catalog.chapter_persona(domain)}\n"
             f"根据你的专业经验撰写第{self._chapter_num_cn()}章「{self.chapter_title}」。\n\n"
             f"## 核心原则\n"
-            f"- 根据DB32/T4013-2021规范和你8年的实战经验来组织内容\n"
+            f"- {chapter_catalog.chapter_principle_lead(domain)}\n"
             f"- 🔴 严格按下方「本章结构规范」的二级标题逐一撰写，禁止新增/删减/合并/改名标题\n"
             f"- 🔴 每个二级标题下必须有实质内容，禁止标题后空白\n"
             f"- 🔴 所有地名只能用「可用数据 / 事实卡」里的真实地名，禁止使用任何其他地名\n\n"
@@ -1849,13 +1850,7 @@ class ChapterAgentBase(BaseAgent):
             f"- 禁止「第一/第二/第三」工整排比\n"
             f"- 禁止编造数据，用户没提供的写规范话术（如「以现状调查确认结果为准」）\n"
             f"- 禁止AI翻译腔，像真人工程师写报告\n\n"
-            f"## 🔴 数据归位铁律（本报告各章数据各归其位，不得越界、不得重复）\n"
-            f"- 项目概况类数据（征收面积/地类面积/四至/户数）只在第4章「决策事项基本情况」出现，后续章节不得重复罗列\n"
-            f"- 勘测定界数据（各地类/各权属单位面积）只属于第4章，不得出现在第7章四性分析\n"
-            f"- 问卷/座谈数据（份数、支持率、参会人数、诉求）只属于第6章「各利益相关者对决策事项的反映」\n"
-            f"- 风险因素与评分只属于第8章「分析预测风险源」；防范化解措施只属于第9章\n"
-            f"- 文号（如洪拟征告〔2026〕X号）必须严格来自「可用数据」里的真实文号，绝不编造、不改号、不抄范文里的文号\n"
-            f"- 同一数据全文只写一次，避免同一组数字在多章反复出现\n"
+            f"{chapter_catalog.chapter_data_iron_rule(domain)}"
             f"## 🚫 范文数据一律作废（最重要）\n"
             f"- 范文/参考里的所有具体数字（面积/地类/户数/文号/村组名）都是**别的项目的示例数据**，一个字都不能抄\n"
             f"- 你只能从「可用数据」里取真实数据。范文数字只是让你看「该在哪写什么类型的数据」，不是让你抄数值\n"
@@ -1869,7 +1864,7 @@ class ChapterAgentBase(BaseAgent):
             f"- 空话凑字数（如「各单位应高度重视」）一律禁止，宁可短，不要空\n\n"
             f"## ✅ 鼓励\n"
             f"- 段落长短错落，短句穿插长段\n"
-            f"- 基层过渡语：「结合入户走访」「根据社区书记反馈」\n"
+            f"{chapter_catalog.chapter_transition_examples(domain)}"
             f"- 结论适度模糊：「大概率」「初步判断」「需重点关注」\n"
             f"- 政策引用精简，只列本章直接相关的\n"
             f"- 实施单位：{_impl_unit_hint}\n"
@@ -1921,9 +1916,11 @@ class ChapterAgentBase(BaseAgent):
             prev_summary += "\n"
 
         # 🔴 Build the table format enforcement (at END for recency bias)
-        from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
+        #    表格骨架按域取（经 chapter_catalog）—— 复垦无稳评模板骨架，不注入
+        #    「拟征收土地基本情况表」这类稳评表名。
+        from app.agent import chapter_catalog
         table_enforcement = ""
-        skeletons = TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {})
+        skeletons = chapter_catalog.table_skeletons(self.domain, self.chapter_number)
         if skeletons:
             table_names = list(skeletons.keys())
             table_enforcement = (
@@ -2161,9 +2158,10 @@ class ChapterAgentBase(BaseAgent):
         Called from act() after _build_llm_prompt, so it's always appended to the user prompt
         regardless of whether the per-chapter agent overrides prompt building.
         """
-        from app.agent.agents.knowledge_agent import TEMPLATE_TABLE_SKELETONS
+        # 表格骨架按域取（经 chapter_catalog）：复垦无稳评模板骨架 → 空串。
+        from app.agent import chapter_catalog
 
-        skeletons = TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {})
+        skeletons = chapter_catalog.table_skeletons(self.domain, self.chapter_number)
         if not skeletons:
             return ""
 
@@ -2202,15 +2200,16 @@ class ChapterAgentBase(BaseAgent):
     def _build_kb_context_section(self, state: dict) -> str:
         """从KnowledgeAgent缓存构建知识库上下文段落，注入到user prompt中"""
         from app.agent.agents.knowledge_agent import (
-            TEMPLATE_TABLE_DATA_RULES,
-            TEMPLATE_TABLE_SKELETONS, RISK_LEVEL_CRITERIA,
+            TEMPLATE_TABLE_DATA_RULES, RISK_LEVEL_CRITERIA,
         )
+        from app.agent import chapter_catalog
 
         kb_ctx = get_knowledge_context_for_chapter(state, self.chapter_number)
         parts = []
 
         # 🔴🔴 表格骨架（最重要！从模板提取的完整表格结构，标注哪些列固定、哪些需填入数据）
-        table_skeletons = TEMPLATE_TABLE_SKELETONS.get(self.chapter_number, {})
+        #    按域取（经 chapter_catalog）：复垦无稳评模板骨架 → 空。
+        table_skeletons = chapter_catalog.table_skeletons(self.domain, self.chapter_number)
         if table_skeletons:
             parts.append("## 🔒 模板表格骨架（必须严格遵循！）\n")
             parts.append(

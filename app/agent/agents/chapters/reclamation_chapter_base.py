@@ -25,6 +25,10 @@ class ReclamationChapterAgentBase(ChapterAgentBase):
     #    「社会稳定风险评估…」的措辞，把稳评素材检索进来。
     rag_query_complete = True
 
+    # 🔴 域标识：`_default_system_prompt` 据此经 chapter_catalog 取复垦身份/规范/
+    #    结构来源，不再顶着「资深稳评工程师 + DB32/T4013 + 稳评章结构」写复垦正文。
+    domain = "reclamation"
+
     def __init__(self, llm_service=None):
         super().__init__(llm_service=llm_service)
         from app.agent.reclamation_definitions import (

@@ -1922,7 +1922,7 @@ class ChapterAgentBase(BaseAgent):
         if prev_chapters:
             prev_summary = "## 前序章节关键信息\n"
             for ch_num, ch_content in prev_chapters.items():
-                facts = self._extract_key_facts(str(ch_content))
+                facts = self._extract_chapter_facts(str(ch_content))
                 prev_summary += f"### 第{self._num_to_cn(ch_num)}章: {facts}\n"
             prev_summary += "\n"
 

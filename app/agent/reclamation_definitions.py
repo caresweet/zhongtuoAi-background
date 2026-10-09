@@ -208,6 +208,33 @@ def get_reclamation_chapter_kind(chapter_number: int) -> str:
     return RECLAMATION_CHAPTER_KIND.get(chapter_number, "fact")
 
 
+def extract_reclamation_key_facts(md: str) -> str:
+    """从复垦章节 markdown 提取关键数据点（面积/位置/复垦方向/年限/投资/损毁）。
+
+    与稳评的 `master_orchestrator._extract_key_facts` **同职不同词表**：稳评那套找的是
+    风险等级/问卷数/户数，套在复垦正文上一条都命中不了，前序章节摘要会全空。
+
+    用途：把前序章节压成几个数据点塞进本章提示词（见 `ChapterAgentBase._extract_key_facts`），
+    避免整章 markdown 灌进上下文。
+    """
+    import re as _re
+    patterns = [
+        (r'(?:总面积|复垦面积|损毁面积|面积)[为：:约]*\s*(\d+\.?\d*\s*(?:亩|公顷|hm2|hm²|㎡|平方米))', "面积"),
+        (r'(?:位于|坐落|位置)[为：:约]*\s*([^\s，。]{2,20}(?:街道|镇|社区|村))', "位置"),
+        (r'(?:复垦方向|复垦为|复垦利用方向)[为：:约]*\s*([^\s，。；]{2,20})', "复垦方向"),
+        (r'(?:服务年限|复垦服务年限|方案服务年限)[为：:约]*\s*(\d+\.?\d*\s*年)', "服务年限"),
+        (r'(?:总投资|静态总投资|动态总投资)[为：:约]*\s*(\d+\.?\d*\s*万元)', "投资"),
+        (r'(?:损毁类型|土地损毁类型)[为：:约]*\s*([^\s，。；]{2,20})', "损毁类型"),
+        (r'(?:复垦率|土地复垦率)[为：:约]*\s*(\d+\.?\d*\s*%)', "复垦率"),
+    ]
+    facts = []
+    for pattern, label in patterns:
+        m = _re.search(pattern, md)
+        if m and not any(label in f for f in facts):
+            facts.append(f"{label}:{m.group(1).strip()[:30]}")
+    return "；".join(facts[:8]) if facts else ""
+
+
 # ═══════════════════════════════════════════════════════════════
 # 正文配图规格（章 → 图）—— 唯一事实源
 # ═══════════════════════════════════════════════════════════════

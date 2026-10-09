@@ -2357,19 +2357,18 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             _shared_logs.append(labels[phase])
         cur = steps.get("current_chapter", 0)
         if cur > 0:
-            from app.agent.chapter_definitions import TOTAL_CHAPTERS
-            msg = f"  ✅ 已完成 {cur}/{TOTAL_CHAPTERS} 章"
+            # 🔴 总章数按域取：复垦 10 章、稳评 14 章。写死稳评的 14 会给复垦
+            #    显示「已完成 X/14 章」，进度条也永远到不了 100%。
+            from app.agent.chapter_catalog import total_chapters as _total_ch
+            from app.domains import domain_of_state
+            _total = _total_ch(domain_of_state(state))
+            msg = f"  ✅ 已完成 {cur}/{_total} 章"
             if msg not in _shared_logs: _shared_logs.append(msg)
         try:
             await ws_manager.send(sid, "step_progress", {"step": phase, "status": "running", "step_statuses": steps})
             if cur > 0:
-                # 🔴 `total` 必须是 **TOTAL_CHAPTERS（14）**，不能写死 10 ——
-                #    前端进度条按 `10 + (cur/total)*75` 算，写死 10 的话
-                #    第 10 章就跑到 85%，剩下 4 章进度条纹丝不动
-                #    （业主反馈的「进度条与实际报告完成不符」）。
-                #    上一行刚 import 了 TOTAL_CHAPTERS，这里却写死 —— 抄漏了。
                 await ws_manager.send(sid, "chapter_progress",
-                                      {"current": cur, "total": TOTAL_CHAPTERS,
+                                      {"current": cur, "total": _total,
                                        "status": "generating"})
         except: pass
     set_workflow_progress_callback(_progress_cb)

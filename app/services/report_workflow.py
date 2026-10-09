@@ -849,6 +849,10 @@ async def _bridge_agent_events(q: asyncio.Queue, session_id: str, logs: Optional
             return
         ev_name = evt.get("event", "")
         ev_data = evt.get("data") or {}
+        # 🔴 结束哨兵：本章生成完由生成侧投递，桥把队列里剩余事件转发完后**自己退出**。
+        #    没有它就只能靠 `cancel()` —— 实测取消不生效，得干等 5s 超时（每章 5s）。
+        if ev_name == "_end":
+            return
         if ev_name == "thinking":
             content = ev_data.get("content", "") or ""
             # 工具调用提示（"🔧 调用工具..."）优先写入日志面板
@@ -1305,9 +1309,22 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     except Exception as e:
         logger.error(f"Ch{ch_num} gen failed: {e}")
     finally:
+        # 🔴 事件桥必须「投哨兵 + 取消 + 有上限地等」，**不能裸 `await relay_task`**。
+        #    `_bridge_agent_events` 长期停在 `asyncio.wait_for(q.get(), 0.5)` 上，
+        #    实测 `cancel()` 之后 `await relay_task` **永不返回** —— 整个图就此停摆：
+        #    日志停在「[GEN] 第N章…生成」**之前**、进程 0% CPU、无任何网络连接，
+        #    既不报错也不超时（`Ch{n} gen failed/timeout` 都不会打）。
+        #    先投哨兵让它把余下事件转发完主动退出；再给 5s 兜底上限，
+        #    超时也照样前进 —— 桥只是转发事件的旁路，绝不能拖住正文生成。
+        try:
+            q.put_nowait({"event": "_end", "data": {}})
+        except Exception:
+            pass
         relay_task.cancel()
         try:
-            await relay_task
+            await asyncio.wait_for(relay_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"事件桥 5s 内未退出（ch{ch_num}），放弃等待，继续生成")
         except asyncio.CancelledError:
             pass
     _mark(state, f"chapter_{ch_num}")  # 🔴 每章生成结束计时

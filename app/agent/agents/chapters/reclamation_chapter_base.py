@@ -37,3 +37,12 @@ class ReclamationChapterAgentBase(ChapterAgentBase):
         if self.chapter_number:
             self.chapter_title = get_reclamation_chapter_title(self.chapter_number)
             self.rag_query_extra = get_reclamation_chapter_rag_query(self.chapter_number)
+
+    def _extract_chapter_facts(self, text: str) -> str:
+        """前序章节 → 关键数据点（**复垦词表**，覆盖基类的稳评词表）。
+
+        🔴 基类那套找的是户数/补偿标准/支持率/风险等级 —— 复垦正文里一条都命中不了，
+           前序章节摘要会静默变空，模型看不到前文的数据。
+        """
+        from app.agent.reclamation_definitions import extract_reclamation_key_facts
+        return extract_reclamation_key_facts(text) or "（内容已生成）"

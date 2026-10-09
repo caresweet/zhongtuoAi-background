@@ -615,7 +615,12 @@ class MasterAgent(BaseAgent):
             if is_bidding:
                 resp = "您好！我是招标投标文件编写专家。请上传招标文档（招标公告、招标文件等），我可以帮您生成招标公告、评标报告、中标公示等专业文档。"
             else:
-                resp = "您好！我是社会稳定风险评估报告编制专家。请上传项目资料（PDF/图片）或描述项目基本信息（位置、面积、文号等），我可以帮您生成社会稳定风险评估报告。"
+                # 🔴 非招投标一律按**会话域**取自报家门（稳评「社会稳定风险评估报告编制专家」/
+                #    复垦「土地复垦方案编制专家」）。原先 else 分支写死稳评那句话 ——
+                #    复垦会话说「你好」会被当成稳评专家。招投标那句仍就近内联（不经章目录）。
+                from app.agent.chapter_catalog import chat_greeting
+                from app.domains import domain_of_state
+                resp = chat_greeting(domain_of_state(state))
             await self._emit_message(resp, "text")
             _add_to_history(state, "assistant", resp)
             return {"type": "chat", "message": resp}

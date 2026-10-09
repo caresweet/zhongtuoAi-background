@@ -3265,12 +3265,14 @@ async def ws_chat(websocket: WebSocket, session_id: str):
                     if materials or filled:
                         data_context += "\n如果数据已齐全，请主动建议用户回复「生成报告」开始编写。"
 
+                    # 🔴 身份串按会话域取（稳评「社会稳定风险评估报告编制助手」/ 复垦
+                    #    「土地复垦方案编制助手」）。原先写死稳评那句 —— 复垦会话经 WS
+                    #    聊天兜底时会被当成稳评助手。逐行等于改动前那段，只有身份按域换。
+                    from app.agent.chapter_catalog import chat_system_prompt
+                    from app.domains import domain_of_state
                     system_prompt = (
-                        "你是社会稳定风险评估报告编制助手。\n"
-                        "你的职责：引导用户提供项目信息，解答稳评相关问题。\n"
-                        "如果用户发送了文件或图片，请确认已收到并简要说明文件内容。\n"
-                        "风格：专业但友好，简洁直接，不说废话。\n"
-                        f"{data_context}\n"
+                        chat_system_prompt(domain_of_state(session.state))
+                        + f"{data_context}\n"
                     )
 
                     reply = ""

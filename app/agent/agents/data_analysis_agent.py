@@ -369,9 +369,15 @@ class DataAnalysisAgent(BaseAgent):
         completed = 0
         total = len(scene_images)
 
+        # 🔴 报告名按会话域取（稳评逐字等于原句）。复垦会话的图片分类不应问「放在
+        #    社会稳定风险评估报告的哪一章」。
+        from app.agent.chapter_catalog import report_kind_name
+        from app.domains import domain_of_state
+        _kind = report_kind_name(domain_of_state(state))
+
         classify_prompt = (
             "你是一个工程报告图片分类助手。请用一句话描述这张图片的内容，"
-            "并判断它适合放在社会稳定风险评估报告的哪个章节。\n"
+            f"并判断它适合放在{_kind}的哪个章节。\n"
             "可选章节：1-项目概况(现场照片/地块现状), 3-风险调查(走访/座谈/问卷), "
             "5-风险识别, 8-风险防范措施, 9-风险等级, other-附录/其他\n"
             "请用JSON格式回复：{\"desc\":\"简短描述\",\"chapter\":数字或\"other\"}\n"

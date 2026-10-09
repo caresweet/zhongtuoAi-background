@@ -1518,8 +1518,12 @@ class ChapterOrchestrator:
         tables = ch_data.get("tables") or []
         word_count = len(markdown.replace('\n', '').replace(' ', ''))
 
-        from app.agent.state import CHAPTER_DEFINITIONS
-        title = CHAPTER_DEFINITIONS.get(chapter_num, {}).get("title", f"第{chapter_num}章")
+        # 🔴 章标题按**会话域**取（复垦章号与稳评重合但标题不同：复垦第3章是「项目概况」，
+        #    稳评第3章是「江苏省淮安市社会稳定风险评估评审表」）。原先读死稳评的
+        #    `CHAPTER_DEFINITIONS` —— 复垦用户审核第3章会看到稳评制式表名。
+        #    域从 `state` 取；`chapter_catalog.chapter_title` 的稳评分支逐字等于原取值。
+        from app.agent.chapter_catalog import chapter_title
+        title = chapter_title(domain_of_state(state), chapter_num)
 
         await self._emit("chapter_review_prompt", {
             "chapter": chapter_num, "title": title,
@@ -1536,8 +1540,9 @@ class ChapterOrchestrator:
         """Returns True if data was provided, False if timed out."""
         if not missing_keys: return True
 
-        from app.agent.state import CHAPTER_DEFINITIONS
-        title = CHAPTER_DEFINITIONS.get(chapter_num, {}).get("title", f"第{chapter_num}章")
+        # 🔴 同 `_present_for_review` —— 数据请求 UI 的章标题也按会话域取，不读死稳评目录。
+        from app.agent.chapter_catalog import chapter_title
+        title = chapter_title(domain_of_state(state), chapter_num)
 
         # Build data request
         descs = {

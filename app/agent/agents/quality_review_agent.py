@@ -1146,12 +1146,18 @@ class QualityReviewAgent(BaseAgent):
 
         await self._emit_thinking("🧠 正在进行LLM深度逻辑审核...")
 
+        # 🔴 审核专家身份/报告名按会话域取（稳评逐字等于原句）。复垦会话不应由
+        #    「社会稳定风险评估报告的质量审核专家」来审。
+        from app.agent.chapter_catalog import report_kind_name
+        from app.domains import domain_of_state
+        _kind = report_kind_name(domain_of_state(state))
+
         # Build a condensed version of all chapters for LLM review
         chapter_summaries = merged.get("chapter_summaries", {})
         extracted = merged.get("extracted_values", {})
 
         review_prompt = (
-            "你是一位社会稳定风险评估报告的质量审核专家。请审核以下10章报告的数据一致性和逻辑连贯性。\n\n"
+            f"你是一位{_kind}的质量审核专家。请审核以下10章报告的数据一致性和逻辑连贯性。\n\n"
             f"## 提取的关键数据\n"
             f"项目名称：{extracted.get('project_name', '未知')}\n"
             f"面积：{extracted.get('area_m2', '未知')}㎡ / {extracted.get('area_mu', '未知')}亩\n"
@@ -1189,7 +1195,7 @@ class QualityReviewAgent(BaseAgent):
             result = await asyncio.wait_for(
                 self._llm.chat_with_reasoning(
                     messages=[{"role": "user", "content": review_prompt}],
-                    system="你是一个专业的社会稳定风险评估报告审核专家。只返回JSON格式的审核结果。",
+                    system=f"你是一个专业的{_kind}审核专家。只返回JSON格式的审核结果。",
                     max_tokens=1024,
                     temperature=0.1,
                 ),

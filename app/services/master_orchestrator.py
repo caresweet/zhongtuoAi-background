@@ -220,14 +220,32 @@ def stability_key_labels() -> dict:
     return dict(_STABILITY_KEY_LABELS)
 
 
-def build_project_card(filled_data: Dict[str, Any]) -> str:
+def stability_project_card_labels() -> dict:
+    """返回稳评的「事实卡字段 → 中文标注」映射副本。
+
+    由 `chapter_catalog.project_card_labels("stability")` 取用；复垦另有其口径
+    （`RECLAMATION_KEY_LABELS`，经同一个缝隙函数解析）。默认域逐字等于
+    `_PROJECT_CARD_LABELS` —— 这是「稳评行为不变」的依据。
+    """
+    return dict(_PROJECT_CARD_LABELS)
+
+
+def build_project_card(filled_data: Dict[str, Any], domain: str | None = None) -> str:
     """构建「项目事实卡」：只含已确认的真实项目事实（唯一事实源）。
 
     - 只展示有真实值的字段，缺失字段不出现在卡片上
     - 「待补充」值一律过滤，绝不以占位符形式进卡片
     - 每个值都标注来源出处（文档/用户提供/AI分析），供后续人工核验
+
+    `domain` 决定**字段标注**与三个附带小节（预公告摘录 / 勘测定界明细 / 座谈会记录）
+    的抬头取哪一套 —— 一律经 `app.agent.chapter_catalog` 按域解析（调用点不写
+    `if domain == ...`）。默认 None = 稳评：不传时输出逐字等于改动前（稳评护栏）。
     """
     from app.validation.content_guardrails import _norm_num
+    from app.agent import chapter_catalog as _catalog
+
+    _lex = _catalog.project_card_lexicon(domain)
+    _labels = _lex["fields"]
 
     lines = []
     keys = [
@@ -258,29 +276,15 @@ def build_project_card(filled_data: Dict[str, Any]) -> str:
         v = filled_data.get(k)
         if v is None or str(v).strip() == "" or str(v).strip() == "【待补充】":
             continue
-        label = _PROJECT_CARD_LABELS.get(k, k)
+        label = _labels.get(k, k)
         # 数值类字段：去掉多余的逗号/百分号，保持原文（% 保留以便识别）
         lines.append(f"  {label}：{str(v).strip()}")
 
     # 🔴 预公告正文摘录：征收目的 / 征收范围 / 工作安排 / 其他事项 / 法律依据
     #    这些是公告的正式表述，写报告时必须据此行文，不能只靠文号与位置。
-    _ann_keys = [
-        ("legal_basis_cited", "公告引用的法律法规"),
-        ("preamble_text", "公告前言（决定启动的表述）"),
-        ("purpose_text", "征收目的（公告原文）"),
-        ("purpose_legal_basis", "征收目的法定依据"),
-        ("scope_text", "征收范围（公告原文）"),
-        ("notice_period_text", "公告期限（原文）"),
-        ("work_arrangement_text", "工作安排（公告原文）"),
-        ("other_matters_text", "其他事项（公告原文）"),
-        # 🔴 稳评公示期（用户填开始日 → 系统推算一周），与上面的「公告期限」不是一回事
-        ("publicity_period_text", "稳评公示期（公示期一周）"),
-        ("contact_name", "公告联系人"),
-        ("contact_phone", "公告联系电话"),
-        ("attachment_note", "公告附图说明"),
-    ]
+    #    （抬头与字段标注按域取；复垦无「征收土地预公告」概念 → 字段表为空 = 整块不出现）
     _ann_lines = []
-    for k, label in _ann_keys:
+    for k, label in _lex["ann_fields"]:
         v = filled_data.get(k)
         if v is None or str(v).strip() in ("", "【待补充】"):
             continue
@@ -290,7 +294,7 @@ def build_project_card(filled_data: Dict[str, Any]) -> str:
         _ann_lines.append(f"  {label}：{s}")
     if _ann_lines:
         lines.append("")
-        lines.append("  —— 征收土地预公告正文摘录 ——")
+        lines.append(_lex["ann_heading"])
         lines.extend(_ann_lines)
 
     # 🔴 勘测定界明细（权属构成 / 地类构成 / 界址）：此前 `_land_owners`、
@@ -319,22 +323,21 @@ def build_project_card(filled_data: Dict[str, Any]) -> str:
         _land_lines.append(f"  界址点数（勘测定界）：{_bp}")
     if _land_lines:
         lines.append("")
-        lines.append("  —— 勘测定界明细（第6章 1.5 涉及村组/地类构成、第10章合法性论证用）——")
+        lines.append(_lex["land_heading"])
         lines.extend(_land_lines)
 
     # 🔴 座谈会记录正文（群众诉求 / 讨论情况 / 结论）——第9章「各方意见汇总」的素材。
     #    此前 `public_demands` / `discussion_text` / `conclusion_text` 由 PDF 解析出来
     #    却**没有任何读取点**，第9章只能写空话。
+    #    （抬头与字段标注按域取；复垦无「稳评座谈会」概念 → 字段表为空 = 整块不出现）
     _meet_lines = []
-    for _k, _label in (("public_demands", "座谈会群众诉求（记录原文）"),
-                       ("discussion_text", "座谈讨论情况（记录原文）"),
-                       ("conclusion_text", "座谈结论（记录原文）")):
+    for _k, _label in _lex["meet_fields"]:
         _v = str(filled_data.get(_k) or "").strip()
         if _v:
             _meet_lines.append(f"  {_label}：{_v[:400]}")
     if _meet_lines:
         lines.append("")
-        lines.append("  —— 座谈会记录（第9章 各方意见汇总取材）——")
+        lines.append(_lex["meet_heading"])
         lines.extend(_meet_lines)
 
     # 🔴 问卷调查逐题统计：整块原样贴出。模型看不到分项人数就会自己编
@@ -374,7 +377,7 @@ def build_project_card(filled_data: Dict[str, Any]) -> str:
                      "已核实的具体数据去做二次推算。")
         for _k, _v in _fb.items():
             if str(_v).strip():
-                lines.append(f"  {_PROJECT_CARD_LABELS.get(_k, _k)}：{str(_v).strip()[:200]}")
+                lines.append(f"  {_labels.get(_k, _k)}：{str(_v).strip()[:200]}")
 
     if not lines:
         return (
@@ -596,8 +599,9 @@ def build_chapter_prompt(
     depends_on = chapter_def.get("depends_on", []) or []
     argument_note = chapter_def.get("argument_note", "") or ""
 
-    # 🔴 本项目事实卡：每章都带同一份「唯一事实源」，根治旧项目串数据
-    project_card = build_project_card(filled_data)
+    # 🔴 本项目事实卡：每章都带同一份「唯一事实源」，根治旧项目串数据。
+    #    字段标注按域取（复垦不顶着「稳评实施单位」这类稳评标注写复垦正文）。
+    project_card = build_project_card(filled_data, domain)
 
     # 🔴 字段中文标注（按域取）：让 LLM 明确知道每个字段对应报告里的哪个小节
     _KEY_LABELS = _catalog.key_labels(domain)
@@ -803,7 +807,7 @@ def build_chapter_prompt(
 - 涉及村组：根据实际材料中的村组名称
 {_get_learning_hints()}
 {_get_chapter_antipatterns(num)}
-{_get_expert_skill_hints(num)}
+{_get_expert_skill_hints(num, domain)}
 """
     return prompt
 
@@ -1068,12 +1072,15 @@ def _get_chapter_specific_requirements(num: int) -> str:
 _learning_hints_cache = {"hints": "", "updated": 0}
 
 
-def _get_expert_skill_hints(chapter_num: int) -> str:
+def _get_expert_skill_hints(chapter_num: int, domain: str = "stability") -> str:
     """加载专家蒸馏的审核 skill + 用户报告要求，注入生成 prompt 预防问题。
 
     规则型 skill：告诉 LLM「禁止出现某模式」，从源头避免犯错
     文本型 skill：告诉 LLM「应该怎么写」，给出纠正示例
     用户要求（skill_type='user_requirement'）：无条件注入，必须遵守
+
+    🔴 `review_skills` 表有 `domain` 列（默认 'stability'），按域过滤 —— 复垦域
+       无对应行时拿到空串，绝不把稳评专家/用户要求灌进复垦章。默认域逐字等于改动前。
     """
     try:
         import sqlite3
@@ -1086,15 +1093,17 @@ def _get_expert_skill_hints(chapter_num: int) -> str:
         # 🔴 用户报告要求（无条件注入，不按章节过滤）
         user_rows = conn.execute(
             "SELECT chapter_num, skill_type, rule_pattern, rule_desc, correction FROM review_skills "
-            "WHERE is_active=1 AND skill_type='user_requirement' "
-            "ORDER BY id LIMIT 8"
+            "WHERE is_active=1 AND skill_type='user_requirement' AND domain=? "
+            "ORDER BY id LIMIT 8",
+            (domain,)
         ).fetchall()
         # 专家 skill（规则 + 文本，按章节）
         rows = conn.execute(
             "SELECT chapter_num, skill_type, rule_pattern, rule_desc, correction FROM review_skills "
-            "WHERE is_active=1 AND skill_type != 'user_requirement' AND (chapter_num=0 OR chapter_num=?) "
+            "WHERE is_active=1 AND skill_type != 'user_requirement' AND domain=? "
+            "AND (chapter_num=0 OR chapter_num=?) "
             "ORDER BY id LIMIT 20",
-            (chapter_num,)
+            (domain, chapter_num)
         ).fetchall()
         conn.close()
 

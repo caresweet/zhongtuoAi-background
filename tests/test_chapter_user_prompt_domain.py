@@ -104,8 +104,10 @@ def _stub_external(monkeypatch):
     """中和会读真实库/文件的来源，focus 在本测试关心的材料块上。"""
     import app.agent.agents.chapters.chapter_base as cb
     import app.services.few_shot_service as fss
-    monkeypatch.setattr(cb, "_get_cached_learning_hints", lambda n: "", raising=True)
-    monkeypatch.setattr(fss, "get_cached_few_shot", lambda n: "", raising=True)
+    monkeypatch.setattr(cb, "_get_cached_learning_hints",
+                        lambda n, domain="stability": "", raising=True)
+    monkeypatch.setattr(fss, "get_cached_few_shot",
+                        lambda n, domain="stability": "", raising=True)
 
 
 def _state(domain):

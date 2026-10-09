@@ -270,6 +270,79 @@ def key_labels(domain: str | None) -> Dict[str, str]:
     return stability_key_labels()
 
 
+def project_card_labels(domain: str | None) -> Dict[str, str]:
+    """该域「事实卡字段 → 中文标注」映射（`build_project_card` 用）。
+
+    事实卡是每章 agent 的**唯一事实源**，其字段标注原先写死稳评口径
+    （`稳评实施单位` / `征地预公告文号` / `征收面积（亩）`…）—— 复垦事实卡因此
+    顶着稳评字段名被喂给每一章。这里按域取：
+
+    🔴 稳评（默认域）逐字等于改动前 `master_orchestrator._PROJECT_CARD_LABELS`
+       （委托 `stability_project_card_labels`，不复制第二份）。
+    🔴 复垦复用其**既有**的 `RECLAMATION_KEY_LABELS`（与单章提示词「可用数据」标注
+       同源，见 `key_labels`），不另造一份 —— 复垦没有的稳评字段（户数/支持率/
+       各种日期）即标注缺失，`build_project_card` 按 `.get(k, k)` 回落原 key，
+       不拿稳评的字段名顶替。
+    """
+    if domain == _RECLAMATION:
+        return key_labels(domain)
+    from app.services.master_orchestrator import stability_project_card_labels
+    return stability_project_card_labels()
+
+
+def project_card_lexicon(domain: str | None) -> Dict[str, Any]:
+    """`master_orchestrator.build_project_card` 里「随域而变」的全部字串。
+
+    除字段标注（见 `project_card_labels`）外，事实卡还有三个**附带小节**：
+    征收土地预公告正文摘录 / 勘测定界明细 / 座谈会记录。它们的抬头与小节字段标注
+    原先也写死稳评口径 ——「征收土地预公告」「稳评公示期」「（第9章 各方意见汇总采集）」
+    之类会随事实卡进入复垦章的提示词。
+
+    返回：
+      fields        —— {字段 key: 中文标注}
+      ann_heading / ann_fields    —— 预公告摘录小节（fields 为 [(key,label)]，空 = 整块不出现）
+      land_heading                —— 勘测定界明细小节抬头（该小节各行标注域中立，留在调用点）
+      meet_heading / meet_fields  —— 座谈会记录小节
+
+    🔴 稳评（默认域）逐字等于改动前 `build_project_card` 内联的那几处。
+    🔴 复垦没有「征收土地预公告」与「稳评座谈会」两个概念 → 对应小节字段表留空，
+       整块不出现；**不把稳评那几行换个词冒充**。勘测定界两域共用，抬头去掉稳评章号。
+    """
+    if domain == _RECLAMATION:
+        return {
+            "fields": project_card_labels(domain),
+            "ann_heading": "", "ann_fields": [],
+            "land_heading": "  —— 勘测定界明细 ——",
+            "meet_heading": "", "meet_fields": [],
+        }
+    return {
+        "fields": project_card_labels(domain),
+        "ann_heading": "  —— 征收土地预公告正文摘录 ——",
+        "ann_fields": [
+            ("legal_basis_cited", "公告引用的法律法规"),
+            ("preamble_text", "公告前言（决定启动的表述）"),
+            ("purpose_text", "征收目的（公告原文）"),
+            ("purpose_legal_basis", "征收目的法定依据"),
+            ("scope_text", "征收范围（公告原文）"),
+            ("notice_period_text", "公告期限（原文）"),
+            ("work_arrangement_text", "工作安排（公告原文）"),
+            ("other_matters_text", "其他事项（公告原文）"),
+            # 🔴 稳评公示期（用户填开始日 → 系统推算一周），与上面的「公告期限」不是一回事
+            ("publicity_period_text", "稳评公示期（公示期一周）"),
+            ("contact_name", "公告联系人"),
+            ("contact_phone", "公告联系电话"),
+            ("attachment_note", "公告附图说明"),
+        ],
+        "land_heading": "  —— 勘测定界明细（第6章 1.5 涉及村组/地类构成、第10章合法性论证用）——",
+        "meet_heading": "  —— 座谈会记录（第9章 各方意见汇总取材）——",
+        "meet_fields": [
+            ("public_demands", "座谈会群众诉求（记录原文）"),
+            ("discussion_text", "座谈讨论情况（记录原文）"),
+            ("conclusion_text", "座谈结论（记录原文）"),
+        ],
+    }
+
+
 def report_persona(domain: str | None) -> str:
     """单章提示词的「身份」首句。
 
@@ -570,6 +643,30 @@ def writing_guide(domain: str | None) -> str:
         "禁止用「六、」「八、」中文序号标题；更细的分点用（一）（二）（三）写在正文里，不用编号标题。\n"
         "7. 表格只在必要时使用，不要为填模板而加表\n"
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# `chapter_base._maybe_run_tool_round` 的工具表按域取值
+# ═══════════════════════════════════════════════════════════════
+# 工具回合把后端能力（RAG 检索 / 勘测定界解析 / 风险评分 / 问卷统计）当作 LLM 可调用的
+# 工具，先让模型自己决定「这一章要不要拉数据」。注册表里的五件工具**全为稳评器物**：
+# `calc_risk_scoring` 走 DB32/T4013 扣分制、`query_survey`/`query_dept_survey` 取稳评公众/
+# 部门问卷、`retrieve_rag` 的描述点名「稳评规范（DB32/T4013-2021）」、`parse_kd_table`
+# 解的是稳评勘测定界表型。复垦**没有**对应工具（其 RAG 素材由 `act()` 统一注入、勘测定界
+# 由工艺流程解析），故复垦不开放工具回合 —— 宁可拿到「没有」也不拿稳评的一套顶替
+# （业主口径：复垦报告只允许出现复垦内容）。
+
+def tool_round_schema(domain: str | None) -> List[Dict[str, Any]]:
+    """工具回合交给模型的工具表（按域）。
+
+    稳评：`app.agent.tools.ALL_TOOLS_SCHEMA` 全量（逐字不变）。
+    复垦：空表 —— 现有工具无一为复垦口径，`_maybe_run_tool_round` 见空表即整轮跳过
+          （连决策 prompt、稳评身份都不再发给模型，也不会拿到稳评评分/问卷/勘测定界表）。
+    """
+    if domain == _RECLAMATION:
+        return []
+    from app.agent.tools import ALL_TOOLS_SCHEMA
+    return ALL_TOOLS_SCHEMA
 
 
 # ═══════════════════════════════════════════════════════════════

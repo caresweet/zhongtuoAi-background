@@ -16,7 +16,7 @@ from typing import Dict, List, Any
 from ..base_agent import BaseAgent
 from ..knowledge_agent import get_knowledge_context_for_chapter
 from app.validation.content_guardrails import AI_BUZZWORDS
-from app.agent.chapter_definitions import ALL_CHAPTERS, FANWEN_STYLE_GUIDE
+from app.agent.chapter_definitions import FANWEN_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
 
@@ -34,30 +34,37 @@ def _safe_int(v, default: int = 0) -> int:
         return int(default)
 
 # ── Learning hints cache (shared across all chapter agents) ──
-_learning_cache = {"hints": {}, "updated": 0}  # hints by chapter_num
+# 🔴 按域分区：`hints[域][章号]`、`updated[域]`。原先只以章号建键、且硬编码
+#    "stability" —— 复垦章会拿到**稳评**的历史常见问题、还按稳评章号过滤。
+_learning_cache = {"hints": {}, "updated": {}}  # hints: {domain: {chapter_num: [...]}}
 
 
-def _refresh_learning_cache():
-    """Refresh cached learning hints from the learning service."""
+def _refresh_learning_cache(domain: str = "stability"):
+    """Refresh cached learning hints from the learning service (per domain)."""
     import time as _t
     now = _t.time()
-    if now - _learning_cache["updated"] < 300:
+    if now - _learning_cache["updated"].get(domain, 0) < 300:
         return  # still fresh
     try:
         import asyncio
+        from app.agent.chapter_catalog import all_chapters
         from app.services.learning_service import learning_service
         loop = asyncio.get_event_loop()
         if loop.is_running():
             return  # can't run async in sync context
         async def _fetch():
-            for ch in ALL_CHAPTERS:
-                hints = await learning_service.build_learning_hints("stability")
-                common = await learning_service.get_common_issues("stability", 10)
+            bucket = _learning_cache["hints"].setdefault(domain, {})
+            for ch in all_chapters(domain):
+                # 学习数据按域取（`generation_feedback.domain`）；复垦域暂无反馈行
+                # → common 为空 → 复垦章拿不到任何历史提示。
+                common = await learning_service.get_common_issues(domain, 10)
+                # `_is_chapter_relevant` 的章号映射是稳评参照件的（6/9/12…）——
+                # 但它只在 common 非空时起作用，而只有稳评域有反馈数据，故不会误判复垦章。
                 ch_issues = [c for c in common if _is_chapter_relevant(c["type"], ch)]
                 if ch_issues:
-                    _learning_cache["hints"][ch] = ch_issues
+                    bucket[ch] = ch_issues
         loop.run_until_complete(_fetch())
-        _learning_cache["updated"] = now
+        _learning_cache["updated"][domain] = now
     except Exception:
         pass
 
@@ -77,10 +84,10 @@ def _is_chapter_relevant(issue_type: str, chapter_num: int) -> bool:
     return True  # general issues apply to all
 
 
-def _get_cached_learning_hints(chapter_num: int) -> str:
-    """Get learning hints for a specific chapter from the cache."""
-    _refresh_learning_cache()
-    ch_hints = _learning_cache["hints"].get(chapter_num, [])
+def _get_cached_learning_hints(chapter_num: int, domain: str = "stability") -> str:
+    """Get learning hints for a specific chapter from the cache (per domain)."""
+    _refresh_learning_cache(domain)
+    ch_hints = (_learning_cache["hints"].get(domain) or {}).get(chapter_num, [])
     if not ch_hints:
         return ""
     lines = ["\n## ⚠️ 本章历史常见问题（请务必避免）"]
@@ -302,9 +309,10 @@ class ChapterAgentBase(BaseAgent):
         style_name = state.get("_report_style") or state.get("report_style") or "jinhu"
         few_shot = get_few_shot(self.chapter_number, style_name)
         # 🔴 few-shot 前置专家 skill 提示（避免范文覆盖 skill 要求）
+        #    按域取：复垦域无 few-shot / skill 时拿到空串，不读稳评那份。
         try:
             from app.services.few_shot_service import get_few_shot_with_skills
-            few_shot = get_few_shot_with_skills(self.chapter_number)
+            few_shot = get_few_shot_with_skills(self.chapter_number, self.domain)
         except Exception:
             pass
         if few_shot:
@@ -322,7 +330,7 @@ class ChapterAgentBase(BaseAgent):
         # 无论用 _custom_prompt 还是默认 prompt，都在最后强注入专家反馈
         try:
             from app.services.master_orchestrator import _get_expert_skill_hints
-            skill_hints = _get_expert_skill_hints(self.chapter_number)
+            skill_hints = _get_expert_skill_hints(self.chapter_number, self.domain)
             if skill_hints:
                 user_prompt = user_prompt + "\n\n" + skill_hints
         except Exception:
@@ -633,7 +641,17 @@ class ChapterAgentBase(BaseAgent):
 
         # 只对需要数据的章节尝试（可调参：默认全部开启）
         try:
-            from app.agent.tools import ALL_TOOLS_SCHEMA, execute_tool_calls
+            from app.agent.chapter_catalog import tool_round_schema
+            from app.agent.tools import execute_tool_calls
+
+            # 🔴 工具表按域取（见 `chapter_catalog.tool_round_schema`）：注册表里的工具
+            #    **全为稳评器物**（DB32 扣分制评分 / 稳评公众·部门问卷 / 稳评勘测定界表型 /
+            #    点名「稳评规范」的 RAG 描述）。复垦拿到空表 → **整轮跳过**：连决策 prompt
+            #    与下面那句「你是稳评报告助手」的身份串都不再发给模型 —— 复垦没有对应工具，
+            #    宁可「没有」也不拿稳评的一套顶替。默认域（稳评）工具表逐字不变。
+            tools = tool_round_schema(self.domain)
+            if not tools:
+                return []
 
             # 组装简短的工具决策 prompt（避免把超大 user_prompt 重复发给 LLM）
             decision_prompt = self._build_tool_decision_prompt(state, user_prompt)
@@ -645,7 +663,7 @@ class ChapterAgentBase(BaseAgent):
                            "需要时输出 tool call；不需要则直接简短回复'无需工具'。",
                     max_tokens=512,
                     temperature=0.2,
-                    tools=ALL_TOOLS_SCHEMA,
+                    tools=tools,
                 ),
                 timeout=60.0,
             )
@@ -721,7 +739,7 @@ class ChapterAgentBase(BaseAgent):
                 break
         return {
             "session_id": state.get("session_id", "default"),
-            "domain": "stability",
+            "domain": self.domain,
             "file_paths": paths,
             "survey_report_path": survey_report_path,
             "facts": {
@@ -1896,9 +1914,9 @@ class ChapterAgentBase(BaseAgent):
         example_ctx = rag_context.get("example_context", "")
         local_ctx = rag_context.get("local_regulation_context", "")
 
-        # Dynamic few-shot from similar historical reports
+        # Dynamic few-shot from similar historical reports（按域取缓存分区）
         from app.services.few_shot_service import get_cached_few_shot
-        dynamic_examples = get_cached_few_shot(self.chapter_number)
+        dynamic_examples = get_cached_few_shot(self.chapter_number, self.domain)
 
         # User data summary
         data_summary = ""
@@ -1979,7 +1997,7 @@ class ChapterAgentBase(BaseAgent):
             f"8. ⛔ 禁止：据调查显示、经综合分析、通过系统识别、依据指令要求 等机器翻译腔\n"
             f"9. ⛔ 禁止「综上所述」「整体而言」「总体来看」等总结套话\n"
             f"10. 缺失数据用【待补充】，不要编造\n"
-            f"{_get_cached_learning_hints(self.chapter_number)}"
+            f"{_get_cached_learning_hints(self.chapter_number, self.domain)}"
             f"{table_enforcement}"
         )
 

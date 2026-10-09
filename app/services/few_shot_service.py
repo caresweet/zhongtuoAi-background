@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import re
 from typing import Dict, List, Any, Optional, Tuple
-from app.agent.chapter_definitions import ALL_CHAPTERS
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +145,8 @@ class FewShotService:
                 }
                 # Extract specific chapter content
                 if chapter_num > 0:
-                    ch_text = self._extract_chapter(cand.get("text", ""), chapter_num)
+                    ch_text = self._extract_chapter(cand.get("text", ""), chapter_num,
+                                                    domain=domain)
                     if ch_text:
                         # 🔴 清洗范文：剥离具体公司/项目数据/文号 → 占位符，防止数据泄漏到生成报告
                         ch_text = self._clean_example(ch_text)
@@ -208,20 +208,24 @@ class FewShotService:
             logger.warning(f"Candidate retrieval failed: {e}")
             return []
 
-    def _extract_chapter(self, text: str, chapter_num: int) -> str:
+    def _extract_chapter(self, text: str, chapter_num: int,
+                         domain: str = "stability") -> str:
         """Extract a specific chapter's content from a full report text."""
         if not text:
             return ""
 
         # Build a regex to find the chapter boundaries
-        # 🔴 章节标题一律取自 chapter_definitions（唯一事实源），不在此另存一份
+        # 🔴 章节标题一律取自 chapter_catalog（唯一事实源），不在此另存一份；
+        #    域也一并传进来 —— 否则复垦章会被按**稳评**标题切段（同号章标题不同，
+        #    切出来的不是这一章，甚至切不出）。
         try:
-            from app.agent.chapter_definitions import (
-                ALL_CHAPTERS, get_chapter_title)
-            titles = [get_chapter_title(n) for n in ALL_CHAPTERS]
-            if int(chapter_num) not in ALL_CHAPTERS:
+            from app.agent.chapter_catalog import (
+                all_chapters, chapter_title)
+            _all = all_chapters(domain)
+            titles = [chapter_title(domain, n) for n in _all]
+            if int(chapter_num) not in _all:
                 return ""
-            idx = ALL_CHAPTERS.index(int(chapter_num))
+            idx = _all.index(int(chapter_num))
             current_title = titles[idx]
             next_title = titles[idx + 1] if idx + 1 < len(titles) else None
         except Exception:
@@ -266,27 +270,44 @@ class FewShotService:
 
 
 # ── Sync cache for prompt-time access ──
-_few_shot_cache = {"examples": {}, "project_hash": "", "updated": 0}
+# 🔴 缓存**按域分区**：`examples` 的键是 `"{域}:{章号}"`，`project_hash` / `updated`
+#    按域各存一份。原先只以章号建键、`refresh_few_shot_cache` 默认域 "stability"，
+#    复垦章只要与稳评同号就会拿到**稳评**相似项目的 few-shot。
+_few_shot_cache = {"examples": {}, "project_hash": {}, "updated": {}}
+
+
+def _few_shot_key(domain: str, chapter_num: int) -> str:
+    return f"{domain}:{int(chapter_num)}"
 
 
 async def refresh_few_shot_cache(project_info: Dict[str, Any], domain: str = "stability"):
-    """Refresh the few-shot cache for a project. Called at generation start."""
+    """Refresh the few-shot cache for a project. Called at generation start.
+
+    按 `domain` 独立缓存：候选与章节都取自该域（`find_best_matches(..., domain=...)`
+    早已域感知，此处只是**别让锁与键跨域串味**）。复垦域在知识库里没有对应
+    `knowledge_documents`（或没有可切出的章）→ 该域缓存为空 → 复垦拿到的是「没有」，
+    而不是稳评的范文。
+    """
     import time as _t
+    from app.agent.chapter_catalog import all_chapters
     svc = FewShotService()
-    project_hash = f"{project_info.get('location','')}|{project_info.get('area_mu','')}|{project_info.get('land_use','')}"
-    if _few_shot_cache["project_hash"] == project_hash and _t.time() - _few_shot_cache["updated"] < 3600:
-        return  # Already cached for this project
-    for ch in ALL_CHAPTERS:
-        matches = await svc.find_best_matches(project_info, chapter_num=ch, domain=domain, top_k=2)
+    project_hash = (f"{domain}|{project_info.get('location','')}|"
+                    f"{project_info.get('area_mu','')}|{project_info.get('land_use','')}")
+    if _few_shot_cache["project_hash"].get(domain) == project_hash and \
+            _t.time() - _few_shot_cache["updated"].get(domain, 0) < 3600:
+        return  # Already cached for this project (this domain)
+    for ch in all_chapters(domain):
+        matches = await svc.find_best_matches(project_info, chapter_num=ch,
+                                              domain=domain, top_k=2)
         if matches:
-            _few_shot_cache["examples"][ch] = matches
-    _few_shot_cache["project_hash"] = project_hash
-    _few_shot_cache["updated"] = _t.time()
+            _few_shot_cache["examples"][_few_shot_key(domain, ch)] = matches
+    _few_shot_cache["project_hash"][domain] = project_hash
+    _few_shot_cache["updated"][domain] = _t.time()
 
 
-def get_cached_few_shot(chapter_num: int) -> str:
+def get_cached_few_shot(chapter_num: int, domain: str = "stability") -> str:
     """Get cached few-shot examples for a chapter. Sync, for prompt injection."""
-    matches = _few_shot_cache["examples"].get(chapter_num, [])
+    matches = _few_shot_cache["examples"].get(_few_shot_key(domain, chapter_num), [])
     if not matches:
         return ""
     parts = ["\n## ✍️ 相似项目参考（请模仿风格和数据呈现方式，但替换为本项目数据）\n"]
@@ -300,8 +321,12 @@ def get_few_shot_with_skills(chapter_num: int, domain: str = "stability") -> str
     """获取 few-shot 范文，并前置专家 skill 提示。
 
     确保范文注入不会覆盖 skill 要求：先提醒遵守 skill，再看范文。
+
+    🔴 范文与 skill 都**按域取**：`review_skills` 表有 `domain` 列（默认 'stability'），
+       故这里显式带上域过滤 —— 复垦域无对应行时拿到空串，绝不把稳评专家/用户要求
+       灌进复垦章。
     """
-    few_shot = get_cached_few_shot(chapter_num)
+    few_shot = get_cached_few_shot(chapter_num, domain)
     try:
         from app.services.skill_service import get_skill_hints
         # get_skill_hints 是 async，这里用同步方式读 DB
@@ -314,13 +339,16 @@ def get_few_shot_with_skills(chapter_num: int, domain: str = "stability") -> str
             # 🔴 用户报告要求（无条件注入，所有章节都要遵守）
             user_rows = conn.execute(
                 "SELECT rule_desc, correction FROM review_skills "
-                "WHERE is_active=1 AND skill_type='user_requirement' ORDER BY id LIMIT 6",
+                "WHERE is_active=1 AND skill_type='user_requirement' AND domain=? "
+                "ORDER BY id LIMIT 6",
+                (domain,),
             ).fetchall()
             # 专家反馈（text 型，按章节）
             rows = conn.execute(
-                "SELECT rule_desc, correction FROM review_skills WHERE is_active=1 AND skill_type='text' "
-                "AND (chapter_num=0 OR chapter_num=?) ORDER BY id LIMIT 8",
-                (chapter_num,),
+                "SELECT rule_desc, correction FROM review_skills WHERE is_active=1 "
+                "AND skill_type='text' AND domain=? AND (chapter_num=0 OR chapter_num=?) "
+                "ORDER BY id LIMIT 8",
+                (domain, chapter_num),
             ).fetchall()
             conn.close()
             hint_lines = []

@@ -93,6 +93,7 @@ class AIGapWriter:
             from app.services.master_orchestrator import (
                 build_project_card, build_regulation_whitelist)
             from app.agent.chapter_definitions import get_chapter_section_specs
+            from app.domains import domain_of_state
         except Exception:
             return None
 
@@ -107,7 +108,7 @@ class AIGapWriter:
             chapter=chapter_no,
             section_title=section_title,
             section_points=points,
-            project_card=build_project_card(filled),
+            project_card=build_project_card(filled, domain_of_state(state)),
             regulation_whitelist=build_regulation_whitelist(filled),
             style_excerpt=template_excerpt,
             filled=filled,

@@ -103,10 +103,11 @@ def build_rewrite_prompt(chapter_no: int, title: str, skeleton: str, filled: Dic
         from app.services.master_orchestrator import (
             build_project_card, build_regulation_whitelist,
         )
+        from app.domains import domain_of_state
         wl = build_regulation_whitelist(filled)
         if wl:
             parts.append(wl)
-        card = build_project_card(filled)
+        card = build_project_card(filled, domain_of_state(state))
         if card:
             parts.append(card)
     except Exception as e:

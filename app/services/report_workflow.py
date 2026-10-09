@@ -903,7 +903,8 @@ _NO_FALLBACK_FIELDS = {
 }
 
 
-async def _draft_field_fallbacks(miss_items: list, filled: dict) -> Dict[str, str]:
+async def _draft_field_fallbacks(miss_items: list, filled: dict,
+                                 domain: str = "stability") -> Dict[str, str]:
     """用户**跳过**的字段 → 先拟一版兜底文字，让成品「拿到手简单改改就能用」。
 
     🔴 业主口径（2026-09-22）：
@@ -931,11 +932,12 @@ async def _draft_field_fallbacks(miss_items: list, filled: dict) -> Dict[str, st
     try:
         from app.services.master_orchestrator import build_project_card
         from app.services.llm_service import LLMService
-        _card = build_project_card(filled or {})
+        from app.agent.chapter_catalog import report_kind_name
+        _card = build_project_card(filled or {}, domain)
         _lines = [f'{i}. 「{f["label"]}」（第{f.get("chapter")}章）'
                   for i, f in enumerate(todo, 1)]
         _prompt = (
-            "下面是一份社会稳定风险评估报告里，用户**暂时无法提供**的几个字段。\n"
+            f"下面是一份{report_kind_name(domain)}里，用户**暂时无法提供**的几个字段。\n"
             "请按事实卡为每一个拟一句**规范表述**，要求：\n"
             "1. 是**完整可用的中文句子**（用户拿到后改几个字就能用），不是提示语；\n"
             "2. **只依据「本项目事实卡」**；事实卡里没有的**不要编数字/人名/文号**，\n"
@@ -1091,7 +1093,8 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             #    写进 `filled_data` 会污染唯一事实源。
             if _skipped:
                 try:
-                    _fb = await _draft_field_fallbacks(_skipped, filled)
+                    _fb = await _draft_field_fallbacks(_skipped, filled,
+                                                        domain_of_state(state))
                     if _fb:
                         filled.setdefault("_fallbacks", {}).update(_fb)
                         logs.append(f"📝 用户跳过 {len(_skipped)} 项，已拟兜底草稿 "
@@ -1111,7 +1114,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
             from app.services.few_shot_service import refresh_few_shot_cache
             proj = {"location": filled.get("location",""), "area_mu": filled.get("area_mu",""),
                     "land_use": filled.get("land_use",""), "project_name": filled.get("project_name","")}
-            await refresh_few_shot_cache(proj)
+            await refresh_few_shot_cache(proj, domain_of_state(state))
         except Exception as e:
             logger.warning(f"Few-shot cache refresh failed (non-critical): {e}")
         # 传 dict（保留 original_name）；并带上 AI 视觉分类结果（此前此处漏传，与组装器行为不一致）
@@ -1550,7 +1553,8 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
 # ═══════════════════════════════════════════════════════════════════════════════
 # Node 7b-2: gap_review — 把「正文里 agent 自己承认没数据」的地方交给用户
 # ═══════════════════════════════════════════════════════════════════════════════
-async def _draft_gap_fills(pending: list, filled: dict) -> Dict[str, str]:
+async def _draft_gap_fills(pending: list, filled: dict,
+                           domain: str = "stability") -> Dict[str, str]:
     """给每个缺口**先起草一段能直接用的话**，再拿给用户确认。
 
     🔴 业主口径（2026-09-22）：
@@ -1569,7 +1573,8 @@ async def _draft_gap_fills(pending: list, filled: dict) -> Dict[str, str]:
     try:
         from app.services.master_orchestrator import build_project_card
         from app.services.llm_service import LLMService
-        _card = build_project_card(filled or {})
+        from app.agent.chapter_catalog import report_kind_name
+        _card = build_project_card(filled or {}, domain)
         _items = []
         for _i, (_key, _ch, _g) in enumerate(pending, 1):
             _items.append(
@@ -1577,7 +1582,7 @@ async def _draft_gap_fills(pending: list, filled: dict) -> Dict[str, str]:
                 f"   原句：{str(_g.get('sentence') or '')[:160]}"
             )
         _prompt = (
-            "下面是一份社会稳定风险评估报告里**缺少素材支撑**的几处。\n"
+            f"下面是一份{report_kind_name(domain)}里**缺少素材支撑**的几处。\n"
             "请针对每一处，**按事实卡写出可以直接替换原句的中文段落**（2–4 句，公文口吻）。\n\n"
             "铁律：\n"
             "1. **只能依据「本项目事实卡」里的真实数据**（面积/日期/单位/人名/问卷数）；\n"
@@ -1669,7 +1674,7 @@ async def node_gap_review(state: ReportWorkflowState) -> ReportWorkflowState:
     # 🔴 **先让 agent 拟一版**再问用户 —— 不是把活推给用户。
     #    弹窗里预填草稿，用户只需「采纳 / 改一句方向 / 跳过」（业主：
     #    「用户希望的是你帮忙他们写这块」「用户只能提供想法」）。
-    _drafts = await _draft_gap_fills(pending, filled)
+    _drafts = await _draft_gap_fills(pending, filled, domain_of_state(state))
     for _it in items:
         _draft = _drafts.get(_it["key"], "")
         _it["current"] = _draft

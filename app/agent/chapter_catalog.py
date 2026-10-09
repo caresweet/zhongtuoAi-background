@@ -7,7 +7,8 @@ master_orchestrator）按域取章集合/章标题/章类型/章结构文本的�
 两套定义同构，差异只在这里收口，避免调用点里长出一串 `if domain == ...` 分支。
 
 除「章集合/标题/类型」（report_workflow 用）外，这里还收口了：
-  · `chapter_titles` / `has_review_table` / `appendix_chapter_no`（装配器用）
+  · `chapter_titles` / `has_review_table` / `appendix_chapter_no` /
+    `front_matter_labels`（装配器用）
   · `target_words` / `sections_for_prompt` / `table_format_reference` /
     `key_labels` / `report_persona` / `has_scoring_guidance` /
     `has_chapter_specific_requirements`（单章提示词用）
@@ -139,6 +140,50 @@ def appendix_chapter_no(domain: str | None) -> Optional[int]:
         return None
     from app.agent.chapter_definitions import TOTAL_CHAPTERS
     return TOTAL_CHAPTERS
+
+
+def front_matter_labels(domain: str | None) -> Dict[str, str]:
+    """装配器「前置件 / 固定抬头 / 兜底文案」按域取的中文标注。
+
+    这些字串由 `report_assembler` **按固定路径盖上去**（封面落款两个抬头、
+    公司简介里的工作组标题与兜底岗位名、资质证书页的人员培训证书节标题、
+    简介末句的材料出处说明、无图注时的兜底图名、Word 审核批注的作者名），
+    与报告内容无关、却写着稳评的字样 —— 复垦报告里出现「稳评责任主体」
+    这类抬头即是同一类泄漏（业主口径：复垦报告只允许出现复垦内容）。
+
+    🔴 稳评（默认域）逐字等于改动前装配器里写死的那几处 —— 这是「稳评行为不变」
+       的依据。复垦取其等价口径：能逐字替换的把「稳评」换成「复垦」，
+       带稳评专有落点（如「附件1」）的改写为复垦自己的出处。
+    """
+    if domain == _RECLAMATION:
+        return {
+            # 封面落款两个抬头（各 6 字 + 冒号，天然对齐）
+            "org_label": "复垦责任主体：",
+            "implement_label": "复垦实施单位：",
+            # 公司简介里「人员及分工」区标题
+            "roster_heading": "复垦方案编制人员及分工情况",
+            # 人员库为空时兜底名单的首个岗位名
+            "roster_lead_role": "复垦方案负责人",
+            # 资质证书页里「人员培训证书」小节的标题
+            "cert_section_heading": "土地复垦业务培训证书",
+            # 简介末句：材料出处说明。🔴 复垦没有附件章（见 appendix_chapter_no），
+            #    原句「详见附件1」会指向不存在的章 —— 改写为指向资质证书节。
+            "material_note": "本报告相关机构营业执照、项目人员职称及培训证书等材料详见公司资质证书。",
+            # 地图类图片无图注时的兜底图名
+            "map_caption": "位置示意图",
+            # Word 审核批注的作者名
+            "audit_comment_author": "复垦审核Agent",
+        }
+    return {
+        "org_label": "稳评责任主体：",
+        "implement_label": "稳评实施单位：",
+        "roster_heading": "稳评工作组人员及分工情况",
+        "roster_lead_role": "稳评负责人",
+        "cert_section_heading": "社会稳定风险评估业务培训证书",
+        "material_note": "本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件1。",
+        "map_caption": "拟征收土地位置示意图",
+        "audit_comment_author": "稳评审核Agent",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

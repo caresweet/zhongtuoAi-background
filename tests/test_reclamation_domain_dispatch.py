@@ -194,3 +194,57 @@ def test_workflow_generate_passes_domain_to_prompt_builder():
     # 调用点必须带上 domain=_domain（域在 node_chapter_generate 里已解析）
     call = src.index("prompt = build_chapter_prompt(")
     assert "domain=_domain" in src[call:call + 400]
+
+
+# ════════════════════════════════════════════════════════════
+# E. 前置件文案（封面落款 / 公司简介 / 资质页标题 / 批注作者）按域取
+#    这些字串原先写死在装配器里，复垦报告照样盖稳评抬头 —— 同一类泄漏。
+# ════════════════════════════════════════════════════════════
+
+def test_front_matter_labels_per_domain():
+    """标签解析：稳评逐字等于改动前，复垦不含任何稳评标记。"""
+    stab = cat.front_matter_labels("stability")
+    # 🔴 稳评（默认域）逐字等于装配器里原来写死的那几处 —— 稳评护栏
+    assert stab["org_label"] == "稳评责任主体："
+    assert stab["implement_label"] == "稳评实施单位："
+    assert stab["roster_heading"] == "稳评工作组人员及分工情况"
+    assert stab["roster_lead_role"] == "稳评负责人"
+    assert stab["cert_section_heading"] == "社会稳定风险评估业务培训证书"
+    assert stab["material_note"] == "本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件1。"
+    assert stab["map_caption"] == "拟征收土地位置示意图"
+    assert stab["audit_comment_author"] == "稳评审核Agent"
+    # 不传域 == 显式 stability
+    assert cat.front_matter_labels(None) == stab
+
+    rec = cat.front_matter_labels("reclamation")
+    for k, v in rec.items():
+        for m in ("稳评", "社会稳定风险评估", "评审表", "DB32", "征地", "征收"):
+            assert m not in v, f"复垦前置件标签「{k}={v}」混入稳评标记「{m}」"
+    assert rec["org_label"] == "复垦责任主体："
+    assert rec["implement_label"] == "复垦实施单位："
+    assert rec["roster_heading"] == "复垦方案编制人员及分工情况"
+    assert rec["roster_lead_role"] == "复垦方案负责人"
+
+
+def test_reclamation_render_front_matter_has_no_stability_wording(tmp_path):
+    """端到端：复垦报告正文（含封面落款/公司简介）一处稳评措辞都不许有。"""
+    _, text = _render(tmp_path, "reclamation",
+                      {3: {"markdown": "# 项目概况\n\n## 3.1 项目简介\n\nRECLBODY"}},
+                      {"project_name": "测试复垦项目", "doc_reference": "苏复垦〔2026〕1号",
+                       "implement_unit": "某某复垦公司"})
+    for m in ("稳评", "社会稳定风险评估", "评审表", "DB32", "征地", "征收", "拟征收"):
+        assert m not in text, f"复垦报告混入稳评标记「{m}」"
+    # 复垦口径的前置件文案确实盖上了
+    assert "复垦实施单位：某某复垦公司" in text
+    assert "复垦方案编制人员及分工情况" in text
+
+
+def test_stability_render_front_matter_labels_unchanged(tmp_path):
+    """稳评：前置件文案逐字不变（封面落款 + 工作组标题）。"""
+    _, text = _render(tmp_path, "stability",
+                      {4: {"markdown": "# 第4章\n\n## 4.1 合法性分析\n\nSTABBODY"}},
+                      {"project_name": "测试稳评项目", "doc_reference": "苏政发〔2026〕1号",
+                       "implement_unit": "某某稳评公司"})
+    assert "稳评实施单位：某某稳评公司" in text
+    assert "稳评工作组人员及分工情况" in text
+

@@ -20,6 +20,7 @@ from app.agent.chapter_catalog import (
     all_chapters, total_chapters, chapter_title,
     has_review_table, appendix_chapter_no,
     report_kind_name, cover_type_line, cover_fallback_title,
+    front_matter_labels,
 )
 from app.domains.registry import domain_of_state
 
@@ -2024,9 +2025,11 @@ class ReportAssembler:
                       bold=True, ascii_font=FONT_ASCII)
 
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
+        # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「复垦责任主体/实施单位」）。
+        _fl = front_matter_labels(self._domain)
         for i, (lab, val) in enumerate((
-            ('稳评责任主体：', org_name or ''),
-            ('稳评实施单位：', implement_unit or ''),
+            (_fl["org_label"], org_name or ''),
+            (_fl["implement_label"], implement_unit or ''),
             ('报告编制日期：', _cn_year_month(datetime.now())),
         )):
             if not val:
@@ -3687,7 +3690,7 @@ class ReportAssembler:
         for img_path, caption in rest[:6]:
             self._add_image(doc, img_path, caption)
         if person_certs:
-            self._add_heading(doc, '社会稳定风险评估业务培训证书', 2)
+            self._add_heading(doc, front_matter_labels(domain)["cert_section_heading"], 2)
             for img_path, caption in person_certs[:8]:
                 self._add_image(doc, img_path, caption)
         return True
@@ -4031,9 +4034,11 @@ class ReportAssembler:
 
         doc.add_page_break()
 
-        # ── 稳评工作组人员及分工（宋体小三加黑居中）──
+        # ── 工作组人员及分工（宋体小三加黑居中）──
+        #    🔴 标题按域取（稳评「稳评工作组…」→ 复垦「复垦方案编制人员…」）。
+        _fl = front_matter_labels(domain)
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run('稳评工作组人员及分工情况')
+        r = p.add_run(_fl["roster_heading"])
         r.font.name = FONT_SONGTI; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_SONGTI)
         r.font.size = Pt(15); r.bold = True
         doc.add_paragraph()
@@ -4058,7 +4063,7 @@ class ReportAssembler:
                     self._add_para(doc, _m, indent=True, font=FONT_SONGTI)
         else:
             # 回退：内置默认名单（company_assets 人员数据入库后自动切换为上方数据驱动渲染）
-            self._add_para(doc, '稳评负责人', bold=True, indent=False, font=FONT_SONGTI)
+            self._add_para(doc, _fl["roster_lead_role"], bold=True, indent=False, font=FONT_SONGTI)
             self._add_para(doc, '陈  春（总经理、高级工程师、估价师、经济师）', indent=True, font=FONT_SONGTI)
             self._add_para(doc, '调研工作', bold=True, indent=False, font=FONT_SONGTI)
             self._add_para(doc, '安如月（评估专业人员）', indent=True, font=FONT_SONGTI)
@@ -4072,7 +4077,7 @@ class ReportAssembler:
             self._add_para(doc, '罗  娜（评估助理）', indent=True, font=FONT_SONGTI)
             self._add_para(doc, '资料与档案工作', bold=True, indent=False, font=FONT_SONGTI)
             self._add_para(doc, '朱  璇（评估助理）', indent=True, font=FONT_SONGTI)
-        self._add_para(doc, '本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件1。', indent=True, font=FONT_SONGTI)
+        self._add_para(doc, _fl["material_note"], indent=True, font=FONT_SONGTI)
 
         doc.add_page_break()
 
@@ -4334,10 +4339,12 @@ class ReportAssembler:
         if not _mis:
             return
         self._pending_map_images = []
+        _fl = front_matter_labels(self._domain)
         _pairs = []
         for _mi in _mis:
             _mp = _mi.get("path", "") if isinstance(_mi, dict) else str(_mi)
-            _ml = (_mi.get("label", "") if isinstance(_mi, dict) else "") or "拟征收土地位置示意图"
+            # 🔴 兜底图名按域取（稳评「拟征收土地位置示意图」→ 复垦「位置示意图」）
+            _ml = (_mi.get("label", "") if isinstance(_mi, dict) else "") or _fl["map_caption"]
             if _mp:
                 _pairs.append((_mp, _ml))
         if not _pairs:
@@ -5261,7 +5268,9 @@ class ReportAssembler:
         # 批注内容
         comment = OxmlElement('w:comment')
         comment.set(_qn('w:id'), str(cid))
-        comment.set(_qn('w:author'), '稳评审核Agent')
+        # 🔴 批注作者按域取（稳评「稳评审核Agent」→ 复垦「复垦审核Agent」）——
+        #    作者名在 Word 审阅窗格里可见，属报告可见文案。
+        comment.set(_qn('w:author'), front_matter_labels(self._domain)["audit_comment_author"])
         cp = OxmlElement('w:p')
         cr = OxmlElement('w:r')
         ct = OxmlElement('w:t')

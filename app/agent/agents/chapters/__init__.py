@@ -34,20 +34,28 @@ def _new_agent(chapter_number: int, llm_service=None):
 
 # ── 参照件照搬（优先级最高）────────────────────────────────────
 
-def reference_verbatim_chapters() -> set:
-    """要「原文照搬」的章号集合（配置驱动，将来改章号不动代码）。"""
+def reference_verbatim_chapters(domain: str = "stability") -> set:
+    """要「原文照搬」的章号集合（配置驱动，将来改章号不动代码）。按域取各自的语料。"""
     try:
         from app.services.reference_corpus import is_enabled, verbatim_chapters
-        if not is_enabled():
+        if not is_enabled(domain):
             return set()
-        return verbatim_chapters()
+        return verbatim_chapters(domain)
     except Exception:
         return set()
 
 
-def _reference_agent(chapter_number: int, llm_service=None):
+def _reference_agent(chapter_number: int, llm_service=None,
+                     domain: str = "stability"):
     from .chapter_reference_agent import ReferenceChapterAgent
-    return ReferenceChapterAgent(chapter_number, llm_service=llm_service)
+    from app.services.reference_corpus import _current_ref_id
+    # 🔴 ref_id 必须显式带上 —— 不传的话渲染层会回落到**默认域（稳评）**的语料，
+    #    复垦章就会被填进白马湖风电的原文。llm_rewrite=False：照搬即零 LLM。
+    ref_id = _current_ref_id(domain)
+    return ReferenceChapterAgent(chapter_number, llm_service=llm_service,
+                                 ref_id=ref_id,
+                                 llm_rewrite=(False if domain == "reclamation" else None),
+                                 domain=domain)
 
 
 # ── 旧管线（惰性导入：新管线下不加载这 2000 行）────────────────
@@ -82,13 +90,18 @@ def _legacy_agent(chapter_number: int, llm_service=None):
 def _reclamation_agent(chapter_number: int, llm_service=None):
     """复垦章节 agent。章号越界返回 None（与稳评同约定）。
 
-    本期只实现第 1–3 章，其余章号返回 None —— 编排层遇 None 会跳过该章，
-    不会误用稳评的 agent。
+    分派优先级：**照搬**（第 2/5/7/10 章，零 LLM，语料见
+    `scripts/build_reclamation_reference.py`）> 专属 agent（第 1/2/3 章）> 通用 agent。
     """
     from app.agent.reclamation_definitions import RECLAMATION_ALL_CHAPTERS
 
-    if int(chapter_number) not in RECLAMATION_ALL_CHAPTERS:
+    n = int(chapter_number)
+    if n not in RECLAMATION_ALL_CHAPTERS:
         return None
+
+    # 🔴 照搬优先：这几章是行业通用模板文，沿用复垦范文原文即可，不必过模型。
+    if n in reference_verbatim_chapters("reclamation"):
+        return _reference_agent(n, llm_service, domain="reclamation")
 
     from .reclamation_chapter_1_agent import ReclamationChapter1Agent
     from .reclamation_chapter_2_agent import ReclamationChapter2Agent
@@ -99,8 +112,14 @@ def _reclamation_agent(chapter_number: int, llm_service=None):
         2: ReclamationChapter2Agent,
         3: ReclamationChapter3Agent,
     }
-    cls = reclamation_map.get(int(chapter_number))
-    return cls(llm_service=llm_service) if cls else None
+    cls = reclamation_map.get(n)
+    if cls:
+        return cls(llm_service=llm_service)
+
+    # 第 4/6/8/9 章暂无专属 agent → 通用复垦章 agent（标题/检索词/表清单取自复垦目录）。
+    # 不给的话编排层遇 None 会**直接跳过该章**，成稿缺章。
+    from .reclamation_generic_agent import ReclamationGenericChapterAgent
+    return ReclamationGenericChapterAgent(n, llm_service=llm_service)
 
 
 # ── 对外入口 ──────────────────────────────────────────────────

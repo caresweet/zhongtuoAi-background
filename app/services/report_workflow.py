@@ -868,16 +868,19 @@ async def _bridge_agent_events(q: asyncio.Queue, session_id: str, logs: Optional
                     pass
 
 
-def _drop_verbatim_chapters(nums):
+def _drop_verbatim_chapters(nums, domain: str = "stability"):
     """🔴 从「待重写章节」里剔除参照件照搬章。
 
-    照搬章（第1/2/5/7章）的 markdown 是参照件原文的字面替换结果，
+    照搬章（稳评 2/5/7；复垦 2/5/7/10）的 markdown 是范文原文的字面替换结果，
     质量审查的「字数不足/表后缺分析/AI 味」等判据会把它们判为问题并触发重写，
     而重写走的是 LLM 自由写 —— 照搬就失效了。故在进入重写队列前先剔除。
+
+    🔴 必须按域取照搬章号：不传 domain 会拿到**稳评**的 {2,5,7}，
+       复垦第 10 章就会漏剔除、被 LLM 重写掉照搬稿。
     """
     try:
         from app.agent.agents.chapters import reference_verbatim_chapters
-        vb = reference_verbatim_chapters()
+        vb = reference_verbatim_chapters(domain)
         if not vb:
             return list(nums)
         kept = [c for c in nums if int(c) not in vb]
@@ -1444,7 +1447,8 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         quality_round = state.get("_quality_round", 0)
         if rewrite_chapters and quality_round < MAX_QUALITY_ROUNDS:
             # 🔴 控制每轮重写章节数（避免全量重写拖时间，最多5章/轮）
-            rewrite_chapters = _drop_verbatim_chapters(rewrite_chapters)
+            rewrite_chapters = _drop_verbatim_chapters(rewrite_chapters,
+                                                       domain_of_state(state))
             rewrite_list = sorted(rewrite_chapters)[:5]
             if len(rewrite_chapters) > 5:
                 logs.append(f"⚠️ 需重写章节过多({len(rewrite_chapters)})，本轮只重写前{len(rewrite_list)}章，其余保留原内容")
@@ -1536,7 +1540,8 @@ async def node_quality_review(state: ReportWorkflowState) -> ReportWorkflowState
         # 有「人工意见」的章节 → 路由回生成重写（模式1）
         rewrite_targets = _drop_verbatim_chapters([
             c for c in state.get("human_queue", [])
-            if state.get("human_items", {}).get(c, {}).get("human_opinion")])
+            if state.get("human_items", {}).get(c, {}).get("human_opinion")],
+            domain_of_state(state))
         if rewrite_targets:
             state["_quality_rewrite_chapters"] = sorted(rewrite_targets)
             state["_quality_rewrite_issues"] = {str(c): [] for c in rewrite_targets}

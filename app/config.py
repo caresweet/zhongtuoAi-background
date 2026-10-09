@@ -177,6 +177,16 @@ class Settings(BaseSettings):
     #   两条路径都保留：模型不可用或结构损坏时自动回退照搬稿。
     REFERENCE_LLM_REWRITE: bool = True
 
+    # 🔴 复垦照搬（与稳评各走各的语料，互不串用）：
+    #   第 2/5/7/10 章是行业通用模板文（跨样本相似度 0.53~0.78，见
+    #   scripts/build_reclamation_reference.py 的说明），沿用复垦范文原文，
+    #   只把项目名/行政区划/金额换成占位符，运行期零 LLM 渲染。
+    #   语料由 `scripts/build_reclamation_reference.py` 离线生成到
+    #   `data/reference_reports/reclamation_jiuye_zx_v1/`。
+    RECLAMATION_REFERENCE_ENABLED: bool = True
+    RECLAMATION_REFERENCE_CORPUS_ID: str = "reclamation_jiuye_zx_v1"
+    RECLAMATION_VERBATIM_CHAPTERS: str = "2,5,7,10"
+
     # 模板槽位标注表中「未人工校订」时，槽位置信度降档阈值
     TEMPLATE_PROFILE_REVIEWED_CONFIDENCE: float = 0.9
     TEMPLATE_PROFILE_UNREVIEWED_CONFIDENCE: float = 0.6

@@ -37,24 +37,35 @@ class ReferenceChapterAgent(BaseAgent):
     name = "ReferenceChapterAgent"
     description = "沿用人工成品原文，只替换地区/项目信息"
 
-    def __init__(self, chapter_number: int, llm_service=None, ref_id: str = None):
+    def __init__(self, chapter_number: int, llm_service=None, ref_id: str = None,
+                 llm_rewrite: bool = None, domain: str = "stability"):
         super().__init__(llm_service=llm_service)
         self.chapter_number = int(chapter_number)
         self._ref_id = ref_id
+        # 本次是否「参照件出骨架 + 模型改写」。None → 读全局开关（稳评口径）；
+        # 复垦显式传 False —— 复垦要的就是**零 LLM 逐字照搬**（快且与范文一致）。
+        self._llm_rewrite = llm_rewrite
         self.name = f"ReferenceChapterAgent(ch{self.chapter_number})"
         self.covered_steps = [self.chapter_number]
         try:
-            from app.agent.chapter_definitions import get_chapter_title
-            self.chapter_title = get_chapter_title(self.chapter_number)
+            # 🔴 标题必须按域取：复垦第2章是「编制总则」，稳评第2章不是同一个标题
+            from app.agent.chapter_catalog import chapter_title
+            self.chapter_title = chapter_title(domain, self.chapter_number)
         except Exception:
             self.chapter_title = f"第{self.chapter_number}章"
+
+    def _guided(self) -> bool:
+        if self._llm_rewrite is not None:
+            return bool(self._llm_rewrite)
+        from app.config import settings
+        return bool(getattr(settings, "REFERENCE_LLM_REWRITE", False))
 
     # ── think ────────────────────────────────────────────────
     async def think(self, state: dict) -> Dict[str, Any]:
         from app.config import settings
         from app.services.reference_corpus import get_reference_chapter_text
         raw = get_reference_chapter_text(self.chapter_number, self._ref_id)
-        guided = bool(getattr(settings, "REFERENCE_LLM_REWRITE", False))
+        guided = self._guided()
         steps = [
             f"📖 取参照件第{self.chapter_number}章原文（{len(raw)} 字）",
             "🔁 字面替换地区/项目信息",
@@ -92,8 +103,7 @@ class ReferenceChapterAgent(BaseAgent):
 
         # 🔴 模型改写（业主口径「除项目事实外全交给模型」）：
         #    参照件只保留骨架，正文行文交模型结合 RAG + 事实卡重写。
-        from app.config import settings
-        if not getattr(settings, "REFERENCE_LLM_REWRITE", False):
+        if not self._guided():
             return out
 
         from app.services.reference_corpus import get_reference_chapter_text

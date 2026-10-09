@@ -38,6 +38,31 @@ _FIG_ROOT = _BACKEND / "storage" / "reference_reports"
 
 DEFAULT_REF_ID = "baimahu_wind_2_shenshen_v1"
 
+# 🔴 按域分治：稳评与复垦各自持有「语料目录 / 开关 / 照搬章号」，**互不串用**。
+#    默认域仍是 stability —— 不传 domain 的调用点行为与改动前逐字一致，
+#    复垦域必须显式传 domain="reclamation" 才会走到自己的语料。
+_DOMAIN_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "stability": {
+        "settings_ref": "REFERENCE_CORPUS_ID",
+        "settings_enabled": "REFERENCE_VERBATIM_ENABLED",
+        "settings_chapters": "REFERENCE_VERBATIM_CHAPTERS",
+        "ref_id": DEFAULT_REF_ID,
+        "fallback_chapters": {1, 2, 4, 5, 7},
+    },
+    "reclamation": {
+        "settings_ref": "RECLAMATION_REFERENCE_CORPUS_ID",
+        "settings_enabled": "RECLAMATION_REFERENCE_ENABLED",
+        "settings_chapters": "RECLAMATION_VERBATIM_CHAPTERS",
+        "ref_id": "reclamation_jiuye_zx_v1",
+        # 复垦没配到语料就**照搬为空**（绝不回落到稳评的白马湖风电语料）
+        "fallback_chapters": set(),
+    },
+}
+
+
+def _domain_cfg(domain: str = "stability") -> Dict[str, Any]:
+    return _DOMAIN_DEFAULTS.get(domain or "stability") or _DOMAIN_DEFAULTS["stability"]
+
 # ── 占位符 → 事实卡字段（可多候选，按序取第一个非空） ──
 _SLOT_FIELDS: Dict[str, Tuple[str, ...]] = {
     "project_name":       ("project_name", "project_title"),
@@ -88,16 +113,17 @@ class ReferenceRenderResult:
 # 载入
 # ═══════════════════════════════════════════════════════════════
 
-def ref_dir(ref_id: str = None) -> Path:
-    return _REF_ROOT / (ref_id or _current_ref_id())
+def ref_dir(ref_id: str = None, domain: str = "stability") -> Path:
+    return _REF_ROOT / (ref_id or _current_ref_id(domain))
 
 
-def _current_ref_id() -> str:
+def _current_ref_id(domain: str = "stability") -> str:
+    cfg = _domain_cfg(domain)
     try:
         from app.config import settings
-        return getattr(settings, "REFERENCE_CORPUS_ID", "") or DEFAULT_REF_ID
+        return getattr(settings, cfg["settings_ref"], "") or cfg["ref_id"]
     except Exception:
-        return DEFAULT_REF_ID
+        return cfg["ref_id"]
 
 
 def load_reference(ref_id: str = None) -> dict:
@@ -119,33 +145,35 @@ def load_reference(ref_id: str = None) -> dict:
     return out
 
 
-def is_enabled() -> bool:
-    """总开关（默认开；有语料才真正生效）。"""
+def is_enabled(domain: str = "stability") -> bool:
+    """总开关（默认开；有语料才真正生效）。按域取各自的开关与语料。"""
+    cfg = _domain_cfg(domain)
     try:
         from app.config import settings
-        if not getattr(settings, "REFERENCE_VERBATIM_ENABLED", True):
+        if not getattr(settings, cfg["settings_enabled"], True):
             return False
     except Exception:
         pass
-    return bool(load_reference()["chapters"])
+    return bool(load_reference(_current_ref_id(domain))["chapters"])
 
 
-def verbatim_chapters() -> set:
-    """要照搬的章号集合。优先级：settings > meta.json > 默认。"""
+def verbatim_chapters(domain: str = "stability") -> set:
+    """要照搬的章号集合。优先级：settings > meta.json > 默认。按域取各自的配置。"""
+    cfg = _domain_cfg(domain)
     try:
         from app.config import settings
-        raw = getattr(settings, "REFERENCE_VERBATIM_CHAPTERS", "")
+        raw = getattr(settings, cfg["settings_chapters"], "")
         if raw:
             return {int(x) for x in re.split(r'[,\s]+', str(raw)) if x.strip().isdigit()}
     except Exception:
         pass
-    m = load_reference()["meta"].get("verbatim_chapters")
+    m = load_reference(_current_ref_id(domain))["meta"].get("verbatim_chapters")
     if m:
         try:
             return {int(x) for x in m}
         except Exception:
             pass
-    return {1, 2, 4, 5, 7}
+    return set(cfg["fallback_chapters"])
 
 
 def get_reference_chapter_text(chapter_no: int, ref_id: str = None) -> str:
@@ -190,7 +218,9 @@ def _derive_site_units(location: str) -> str:
     return s
 
 
-def resolve_slot_value(slot: str, filled: Dict[str, Any]) -> Tuple[Optional[str], str]:
+def resolve_slot_value(slot: str, filled: Dict[str, Any],
+                       numeric_slots: Optional[set] = None,
+                       slot_fields: Optional[Dict[str, tuple]] = None) -> Tuple[Optional[str], str]:
     """求一个占位符的值 → (文本 or None, status)。
 
     status ∈ ok / derived / generic / missing
@@ -201,8 +231,9 @@ def resolve_slot_value(slot: str, filled: Dict[str, Any]) -> Tuple[Optional[str]
     """
     filled = filled or {}
 
-    # 兜底从 facts 里取
-    for key in _SLOT_FIELDS.get(slot, ()):
+    # 兜底从 facts 里取（meta 可给本域额外的 槽位→事实卡字段 映射）
+    _fields = ({**slot_fields, **_SLOT_FIELDS} if slot_fields else _SLOT_FIELDS).get(slot, ())
+    for key in _fields:
         v = _norm(filled.get(key))
         if v:
             return v, "ok"
@@ -228,7 +259,7 @@ def resolve_slot_value(slot: str, filled: Dict[str, Any]) -> Tuple[Optional[str]
             pass
         return None, "missing"
 
-    if slot in _NUMERIC_SLOTS:
+    if slot in (numeric_slots or _NUMERIC_SLOTS):
         return None, "missing"
     return _TEXT_FALLBACK.get(slot, ""), "generic"
 
@@ -278,9 +309,119 @@ def _project_documents_block(md: str, filled: Dict[str, Any]) -> str:
 # 渲染
 # ═══════════════════════════════════════════════════════════════
 
+_CN_H = "一二三四五六七八九十"
+
+
+def _cn_num_h(i: int) -> str:
+    if i <= 10: return _CN_H[i-1]
+    if i < 20: return "十" + _CN_H[i-11]
+    return _CN_H[i//10-1] + "十" + (_CN_H[i % 10-1] if i % 10 else "")
+
+
+# 二级标题末尾粘了 `1.子标题`（PDF 断行合并所致）
+# 头部限定为「以汉字开头、不含数字」，尾部限定为「汉字开头」，避开 `依据3.2条…` 这类正常行文
+_GLUED = re.compile(r'^([一-龥][^0-9]{1,20}?)(\d{1,2})[.、]([一-龥].*)$')
+
+
+def _transform_headings(md: str, mode: str) -> str:
+    """语料标题 → 成稿标题。
+
+    mode="cn_paren"（稳评默认）：`## X.Y 标题` → `### （N）标题`（二级）、
+        `### X.Y.Z 标题` → `#### K.标题`（三级）。
+    mode="numeric"（复垦）：样本本身就是「2.1 编制目的」的数字编号，**不做**（一）转换，
+        只把层级平移一格：`## X.Y` → `### X.Y`、`### X.Y.Z` → `#### X.Y.Z`。
+
+    🔴 稳评分支是原实现逐字搬来的 —— 改动它等于改动稳评成稿。
+    """
+    if mode == "numeric":
+        out = []
+        for ln in md.split("\n"):
+            m = re.match(r'^(#{2,3})\s*(\d+(?:\.\d+)*\s*.+)$', ln.strip())
+            out.append(f"#{m.group(1)} {m.group(2)}" if m else ln)
+        return "\n".join(out)
+
+    # ── 稳评：`## X.Y 标题` → `### （N）标题`
+    #     🔴 **必须保层级**。旧实现把所有 `#{2,4} 数字…` 一律压成 `### （N）`，
+    #        于是参照件「5.1 总则 / 5.1.1 编制目的 / 5.1.2 编制依据 / 5.1.3 适用范围」
+    #        被拉平成（一）（二）（三）（四）四个**平级**小节，模板的二级/三级结构整段丢失。
+    #        业主口径「依据模板来」：模板是几级，产出就是几级。
+    #
+    #     🔴 另需拆开 PDF 断行粘连的标题：`## 5.7 预警机制1.预警信息`
+    #        实为模板的「5.7 预警机制」（二级）+「1.预警信息」（三级）两行被并成了一行。
+    lines_tmp, _h2, _h3 = [], 0, 0
+    for _ln in md.split("\n"):
+        _m = re.match(r'^(#{2,4})\s*\d+(?:\.\d+)*\s*(.+)$', _ln.strip())
+        if not _m:
+            lines_tmp.append(_ln)
+            continue
+        _lvl, _body = len(_m.group(1)), _m.group(2).strip()
+        if _lvl >= 3:                       # 三级
+            _h3 += 1
+            lines_tmp.append(f"#### {_h3}.{_body}")
+            continue
+        _h2 += 1; _h3 = 0                   # 二级：三级序号在二级内重排
+        _g = _GLUED.match(_body)
+        if _g:                              # 拆粘连：二级标题 + 它的第一个三级子标题
+            lines_tmp.append(f"### （{_cn_num_h(_h2)}）{_g.group(1).strip()}")
+            _h3 = min(int(_g.group(2)), 99)
+            lines_tmp.append(f"#### {_h3}.{_g.group(3).strip()}")
+        else:
+            lines_tmp.append(f"### （{_cn_num_h(_h2)}）{_body}")
+    return "\n".join(lines_tmp)
+
+
 _PH = re.compile(r'\{\{(\w+)\}\}')
 # 句子切分：用于「整句删除」
 _SENT = re.compile(r'[^。；！？\n]+[。；！？]?')
+
+
+def _drop_empty_sections(md: str) -> Tuple[str, int]:
+    """删掉「下面没有正文」的标题（含 `N）小标签`）。
+
+    🔴 数值槽位缺失时整句会被删（见 `_drop_sentences_with_numeric_slots`），
+       若某小节正文只有那一句，就只剩一个光标题 —— 读者以为这里漏了内容。
+
+    🔴 判据必须**保守**，只删确凿为空的：
+       · 标题下面紧跟**更深**的标题（`### 5.3` + `#### 5.3.1`）是父子结构 → 保留；
+       · 标题下面挂的是 `N）条目` → 它本身是父标题 → 保留；
+       · 只有下一个非空行是**同级/更浅标题**、或已是文末，才是空标题。
+       · `N）条目` 与下一个条目之间没有正文 → 空条目，删。
+    """
+    lines = md.split("\n")
+
+    def _lvl(s: str):
+        m = re.match(r'^(#{2,4})\s', s.strip())
+        return len(m.group(1)) if m else None
+
+    def _label(s: str) -> bool:
+        return bool(re.match(r'^\d+[）)]\s*\S{0,20}$', s.strip()))
+
+    out, removed = [], 0
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        lv = _lvl(s)
+        if lv is None and not _label(s):
+            out.append(ln)
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j >= len(lines):                       # 文末且下面无正文
+            removed += 1
+            continue
+        nxt = lines[j].strip()
+        nlv = _lvl(nxt)
+        if nlv is None and not _label(nxt):       # 下面是正文 → 保留
+            out.append(ln)
+            continue
+        if lv is not None and (nlv is not None and nlv > lv):
+            out.append(ln)                        # 父标题 + 更深的子标题
+            continue
+        if lv is not None and _label(nxt):
+            out.append(ln)                        # 父标题 + 条目
+            continue
+        removed += 1                              # 同级/更浅标题 或 条目紧跟条目
+    return "\n".join(out), removed
 
 
 def _drop_sentences_with_numeric_slots(md: str, missing: set) -> Tuple[str, int]:
@@ -403,9 +544,12 @@ def _strip_personal_phones(md: str) -> Tuple[str, int]:
 
 
 def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
-                              ref_id: str = None) -> ReferenceRenderResult:
+                              ref_id: str = None,
+                              domain: str = "stability") -> ReferenceRenderResult:
     """把参照件某章原文渲染成本项目文本（纯字面替换，零 LLM）。"""
     res = ReferenceRenderResult(chapter=chapter_no)
+    if ref_id is None:
+        ref_id = _current_ref_id(domain)
     raw = get_reference_chapter_text(chapter_no, ref_id)
     if not raw:
         res.gaps.append({"field": f"reference_ch{chapter_no}", "reason": "no_corpus",
@@ -416,48 +560,14 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
     md = raw
 
     # ① 先剔项目类型专属条目（在替换前做，关键词还在原文里）
-    deny = meta.get("project_type_deny") or _DEFAULT_DENY
+    #    🔴 用「键是否存在」判定，不用真值 —— meta 显式写 [] 表示「本域无专属词可滤」，
+    #       写成 `or _DEFAULT_DENY` 会被静默回落成稳评的风电词表。
+    deny = meta["project_type_deny"] if "project_type_deny" in meta else _DEFAULT_DENY
     md, _removed_items = _strip_project_type_items(md, deny)
     res.removed_count += _removed_items
 
-    # ①a 体例转换：`## X.Y 标题` → `### （N）标题`（二级）
-    #              `### X.Y.Z 标题` → `#### K.标题`（三级）
-    #
-    #     🔴 **必须保层级**。旧实现把所有 `#{2,4} 数字…` 一律压成 `### （N）`，
-    #        于是参照件「5.1 总则 / 5.1.1 编制目的 / 5.1.2 编制依据 / 5.1.3 适用范围」
-    #        被拉平成（一）（二）（三）（四）四个**平级**小节，模板的二级/三级结构整段丢失。
-    #        业主口径「依据模板来」：模板是几级，产出就是几级。
-    #
-    #     🔴 另需拆开 PDF 断行粘连的标题：`## 5.7 预警机制1.预警信息`
-    #        实为模板的「5.7 预警机制」（二级）+「1.预警信息」（三级）两行被并成了一行。
-    _CN = "一二三四五六七八九十"
-    def _cn(i):
-        if i <= 10: return _CN[i-1]
-        if i < 20: return "十" + _CN[i-11]
-        return _CN[i//10-1] + "十" + (_CN[i % 10-1] if i % 10 else "")
-    # 二级标题末尾粘了 `1.子标题`（PDF 断行合并所致）
-    # 头部限定为「以汉字开头、不含数字」，尾部限定为「汉字开头」，避开 `依据3.2条…` 这类正常行文
-    _GLUED = re.compile(r'^([一-龥][^0-9]{1,20}?)(\d{1,2})[.、]([一-龥].*)$')
-    lines_tmp, _h2, _h3 = [], 0, 0
-    for _ln in md.split("\n"):
-        _m = re.match(r'^(#{2,4})\s*\d+(?:\.\d+)*\s*(.+)$', _ln.strip())
-        if not _m:
-            lines_tmp.append(_ln)
-            continue
-        _lvl, _body = len(_m.group(1)), _m.group(2).strip()
-        if _lvl >= 3:                       # 三级
-            _h3 += 1
-            lines_tmp.append(f"#### {_h3}.{_body}")
-            continue
-        _h2 += 1; _h3 = 0                   # 二级：三级序号在二级内重排
-        _g = _GLUED.match(_body)
-        if _g:                              # 拆粘连：二级标题 + 它的第一个三级子标题
-            lines_tmp.append(f"### （{_cn(_h2)}）{_g.group(1).strip()}")
-            _h3 = min(int(_g.group(2)), 99)
-            lines_tmp.append(f"#### {_h3}.{_g.group(3).strip()}")
-        else:
-            lines_tmp.append(f"### （{_cn(_h2)}）{_body}")
-    md = "\n".join(lines_tmp)
+    # ①a 体例转换：见 _transform_headings（稳评 cn_paren / 复垦 numeric 两种模式）
+    md = _transform_headings(md, meta.get("heading_mode") or "cn_paren")
 
     # ①a′ 三级标题统一：同节内「1. 升了标题、2. 还留在正文」的一半一半，补齐
     md = _unify_sub_headings(md)
@@ -467,10 +577,12 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
     #     逐个替换会把同一串位置重复写两遍（→「涉及…、…、…、…」）。
     md = re.sub(r'\{\{(\w+)\}\}([、，,]\s*)\{\{\1\}\}', r'{{\1}}', md)
 
-    # ② 求各占位符的值
+    # ② 求各占位符的值（数值槽位表按域扩展：meta 里声明的 + 内置的）
+    _numeric = set(meta.get("numeric_slots") or ()) | _NUMERIC_SLOTS
     values, missing_numeric = {}, set()
     for slot in set(_PH.findall(md)):
-        v, status = resolve_slot_value(slot, filled)
+        v, status = resolve_slot_value(slot, filled, numeric_slots=_numeric,
+                                       slot_fields=meta.get("slot_fields"))
         if status == "missing":
             missing_numeric.add(slot)
             res.gaps.append({"field": slot, "chapter": chapter_no,
@@ -484,6 +596,13 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
         md, _removed_sent = _drop_sentences_with_numeric_slots(md, missing_numeric)
         res.removed_count += _removed_sent
 
+    # ③a 整句删完后可能只剩光标题（「7.1.3 土地复垦投资情况」下面直接是 7.2）→ 清掉。
+    #     默认关：稳评成稿里 `### （一）总则` + `#### 1.编制目的` 这类**父子**结构
+    #     靠层级判据本可保住，但稳评要求逐字不变，就不去动它。
+    if meta.get("drop_empty_sections"):
+        md, _removed_sec = _drop_empty_sections(md)
+        res.removed_count += _removed_sec
+
     # ④ 替换其余占位符
     md = _PH.sub(lambda m: values.get(m.group(1), ""), md)
 
@@ -491,7 +610,7 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
     #     照搬源里那是白马湖风电项目的材料清单（独立选址论证报告 / 机位点红线图 /
     #     升压站合建承诺书 …），本项目根本没有这些材料 —— 照搬即事实性错误。
     #     改为从本项目事实卡与实际上传材料派生。
-    if int(chapter_no) == 2:
+    if int(chapter_no) == 2 and meta.get("chapter2_documents_block", True):
         md = _project_documents_block(md, filled)
 
     # ⑤c 隐私兜底：任何来源的自然人手机号都不进成稿
@@ -509,8 +628,9 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
     md = re.sub(r'^[、，,；;]\s*', '', md, flags=re.M)
     res.markdown = md.strip()
 
-    # ⑥ 泄漏自检
-    res.leaks = [w for w in LEAK_WORDS if w in res.markdown]
+    # ⑥ 泄漏自检（词表按域取：meta 未声明才回落稳评的白马湖词表）
+    _leak_words = meta.get("leak_words") or LEAK_WORDS
+    res.leaks = [w for w in _leak_words if w in res.markdown]
     if res.leaks:
         logger.warning(f"[参照件] 第{chapter_no}章疑似残留参照件专有词: {res.leaks}")
     return res

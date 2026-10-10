@@ -1936,6 +1936,15 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
         output = report_assembler.assemble(asm_state)
         if output:
             state["output_path"] = output
+            # 🔴 **缺口清单要回写**：装配器把 `collect_gaps` 的结果写进了 `asm_state`
+            #    （那是个白名单式构造的**临时 dict**，装配完就丢），不回写的话
+            #    session.state 里 `_chapter_gaps` 永远是空 —— 前端 `GET /gaps` 恒返回 0，
+            #    缺口就只剩「Word 批注」一个出口。复垦现在不写批注（业主口径），
+            #    不回写等于缺口**彻底看不见**（实测 2026-10-10：接口 total=0，
+            #    而同一批缺口在批注里明明有 9 章）。
+            for _k in ("_chapter_gaps", "_table_issues"):
+                if asm_state.get(_k):
+                    state[_k] = asm_state[_k]
             state["phase"] = WorkflowPhase.COMPLETE.value
             logs.append(f"✅ 报告已生成: {output}")
             # 🔴 输出各流程耗时，供后续逐步优化

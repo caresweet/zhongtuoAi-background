@@ -2618,6 +2618,14 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                 state["human_queue"] = wf_state.get("human_queue")
             if wf_state.get("_quality_audit"):
                 state["_quality_audit"] = wf_state.get("_quality_audit")
+            # 🔴 **缺口清单必须合并回会话** —— 装配器把它写进工作流状态，
+            #    而 `GET /generate/{sid}/gaps` 读的是 `session.state`。
+            #    不在这张清单里 = 前端永远拿到 total=0（实测 2026-10-10；
+            #    以前看不出来是因为缺口另有一个出口 —— Word 批注，而那个出口
+            #    对复垦既是坏的（锚点用稳评正则）又已被业主叫停）。
+            for _k in ("_chapter_gaps", "_table_issues"):
+                if wf_state.get(_k):
+                    state[_k] = wf_state.get(_k)
             # 🔴 Sync filled_data back — LLM-extracted fields must reach assembler
             wf_filled = wf_state.get("filled_data", {})
             if wf_filled:

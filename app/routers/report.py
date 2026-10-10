@@ -1895,6 +1895,28 @@ async def upload_attachment(
         "original_name": _orig,
         "file_type": result.get("file_type", "image")
     })
+
+    # 🔴 CAD 图纸（DWG/DXF）：报告里要的是**图片**，先渲一张 PNG 并登记成上传图片 ——
+    #    否则图纸进了库也进不了图片流水线（复垦的「临时用地功能分布图 / 主体项目红线图」
+    #    材料里给的就是 CAD，渲不出来那两张图在报告里就永远是空的）。
+    #    渲染失败**不影响上传**：图纸照常留存，只是拿不到预览图。
+    try:
+        from app.services.cad_renderer import CAD_EXTENSIONS, render_cad_to_png
+        if Path(result["relative_path"]).suffix.lower() in CAD_EXTENSIONS:
+            from app.config import settings as _st
+            _src = Path(_st.STORAGE_DIR) / result["relative_path"]
+            _png_rel = str(Path(result["relative_path"]).with_suffix(".cad.png"))
+            _ok, _why = render_cad_to_png(str(_src), str(Path(_st.STORAGE_DIR) / _png_rel))
+            if _ok:
+                uploaded_files.append({"path": _png_rel,
+                                       "original_name": Path(_orig).stem + "_图纸.png",
+                                       "file_type": "image"})
+                _ul.info(f"[UPLOAD] CAD 已渲染: {_png_rel}（{_why}）")
+            else:
+                _ul.warning(f"[UPLOAD] CAD 未渲染（图纸仍已留存）: {_why}")
+    except Exception as _ce:
+        _ul.warning(f"[UPLOAD] CAD 渲染跳过: {_ce}")
+
     session.state = session.state
     report_service._save_sessions()
     _ul.info(f"[UPLOAD] 会话文件数: {len(uploaded_files)}")

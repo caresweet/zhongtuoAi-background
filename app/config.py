@@ -127,6 +127,10 @@ class Settings(BaseSettings):
         ".ppt", ".pptx",                                         # PowerPoint
         ".txt", ".md",                                           # text files
         ".zip", ".rar",                                          # archives
+        # 🔴 CAD 图纸：土地复垦材料的「临时用地功能分布图 / 主体项目红线图」
+        #    本来就是 DWG/DXF（业主实测材料就是这两种）。不放行的话这两张图
+        #    根本进不来 —— 报告里那份「图件」就永远是空的。
+        ".dwg", ".dxf",
     ]
     MAX_ATTACHMENT_SIZE_MB: int = 100  # Max size for non-image, non-PDF attachments
 

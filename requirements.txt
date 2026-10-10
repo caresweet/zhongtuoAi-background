@@ -45,3 +45,7 @@ httpx==0.28.1
 
 # Vector Store (RAG)
 chromadb==0.5.23
+
+# CAD 图纸渲染（复垦材料的「功能分布图 / 红线图」是 DWG/DXF，报告里要图片）
+ezdxf==1.4.4
+matplotlib==3.11.2

@@ -181,6 +181,18 @@ def has_questionnaire_tables(domain: str | None) -> bool:
     return domain != _RECLAMATION
 
 
+def injects_audit_comments(domain: str | None) -> bool:
+    """该域的产物里是否注入 **Word 批注**（缺口清单/审核项/人工意见）。
+
+    稳评：注入 —— 它的口径是「正文不许出现【待补充】，但缺口必须显性」，
+          批注是当时唯一能同时满足两条的落点（逐字不变）。
+    复垦：**不注入**。业主 2026-10-10 口径：「不需要你写这个，这些内容你可以在
+          项目生成报告结束后跟用户提示」—— 交付稿里一个批注气球都不该有，
+          缺口改走前端（`GET /generate/{sid}/gaps` → `AssistantView` 的缺口面板）。
+    """
+    return domain != _RECLAMATION
+
+
 def front_matter_labels(domain: str | None) -> Dict[str, str]:
     """装配器「前置件 / 固定抬头 / 兜底文案」按域取的中文标注。
 

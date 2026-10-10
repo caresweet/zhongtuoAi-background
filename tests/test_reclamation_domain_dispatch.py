@@ -802,31 +802,27 @@ def test_chapter_no_of_text_per_domain():
     assert cat.chapter_no_of_text("stability", "1 前言") == 0
 
 
-def test_audit_comments_anchor_on_chapters_not_cover(tmp_path):
-    """审核批注要挂在**各自章节**上，不许全落到封面。
+def test_reclamation_has_no_word_audit_comments(tmp_path):
+    """复垦产物里**不许有 Word 批注** —— 缺口改在生成结束后由前端提示。
 
-    实测（2026-10-10）：锚点正则写死稳评的 `^第X章`，复垦的 `1 前言` 匹配不上 →
-    9 条批注全挂 `doc.paragraphs[0]`（封面标题）→ 交付稿首页一排气球。
+    业主 2026-10-10 口径：「不需要你写这个，这些内容你可以在项目生成报告结束后
+    跟用户提示或者用个方式说明」。以前缺口写成批注挂在章节上（交付稿里带一批批注
+    气球）；而且锚点用的还是稳评的 `^第X章`，复垦一条都匹配不上，
+    9 条批注全落到封面标题（首页挂满气球）。
+
+    稳评不变（仍注入，逐字等于改动前）。
     """
-    import re as _re
     import zipfile
+    assert cat.injects_audit_comments("reclamation") is False
+    assert cat.injects_audit_comments("stability") is True
+    assert cat.injects_audit_comments(None) is True
     _gaps = {1: [{"detail": "第1章缺 X", "severity": "warn", "sentence": "第一句"}],
              3: [{"detail": "第3章缺 Y", "severity": "info", "sentence": "第三句"}]}
-    out, _ = _render(tmp_path, "reclamation",
-                     {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"},
-                      3: {"markdown": "# 项目概况\n\n## 3.1 项目简介\n\nBODY3\n"}},
-                     {"project_name": "测试复垦项目"},
-                     extra_state={"_chapter_gaps": _gaps})
+    out, text = _render(tmp_path, "reclamation",
+                        {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"},
+                         3: {"markdown": "# 项目概况\n\n## 3.1 项目简介\n\nBODY3\n"}},
+                        {"project_name": "测试复垦项目"},
+                        extra_state={"_chapter_gaps": _gaps})
     _p = tmp_path / "generated" / out.split("/")[-1]
-    z = zipfile.ZipFile(str(_p))
-    if "word/comments.xml" not in z.namelist():
-        pytest.skip("本次渲染没有审核批注（无缺口数据）")
-    x = z.read("word/document.xml").decode()
-    paras = _re.findall(r'<w:p[ >].*?</w:p>', x, _re.S)
-    assert not _re.findall(r'commentRangeStart', paras[0]), "封面（段0）不该挂批注"
-    _anchors = []
-    for _pa in paras:
-        if _re.findall(r'commentRangeStart', _pa):
-            _anchors.append("".join(_re.findall(r'<w:t[^>]*>([^<]*)</w:t>', _pa)).strip())
-    # 有缺口的第1/3章各挂一条，锚在**章标题**上
-    assert "1 前言" in _anchors and "3 项目概况" in _anchors, _anchors
+    assert "word/comments.xml" not in zipfile.ZipFile(str(_p)).namelist()
+    assert "待补充/待核对" not in text

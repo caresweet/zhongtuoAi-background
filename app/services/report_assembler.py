@@ -27,6 +27,7 @@ from app.agent.chapter_catalog import (
     cover_org_value,
     cover_date_parts,
     has_questionnaire_tables,
+    injects_audit_comments,
     body_image_anchor,
     typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
@@ -5727,6 +5728,10 @@ class ReportAssembler:
             检测见 `app/services/gap_detector.py`。
         """
         from docx.oxml.ns import qn as _qn
+        # 🔴 复垦**不往交付稿里写批注**（业主 2026-10-10 口径）——
+        #    缺口改在生成结束后由前端提示，见 `chapter_catalog.injects_audit_comments`。
+        if not injects_audit_comments(self._domain):
+            return
         chapter_audits = state.get("chapter_audits", {}) or {}
         human_items = state.get("human_items", {}) or {}
         audit = state.get("_quality_audit", {}) or {}

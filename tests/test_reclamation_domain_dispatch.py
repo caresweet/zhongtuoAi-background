@@ -278,6 +278,27 @@ def test_has_title_page_per_domain():
     assert cat.has_title_page("reclamation") is True
 
 
+def test_cover_org_value_per_domain():
+    """封面落款第一行的值：稳评逐字取 org_name；复垦取项目单位（用地/建设单位）。
+
+    实测 2026-10-10 明远佳苑：封面照旧取 org_name 时印的是「淮安市自然资源和规划局」
+    （那是公告机关），而扉页取 project_unit 印的是「中铁建工集团有限公司」——
+    同一份报告两页两个「项目单位」。复垦必须与扉页同源。
+    """
+    filled = {"project_unit": "中铁建工集团有限公司"}
+    # 稳评：逐字等于改动前的 org_name，不受 project_unit 影响
+    assert cat.cover_org_value("stability", filled, "洪泽区人民政府") == "洪泽区人民政府"
+    assert cat.cover_org_value(None, filled, "洪泽区人民政府") == "洪泽区人民政府"
+    # 复垦：优先 project_unit
+    assert cat.cover_org_value("reclamation", filled, "淮安市自然资源和规划局") \
+        == "中铁建工集团有限公司"
+    # 复垦抽不到 project_unit → 退回 org_name（不印空行）
+    assert cat.cover_org_value("reclamation", {}, "淮安市自然资源和规划局") \
+        == "淮安市自然资源和规划局"
+    assert cat.cover_org_value("reclamation", None, "淮安市自然资源和规划局") \
+        == "淮安市自然资源和规划局"
+
+
 def test_chapter_heading_text_per_domain():
     """稳评逐字等于改动前 `_add_chapter_title_page` 的 f"第{cn}章、{title}"。"""
     assert cat.chapter_heading_text("stability", 3, "三", "评估过程、方法和依据") \

@@ -217,6 +217,24 @@ def has_title_page(domain: str | None) -> bool:
     return "title_page" in front_matter_order(domain)
 
 
+def cover_org_value(domain: str | None, filled: dict, org_name: str) -> str:
+    """封面落款第一行 `front_matter_labels(domain)["org_label"]` 后面跟的**值**。
+
+    稳评：责任主体 = 公告/征收主体，即装配器算出来的 `org_name` —— **逐字等于改动前**。
+    复垦：抬头写的是「项目单位」，其值是**用地/建设单位**，在材料的
+          `project_unit` 里（样本《明远佳苑二期》封面写的就是项目单位名）；
+          抽不到才退回 `org_name`。
+
+    🔴 为什么单独收口：封面与扉页必须写**同一个**项目单位。扉页
+       （`_add_title_page`）取 `project_unit`；封面若照旧取稳评口径的 `org_name`，
+       同一份报告的两页会印出两个不同的「项目单位」—— 实测 2026-10-10 明远佳苑：
+       封面「淮安市自然资源和规划局」（其实是公告机关）、扉页「中铁建工集团有限公司」。
+    """
+    if domain == _RECLAMATION:
+        return str((filled or {}).get("project_unit") or org_name or "")
+    return str(org_name or "")
+
+
 def chapter_heading_text(domain: str | None, chapter_number: int,
                          cn: str, title: str) -> str:
     """章标题文本（Heading 1）。

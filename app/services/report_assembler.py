@@ -22,6 +22,7 @@ from app.agent.chapter_catalog import (
     report_kind_name, cover_type_line, cover_fallback_title,
     front_matter_labels,
     front_matter_order,
+    cover_org_value,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
 )
 from app.domains.registry import domain_of_state
@@ -567,7 +568,9 @@ class ReportAssembler:
         # Cover Page（_add_cover_page 内部已分页，此处不再重复分页）
         if "cover" in _front:
             implement_unit = filled.get("implement_unit", "") or self._cv("implement_unit")
-            self._add_cover_page(doc, doc_ref, project_name, org_name, location, implement_unit)
+            self._add_cover_page(doc, doc_ref, project_name,
+                                 cover_org_value(self._domain, filled, org_name),
+                                 location, implement_unit)
 
         # 公司资质（无图片则跳过）
         if "qualifications" in _front:

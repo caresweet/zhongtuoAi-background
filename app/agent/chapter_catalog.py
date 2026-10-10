@@ -206,6 +206,44 @@ _FRONT_MATTER_ORDER = {
 }
 
 
+_TYPO = {
+    # 稳评（默认域）：**逐字等于改动前**。
+    #   一级 黑体 22pt 是业主 2026-09-21 明确选型；二三级与正文按参照件
+    #   《白马湖农场1号风电项目》实测值。
+    "stability": {
+        "h1": ("黑体", 22), "h2": ("宋体", 15), "h3": ("宋体", 14),
+        "body": ("宋体", 12),
+        "cover_title": ("宋体", 26), "cover_sign": ("宋体", 14),
+        "title_page_head": ("宋体", 22), "title_page_info": ("宋体", 12),
+        "toc_heading": ("黑体", 18), "toc_l1": ("宋体", 12), "toc_l2": ("宋体", 12),
+    },
+    # 复垦：**四份样本逐份实测，取值完全一致**
+    #   （明远路 139 页 / 王元佳苑 154 页 / 污水处理厂 126 页 / 宁淮城际 127 页）。
+    #   ⚠️ 一级标题样本是 16pt 黑体，**不是**稳评那个 22pt —— 22pt 是稳评的业主选型，
+    #      四份复垦样本没有一份这么印。二三级在样本里同样是**黑体**（不是宋体）。
+    #      「明远路」那份的编制人员栏写的是江苏众拓测绘 —— 即自家交出去、业主收下的成品。
+    "reclamation": {
+        "h1": ("黑体", 16), "h2": ("黑体", 15), "h3": ("黑体", 14),
+        "body": ("仿宋", 12),
+        "cover_title": ("黑体", 26), "cover_sign": ("黑体", 15),
+        "title_page_head": ("黑体", 22), "title_page_info": ("仿宋", 14),
+        "toc_heading": ("黑体", 18), "toc_l1": ("黑体", 12), "toc_l2": ("仿宋", 12),
+    },
+}
+
+
+def typography(domain: str | None, slot: str) -> tuple:
+    """该域某个版式槽位的 `(中文字体, 字号 pt)`。
+
+    槽位：`h1/h2/h3`（标题）· `body`（正文）· `cover_title/cover_sign`（封面标题/落款）·
+    `title_page_head/title_page_info`（扉页标题/信息行）· `toc_heading/toc_l1/toc_l2`（目录）。
+
+    🔴 稳评是默认域，取值与改动前逐字相同；未知槽位也回落到稳评，不抛异常。
+    """
+    _d = _TYPO.get(domain or "stability", _TYPO["stability"])
+    return _d.get(slot) or _TYPO["stability"].get(slot) or ("宋体", 12)
+
+
 def front_matter_order(domain: str | None) -> List[str]:
     """前置件渲染顺序（token 列表）。稳评四件，逐字等于改动前的拼接顺序与分页点。"""
     return list(_FRONT_MATTER_ORDER.get(domain or "stability",

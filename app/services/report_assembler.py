@@ -24,6 +24,7 @@ from app.agent.chapter_catalog import (
     front_matter_order,
     cover_org_value,
     body_image_anchor,
+    typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
 )
 from app.domains.registry import domain_of_state
@@ -1673,12 +1674,16 @@ class ReportAssembler:
                     continue
                 if is_h1:
                     # 🔴 字号只按层级定，不看文本（旧版按文本含「封面」就把字号抬到 24pt）。
-                    #    黑体三号加粗居中 —— 与业主口径/案卷体例一致。
-                    _set_run_font(run, FONT_H1, size=H1_SIZE, bold=H1_BOLD, ascii_font=FONT_H1)
+                    #    字体/字号**按域取** —— 这里是全文最后一次刷标题字体，
+                    #    不跟着域走的话，上面 `_add_heading` 按域设的值会被这里刷回稳评那套。
+                    _ea, _pt = typography(self._domain, "h1")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=_ea)
                 elif is_h2:
-                    _set_run_font(run, FONT_H2, size=H2_SIZE, bold=True, ascii_font=FONT_ASCII)
+                    _ea, _pt = typography(self._domain, "h2")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=FONT_ASCII)
                 else:  # h3
-                    _set_run_font(run, FONT_H3, size=H3_SIZE, bold=True, ascii_font=FONT_ASCII)
+                    _ea, _pt = typography(self._domain, "h3")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=FONT_ASCII)
 
         # ── 4. Line spacing to 28pt ──
         from docx.shared import Pt as _Pt2
@@ -2032,10 +2037,12 @@ class ReportAssembler:
             pn = cover_fallback_title(self._domain)
 
         # ── 标题：两行、同字号、居中 ──
+        _ct_font, _ct_pt = typography(self._domain, "cover_title")
+        _cs_font, _cs_pt = typography(self._domain, "cover_sign")
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = _TITLE_TOP_PT
         p.paragraph_format.space_after = Pt(6)
-        _set_run_font(p.add_run(pn), FONT_COVER_TITLE, size=Pt(26), bold=True, ascii_font=FONT_ASCII)
+        _set_run_font(p.add_run(pn), _ct_font, size=Pt(_ct_pt), bold=True, ascii_font=FONT_ASCII)
 
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
@@ -2043,11 +2050,11 @@ class ReportAssembler:
         # 🔴 业主口径（2026-09-21）：第二行写《社会稳定性风险评估》。
         #    参照件《白马湖农场1号》是裸的「社会稳定风险评估」，业主明确要求改，
         #    以业主口径为准。该行是**报告类型**，按域取（复垦为《土地复垦方案》）。
-        _set_run_font(p.add_run(cover_type_line(self._domain)), FONT_COVER_TITLE, size=Pt(26),
+        _set_run_font(p.add_run(cover_type_line(self._domain)), _ct_font, size=Pt(_ct_pt),
                       bold=True, ascii_font=FONT_ASCII)
 
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
-        # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「复垦责任主体/实施单位」）。
+        # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「项目单位/编制单位」）。
         _fl = front_matter_labels(self._domain)
         for i, (lab, val) in enumerate((
             (_fl["org_label"], org_name or ''),
@@ -2059,7 +2066,8 @@ class ReportAssembler:
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             p.paragraph_format.space_before = _SIGN_TOP_PT if i == 0 else Pt(0)
             p.paragraph_format.space_after = Pt(0)
-            _set_run_font(p.add_run(lab + val), FONT_BODY, size=Pt(14), ascii_font=FONT_ASCII)
+            _set_run_font(p.add_run(lab + val), _cs_font, size=Pt(_cs_pt),
+                          ascii_font=FONT_ASCII)
 
         doc.add_page_break()
 
@@ -2074,19 +2082,21 @@ class ReportAssembler:
            「待填写」「【待补充】」这类占位符，也不为它弹窗问用户）。
         """
         pn = (project_name or doc_ref or '').strip()
+        _th_font, _th_pt = typography(self._domain, "title_page_head")
+        _ti_font, _ti_pt = typography(self._domain, "title_page_info")
 
         # ── 顶部：项目名 + 报告类型（与封面同款，居中）──
         if pn:
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(96)
             p.paragraph_format.space_after = Pt(6)
-            _set_run_font(p.add_run(pn), FONT_COVER_TITLE, size=Pt(22), bold=True,
+            _set_run_font(p.add_run(pn), _th_font, size=Pt(_th_pt), bold=True,
                           ascii_font=FONT_ASCII)
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(24)
-        _set_run_font(p.add_run(cover_type_line(self._domain)), FONT_COVER_TITLE,
-                      size=Pt(22), bold=True, ascii_font=FONT_ASCII)
+        _set_run_font(p.add_run(cover_type_line(self._domain)), _th_font,
+                      size=Pt(_th_pt), bold=True, ascii_font=FONT_ASCII)
 
         # ── 信息块：标签 + 值；值为空则整行略过 ──
         #    「项目单位」优先取 `project_unit`（材料里的「用地单位/建设单位」），
@@ -2107,7 +2117,7 @@ class ReportAssembler:
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             p.paragraph_format.space_before = Pt(72) if _first else Pt(6)
             p.paragraph_format.space_after = Pt(0)
-            _set_run_font(p.add_run(lab + v), FONT_BODY, size=Pt(12), ascii_font=FONT_ASCII)
+            _set_run_font(p.add_run(lab + v), _ti_font, size=Pt(_ti_pt), ascii_font=FONT_ASCII)
             _first = False
 
         doc.add_page_break()
@@ -4417,7 +4427,10 @@ class ReportAssembler:
             f = OxmlElement('w:rFonts')
             f.set(_q('w:ascii'), 'Times New Roman')
             f.set(_q('w:hAnsi'), 'Times New Roman')
-            f.set(_q('w:eastAsia'), FONT_SONGTI)
+            # 🔴 目录条目中文字体按域取（复垦样本：一级条目 黑体、二级条目 仿宋；
+            #    稳评仍是宋体，逐字等于改动前）。字号两边都是 12pt。
+            _tf, _ = typography(self._domain, "toc_l1" if lvl == 1 else "toc_l2")
+            f.set(_q('w:eastAsia'), _tf)
             rPr.append(f)
             sz = OxmlElement('w:sz'); sz.set(_q('w:val'), '24')   # 12pt
             rPr.append(sz)
@@ -5277,16 +5290,14 @@ class ReportAssembler:
 
     def _add_heading(self, doc, text, level):
         h = doc.add_heading(text, level=level)
-        # 🔴 版式：1级 **黑体 22pt(二号) 加粗 居中**（业主选型；上下居中由章标题页的
-        #    节级 vAlign 实现）／
-        #    2级 宋体 15pt 加粗 左 ／ 3级 宋体 14pt 加粗 左。
-        #    二三级按参照件实测值；一级按业主明确选择用黑体。
-        if level == 1:
-            ea, size, align, bold = FONT_H1, H1_SIZE, WD_ALIGN_PARAGRAPH.CENTER, H1_BOLD
-        elif level == 2:
-            ea, size, align, bold = FONT_H2, H2_SIZE, WD_ALIGN_PARAGRAPH.LEFT, True
-        else:
-            ea, size, align, bold = FONT_H3, H3_SIZE, WD_ALIGN_PARAGRAPH.LEFT, True
+        # 🔴 版式按域取（见 `chapter_catalog.typography`）：
+        #    稳评 1级 黑体 22pt(二号) 加粗 居中（业主选型）/ 2级 宋体 15pt 左 / 3级 宋体 14pt 左
+        #     —— 与改动前逐字相同；
+        #    复垦 1级 黑体 16pt 居中 / 2级 黑体 15pt 左 / 3级 黑体 14pt 左
+        #     —— 四份样本实测一致（一级不是 22pt，二三级不是宋体）。
+        _ea, _pt = typography(getattr(self, '_domain', None), f"h{level}")
+        align = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
+        ea, size, bold = _ea, Pt(_pt), True
         h.alignment = align
         # 标题段不留首行缩进（正文才有）
         try:
@@ -5297,14 +5308,17 @@ class ReportAssembler:
             _set_run_font(run, ea, size=size, bold=bold, ascii_font=FONT_ASCII)
             run.font.color.rgb = RGBColor(0, 0, 0)  # 强制黑色，覆盖 Word 默认蓝色
 
-    def _add_para(self, doc, text, bold=False, indent=False, font=FONT_BODY, size=None):
+    def _add_para(self, doc, text, bold=False, indent=False, font=None, size=None):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # 🔴 正文两端对齐
         p.paragraph_format.space_after = Pt(4)
         if indent:
             p.paragraph_format.first_line_indent = Cm(0.74)
         r = p.add_run(text)
-        _set_run_font(r, font, size=size if size is not None else BODY_SIZE,
+        # 🔴 正文字体按域取：稳评 宋体（逐字等于改动前）/ 复垦 **仿宋**（四份样本一致）。
+        #    显式传 `font` 的调用点（目录 / 编制说明用宋体）不受影响。
+        _df, _dp = typography(getattr(self, '_domain', None), "body")
+        _set_run_font(r, font or _df, size=size if size is not None else Pt(_dp),
                       bold=bold, ascii_font=FONT_ASCII)
 
     # ═══════════════════════════════════════════════════════════════

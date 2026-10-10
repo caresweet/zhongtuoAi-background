@@ -278,6 +278,34 @@ def test_has_title_page_per_domain():
     assert cat.has_title_page("reclamation") is True
 
 
+def test_typography_per_domain():
+    """字体字号按域取。稳评逐字等于改动前；复垦取四份样本一致值。
+
+    样本实测（明远路/王元佳苑/污水处理厂/宁淮城际，四份取值完全一致）：
+      一级 黑体 16pt 居中 · 二级 黑体 15pt · 三级 黑体 14pt · 正文 仿宋 12pt
+    稳评是 一级 黑体 **22pt**（业主选型）· 二三级 宋体 · 正文 宋体 —— 复垦**不是**这套。
+    """
+    # 稳评：逐字等于改动前
+    assert cat.typography("stability", "h1") == ("黑体", 22)
+    assert cat.typography(None, "h1") == ("黑体", 22)
+    assert cat.typography("stability", "h2") == ("宋体", 15)
+    assert cat.typography("stability", "h3") == ("宋体", 14)
+    assert cat.typography("stability", "body") == ("宋体", 12)
+    # 复垦：按样本
+    assert cat.typography("reclamation", "h1") == ("黑体", 16)
+    assert cat.typography("reclamation", "h2") == ("黑体", 15)
+    assert cat.typography("reclamation", "h3") == ("黑体", 14)
+    assert cat.typography("reclamation", "body") == ("仿宋", 12)
+    # 封面/扉页/目录：复垦字体也不同
+    assert cat.typography("reclamation", "cover_sign") == ("黑体", 15)
+    assert cat.typography("reclamation", "title_page_info") == ("仿宋", 14)
+    assert cat.typography("reclamation", "toc_l1")[0] == "黑体"
+    assert cat.typography("reclamation", "toc_l2")[0] == "仿宋"
+    assert cat.typography("stability", "toc_l1")[0] == "宋体"
+    # 未知槽位回落稳评，不抛异常
+    assert cat.typography("reclamation", "不存在")[0] == "宋体"
+
+
 def test_body_image_anchor_per_domain():
     """正文配图落位锚点：稳评**全部 None**（落位仍在装配器那两处写死分支里，逐字不动）；
     复垦第3/4章各有锚点小节。"""
@@ -451,3 +479,62 @@ def test_normalize_reclamation_headings_renumbers_restarted_group():
                  "### 6.1.3 监测措施", "### 6.1.4 管护措施"):
         assert want in out, want
     assert out.count("### 6.1.1") == 1
+
+
+# ════════════════════════════════════════════════════════════
+# G. 版式（字体/字号）渲染护栏
+#    复垦取四份样本一致值；稳评逐字等于改动前。这里落到**真实产出的 docx**上验，
+#    不只看接缝函数 —— 因为 `_post_generation_fix` 会在最后再刷一遍标题字体，
+#    不跟着域走的话，接缝改对了也会被它刷回稳评那套。
+# ════════════════════════════════════════════════════════════
+
+def _ea_font_and_size(p):
+    """段落首个 run 的 (中文字体, 字号pt)。"""
+    from docx.oxml.ns import qn as _q
+    if not p.runs:
+        return None, None
+    r = p.runs[0]
+    rPr = r._element.rPr
+    ea = None
+    if rPr is not None and rPr.rFonts is not None:
+        ea = rPr.rFonts.get(_q('w:eastAsia'))
+    return ea, (r.font.size.pt if r.font.size else None)
+
+
+def _render_doc(tmp_path, domain, chapters, filled):
+    from docx import Document as _D
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    out = a.assemble({"session_id": "t", "_domain": domain,
+                      "chapters": chapters, "filled_data": filled})
+    return _D(str(tmp_path / "generated" / out.split("/")[-1]))
+
+
+_CH = {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODYBODYTEXT\n"}}
+
+
+def _pick(doc, needle):
+    """按文本找段落 → (中文字体, 字号pt)。"""
+    for p in doc.paragraphs:
+        if p.text.strip() == needle:
+            return _ea_font_and_size(p)
+    return None
+
+
+def test_render_typography_reclamation(tmp_path):
+    """复垦产物：一级 黑体16 / 二级 黑体15 / 正文 仿宋12（四份样本一致）。"""
+    doc = _render_doc(tmp_path, "reclamation", _CH, {"project_name": "测试复垦项目"})
+    assert _pick(doc, "1 前言") == ("黑体", 16.0)
+    assert _pick(doc, "1.1 编制背景及过程") == ("黑体", 15.0)
+    assert _pick(doc, "BODYBODYTEXT") == ("仿宋", 12.0)
+
+
+_CH_STAB = {1: {"markdown": "# 第一章 前言\n\n## 1.1 编制背景及过程\n\nBODYBODYTEXT\n"}}
+
+
+def test_render_typography_stability_unchanged(tmp_path):
+    """稳评产物：一级 黑体22（业主选型）/ 二级 宋体15 / 正文 宋体12 —— 与改动前一致。"""
+    doc = _render_doc(tmp_path, "stability", _CH_STAB, {"project_name": "测试稳评项目"})
+    assert _pick(doc, "第一章、编制说明") == ("黑体", 22.0)
+    assert _pick(doc, "1.1 编制背景及过程") == ("宋体", 15.0)
+    assert _pick(doc, "BODYBODYTEXT") == ("宋体", 12.0)

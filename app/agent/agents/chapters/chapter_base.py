@@ -439,8 +439,12 @@ class ChapterAgentBase(BaseAgent):
         content = self._clean_content(content)
         # 🔴 整章重复兜底（LLM 偶发输出两遍）
         content = self._dedup_repeated_blocks(content)
-        # 🔴 三级标题规范化（LLM 屡次退回加粗写法，提示约束不住，用后处理兜底）
-        content = self._apply_section_subs(content)
+        # 🔴 三级标题规范化（LLM 屡次退回加粗写法，提示约束不住，用后处理兜底）。
+        #    该归一产出的是稳评体例 `### （一）xxx` —— 复垦**跳过**（其小节由
+        #    `_clean_content` 里的 `normalize_reclamation_headings` 拉回 `X.Y`）。
+        from app.agent import chapter_catalog
+        if chapter_catalog.has_chinese_sub_headings(self.domain):
+            content = self._apply_section_subs(content)
         # 🔴 按参照件模板**通篇无表**的章节：确定性删表（提示词约束不住时的兜底）。
         #    第十一章「分析预测风险源」模板里一张表都没有，而「风险因素初始风险等级表」
         #    属**第十二章 表12-4**。本章若也写一张，报告里就冒出两张同名表。
@@ -1506,8 +1510,16 @@ class ChapterAgentBase(BaseAgent):
         # 结构：`## 第X章 XXX` 后若有直接正文（非标题行），且之后还有二级标题 → 删除该游离正文
         content = self._remove_h1_free_text(content)
 
-        # 🔴 修复标题编号混乱：自创数字三级标题→（一）（二）；中文序号章重复标题→删除
-        content = self._normalize_headings(content)
+        # 🔴 标题体例按域：稳评「自创数字标题→（一）（二）」那套只对稳评成立。
+        #    复垦的小节名自带 `X.Y` 编号，套上稳评标准标题集（`CHAPTER_HEADINGS`）会
+        #    因「对不上」而被判成自创标题、改写成 `**（一）项目简介**` ——
+        #    层级掉成正文加粗、编号也丢了。复垦改走按章节目录拉回 `X.Y` 的归一。
+        from app.agent import chapter_catalog
+        if chapter_catalog.has_chinese_sub_headings(self.domain):
+            content = self._normalize_headings(content)
+        else:
+            content = chapter_catalog.normalize_reclamation_headings(
+                self.chapter_number, content)
 
         # 🔴 兜底清理旧44分制残留（评分=扣分值，无"满分44分"概念）
         content = re.sub(r'[（(]?\s*满分\s*44\s*分\s*[）)]?', '', content)

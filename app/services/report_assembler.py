@@ -21,6 +21,8 @@ from app.agent.chapter_catalog import (
     has_review_table, appendix_chapter_no,
     report_kind_name, cover_type_line, cover_fallback_title,
     front_matter_labels,
+    front_matter_order, has_title_page,
+    chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
 )
 from app.domains.registry import domain_of_state
 
@@ -552,17 +554,33 @@ class ReportAssembler:
         doc = Document()
         self._setup_page(doc)
 
-        # ── Cover Page（_add_cover_page 内部已分页，此处不再重复分页）──
-        implement_unit = filled.get("implement_unit", "") or self._cv("implement_unit")
-        self._add_cover_page(doc, doc_ref, project_name, org_name, location, implement_unit)
+        # ── 前置件（**按域取清单**）──
+        #    稳评：封面 → 公司资质 → 公司简介(含人员名单) → 目录
+        #          —— 四件全在，调用顺序与分页点逐字等于改动前。
+        #    复垦：封面 → 扉页 → 目录
+        #          —— 两份复垦样本（明远佳苑二期报告书、盐业井神方案）的前置里
+        #             **没有**「公司资质证书」页、**没有**「公司简介/人员名单」页：
+        #             那两样在复垦里属**附件**（样本附件清单第 3 项「编制单位资质证书」），
+        #             不印在正文前面。
+        _front = set(front_matter_order(self._domain))
 
-        # ── 公司资质（无图片则跳过）──
-        qual_has_content = self._add_company_qualifications(doc, filled, domain=state.get("_domain", "stability"))
-        if qual_has_content:
-            doc.add_page_break()
+        # Cover Page（_add_cover_page 内部已分页，此处不再重复分页）
+        if "cover" in _front:
+            implement_unit = filled.get("implement_unit", "") or self._cv("implement_unit")
+            self._add_cover_page(doc, doc_ref, project_name, org_name, location, implement_unit)
 
-        # ── 公司简介（_add_company_intro 内部已分页，此处不再重复分页）──
-        self._add_company_intro(doc, domain=filled.get("_domain", state.get("_domain", "stability")))
+        # 公司资质（无图片则跳过）
+        if "qualifications" in _front:
+            if self._add_company_qualifications(doc, filled, domain=self._domain):
+                doc.add_page_break()
+
+        # 公司简介（_add_company_intro 内部已分页，此处不再重复分页）
+        if "intro" in _front:
+            self._add_company_intro(doc, domain=self._domain)
+
+        # 扉页（复垦专有）：项目名称/项目单位/单位地址/联系人/电话/送审时间
+        if "title_page" in _front:
+            self._add_title_page(doc, filled, project_name, doc_ref)
 
         # 注：原「编制说明」「法律法规依据」独立块已移除——
         #     现分别由第2章「编制说明」、第3章「编制依据」承担（不再重复出现）。
@@ -2041,6 +2059,55 @@ class ReportAssembler:
 
         doc.add_page_break()
 
+    def _add_title_page(self, doc, filled, project_name="", doc_ref=""):
+        """扉页 / 项目信息页（**复垦专有**，稳评没有这一页）。
+
+        规格取自两份复垦样本，两样本完全一致：
+            明远佳苑二期：项目名称 / 项目单位 / 单位地址 / 联系人 / 电话 / 送审时间
+            盐业井神：    项目名称 / 项目单位 / 单位地址 / 联系人 / 电话
+
+        🔴 每个字段**值非空才输出该行** —— 抽不到就整行不出现（不得印出
+           「待填写」「【待补充】」这类占位符，也不为它弹窗问用户）。
+        """
+        pn = (project_name or doc_ref or '').strip()
+
+        # ── 顶部：项目名 + 报告类型（与封面同款，居中）──
+        if pn:
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(96)
+            p.paragraph_format.space_after = Pt(6)
+            _set_run_font(p.add_run(pn), FONT_COVER_TITLE, size=Pt(22), bold=True,
+                          ascii_font=FONT_ASCII)
+        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(24)
+        _set_run_font(p.add_run(cover_type_line(self._domain)), FONT_COVER_TITLE,
+                      size=Pt(22), bold=True, ascii_font=FONT_ASCII)
+
+        # ── 信息块：标签 + 值；值为空则整行略过 ──
+        #    「项目单位」优先取 `project_unit`（材料里的「用地单位/建设单位」），
+        #    退回 `org_name`（封面那条落款同一来源）。
+        _rows = (
+            ("项目名称：", pn),
+            ("项目单位：", filled.get("project_unit") or filled.get("org_name") or ""),
+            ("单位地址：", filled.get("unit_address") or ""),
+            ("联 系 人：", filled.get("contact_name") or ""),
+            ("电　　话：", filled.get("contact_phone") or ""),
+            ("送审时间：", filled.get("submit_date") or ""),
+        )
+        _first = True
+        for lab, val in _rows:
+            v = str(val or "").strip()
+            if not v:
+                continue
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p.paragraph_format.space_before = Pt(72) if _first else Pt(6)
+            p.paragraph_format.space_after = Pt(0)
+            _set_run_font(p.add_run(lab + v), FONT_BODY, size=Pt(12), ascii_font=FONT_ASCII)
+            _first = False
+
+        doc.add_page_break()
+
     # ═══════════════════════════════════════════════════════════════
     # Chapter Processing
     # ═══════════════════════════════════════════════════════════════
@@ -2062,7 +2129,16 @@ class ReportAssembler:
         #   把首个子标题（如 ### 1.6）也吞掉。
         markdown = re.sub(r'^#{1,3}\s*第[一二三四五六七八九十\d]+章[^\n]*\n', '', markdown)
         markdown = re.sub(r'^第[一二三四五六七八九十\d]+章[^\n]*\n', '', markdown)
-        markdown = f"# 第{ch_cn}章 {ch_title}\n\n{markdown}"
+        # 🔴 复垦的 LLM 常直接把章标题写成 `# 项目概况`（无「第X章」也无编号）——
+        #    上面两条都匹配不到，会**残留成正文里的一行**（实测：
+        #    章标题页之后又冒出一行「# 项目概况」）。按本章标题精确剥一次。
+        if not chapter_title_own_page(self._domain) and ch_title:
+            markdown = re.sub(rf'^#\s*{re.escape(str(ch_title))}[^\n]*\n', '', markdown,
+                              flags=re.MULTILINE)
+        # 🔴 章标题**最后再插**（见本轮末尾）：复垦的章标题本身是「# 1 前言」形态，
+        #    会被下面那条「清理 LLM 生成的 # 数字 章标题」正则一并删掉。
+        #    稳评章标题是「# 第X章 …」，本来就不匹配那条正则 —— 挪到后面插入
+        #    对稳评是等价的（两条路径产出的首行逐字相同）。
 
         # Fix section numbering: "1 . 1" → "1.1", "1 .1" → "1.1", etc.
         markdown = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', markdown)
@@ -2071,6 +2147,11 @@ class ReportAssembler:
         markdown = re.sub(r'^#{3,4}\s+(\d+\.\d+\s)', r'## \1', markdown, flags=re.MULTILINE)
         # 🔴 清理 LLM 生成的"# 数字 章标题"重复（如 "# 2 评估过程、方法和依据"）
         markdown = re.sub(r'^#{1,3}\s*\d+\s+[^\n]+\n', '', markdown, flags=re.MULTILINE)
+        # 🔴 markdown 里的章标题行用**内部形态** `# 第{中文}章 {标题}`（空格分隔）——
+        #    与改动前逐字相同。**不能**在这里用 `chapter_heading_text`（那是**显示**形态，
+        #    稳评带「、」）：下面的解析正则 `第X章\s*(.+)` 会把「、」吃进标题，
+        #    渲染时再拼一次就变成「第一章、、编制说明」。
+        markdown = f"# 第{ch_cn}章 {ch_title}\n\n{markdown}"
         # 🔴 清理图片标记残留（如 "[现场勘查照片：图片1]"）——不是实际图片路径的标记
         markdown = re.sub(r'^\[[^\]]*照片[：:][^\]]*\]\s*\n', '', markdown, flags=re.MULTILINE)
 
@@ -2311,7 +2392,10 @@ class ReportAssembler:
             if m:
                 cn = m.group(1)
                 num = CN_NUM.get(cn, int(cn) if cn.isdigit() else ch_num)
-                self._add_chapter_title_page(doc, cn, m.group(2).strip())
+                # 🔴 传章号：复垦的显示形态是「1 前言」（阿拉伯数字），
+                #    拼它需要 chapter_number；稳评用 cn 就够，传了也不改变结果。
+                self._add_chapter_title_page(doc, cn, m.group(2).strip(),
+                                             chapter_number=num)
                 continue
 
             # 裸行「（一）小节名」→ Heading 2（人工模板章的二级标题写法）
@@ -4222,8 +4306,7 @@ class ReportAssembler:
                         self._add_image(doc, p, "", numbered=False)
 
 
-    @staticmethod
-    def _fill_toc_cache(doc) -> int:
+    def _fill_toc_cache(self, doc) -> int:
         """把目录域的**缓存结果**填成真实条目（供不刷新域的阅读器）。
 
         🔴 `w:updateFields=true` 只对 Word 生效。WPS / 转 PDF / 预览器不刷新域，
@@ -4268,9 +4351,12 @@ class ReportAssembler:
             txt = "".join(t.text or '' for t in para.iter(_q('w:t'))).strip()
             if txt:
                 heads.append((lvl, txt))
-        # 🔴 参照件的目录从「第一章」开始 —— 封面后的「公司资质证书 / 公司简介」等
-        #    前置页标题不进目录。
-        _first = next((i for i, (_, t) in enumerate(heads) if re.match(r'^第[一二三四五六七八九十]+章', t)), 0)
+        # 🔴 参照件的目录从**第一个正文章标题**开始 —— 封面后的前置页标题不进目录。
+        #    判定按域取：稳评 `第三章、…`，复垦 `3 项目概况`（阿拉伯数字）。
+        #    写死稳评正则的话复垦一个都匹配不到，`_first` 退化为 0，
+        #    前置页若有 Heading 就会漏进目录。
+        _first = next((i for i, (_, t) in enumerate(heads)
+                       if is_chapter_heading_text(self._domain, t)), 0)
         heads = heads[_first:]
         if not heads:
             return 0
@@ -5095,19 +5181,46 @@ class ReportAssembler:
     # Helpers
     # ═══════════════════════════════════════════════════════════════
 
-    def _add_chapter_title_page(self, doc, cn: str, title: str) -> None:
+    def _add_chapter_title_page(self, doc, cn: str, title: str,
+                                chapter_number: int = None) -> None:
         """章标题页：**独占一整页 + 上下左右居中**。
 
         🔴 用「独立一节 + 节级垂直居中(`w:vAlign=center`)」实现，不用铺空段：
         铺空段会被 `_post_generation_fix` 的「连续空段最多 2 个」清理规则删掉，
         结果标题仍旧贴在页顶（实测铺 16 个空段后被删到只剩 2 个）。
+
+        🔴 标题文本与「是否独占页」按域取（经 `chapter_catalog`）：
+           稳评 `第三章、评估过程` + 独占页居中，逐字等于改动前；
+           复垦 `3 项目概况` + 普通一级标题（样本里标题就在正文页顶，不独占页）。
         """
-        if not CHAPTER_TITLE_OWN_PAGE:
-            self._add_heading(doc, f"第{cn}章、{title}", 1)
+        _text = chapter_heading_text(self._domain, chapter_number, cn, title)
+        if not (CHAPTER_TITLE_OWN_PAGE and chapter_title_own_page(self._domain)):
+            # 复垦：章标题**不独占整页、不垂直居中**（样本里它就印在正文页顶端），
+            # 但**仍起新页** —— 样本的每章都是从新页开始的。
+            # 🔴 这一节还承担结构作用：`_setup_header_footer` 靠「第 2 节 = 正文首页」
+            #    挂页眉页脚。不建节的话正文会留在第 1 节、被当「前置部分」清空页眉。
+            #    ⚠️ `_post_generation_fix` 有「连续空段超过 2 个就删」的规则，而目录/
+            #       上一章末尾常留 2~3 个空段 —— 紧挨其后的**分节段落会被一并删掉**，
+            #       分节符一没整节就没了。故插分节段落前先把尾部空段清干净。
+            _body = doc.element.body
+            while True:
+                _kids = [c for c in _body.iterchildren()
+                         if c.tag.split('}')[1] in ('p', 'tbl')]
+                if not _kids:
+                    break
+                _last = _kids[-1]
+                if ''.join(t.text or '' for t in _last.iter(qn('w:t'))).strip():
+                    break                                   # 有字 → 停
+                if _last.find(qn('w:pPr') + '/' + qn('w:sectPr')) is not None:
+                    break                                   # 别动既有分节段落
+                _last.getparent().remove(_last)
+            _copy_page_setup(doc, self._add_section(doc))
+            _set_vertical_alignment(doc.sections[-1], "top")
+            self._add_heading(doc, _text, 1)
             return
         _copy_page_setup(doc, self._add_section(doc))
         _set_vertical_alignment(doc.sections[-1], "center")
-        self._add_heading(doc, f"第{cn}章、{title}", 1)
+        self._add_heading(doc, _text, 1)
         # 收尾：再起一节并恢复顶端对齐，正文从新页开始
         _copy_page_setup(doc, self._add_section(doc))
         _set_vertical_alignment(doc.sections[-1], "top")

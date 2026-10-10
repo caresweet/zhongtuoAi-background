@@ -239,7 +239,12 @@ def test_reclamation_render_front_matter_has_no_stability_wording(tmp_path):
         assert m not in text, f"复垦报告混入稳评标记「{m}」"
     # 复垦口径的前置件文案确实盖上了
     assert "编制单位：某某复垦公司" in text
-    assert "复垦方案编制人员及分工情况" in text
+    # 🔴 复垦**没有**公司资质证书页、**没有**公司简介/人员名单页 ——
+    #    两份样本（明远佳苑二期报告书、盐业井神方案）的前置里都没有；
+    #    那两样在复垦里属**附件**（样本附件清单第 3 项「编制单位资质证书」）。
+    assert "公司简介" not in text
+    assert "公司资质证书" not in text
+    assert "复垦方案编制人员及分工情况" not in text
 
 
 def test_stability_render_front_matter_labels_unchanged(tmp_path):
@@ -326,3 +331,36 @@ def test_normalize_reclamation_headings_noop_for_stability_chapter_number():
     md = "## 3.1 项目简介\n\n正文\n"
     assert cat.normalize_reclamation_headings(11, md) == md
 
+
+
+def test_reclamation_render_has_title_page(tmp_path):
+    """复垦扉页（样本规格）：项目名称/项目单位/单位地址/联系人/电话/送审时间。"""
+    _, text = _render(tmp_path, "reclamation",
+                      {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nX"}},
+                      {"project_name": "某复垦项目", "doc_reference": "苏复垦〔2026〕1号",
+                       "project_unit": "某某建设集团有限公司",
+                       "unit_address": "某市某区某路1号",
+                       "contact_name": "张三", "contact_phone": "13800000000",
+                       "submit_date": "2026-10-01"})
+    for s in ("项目单位：某某建设集团有限公司", "单位地址：某市某区某路1号",
+              "联 系 人：张三", "电　　话：13800000000", "送审时间：2026-10-01"):
+        assert s in text, s
+
+
+def test_reclamation_title_page_omits_empty_rows(tmp_path):
+    """抽不到的字段**整行不出现** —— 不印占位符，也不为它弹窗问用户。"""
+    _, text = _render(tmp_path, "reclamation",
+                      {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nX"}},
+                      {"project_name": "某复垦项目", "doc_reference": "苏复垦〔2026〕1号"})
+    for lab in ("单位地址：", "联 系 人：", "电　　话：", "送审时间："):
+        assert lab not in text, lab
+
+
+def test_stability_render_keeps_qualifications_and_intro(tmp_path):
+    """稳评护栏：资质页/简介页/人员名单照旧（前置件清单四件全在），且**没有**扉页。"""
+    _, text = _render(tmp_path, "stability",
+                      {4: {"markdown": "# 第4章\n\n## 4.1 合法性分析\n\nB"}},
+                      {"project_name": "某稳评项目", "doc_reference": "苏政发〔2026〕1号"})
+    assert "公司简介" in text
+    assert "稳评工作组人员及分工情况" in text
+    assert "送审时间：" not in text          # 稳评没有扉页

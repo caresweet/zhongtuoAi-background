@@ -956,6 +956,30 @@ def chapter_image_specs(domain: str | None) -> Dict[int, List[Dict[str, Any]]]:
     return CHAPTER_IMAGE_SPECS
 
 
+# 🔴 正文配图的**落位锚点**：该(域,章)的图插在**含此关键词的小节**标题之后。
+#    稳评**全部为 None** —— 稳评的落位仍在装配器那几处写死分支（第6章「地理位置」、
+#    第8章「风险调查过程」）里，逐字不动；改成表反而有回归风险。
+#    复垦按两份样本的图位定：第3章的「位置示意图」落在 3.1 项目简介 之后；
+#    第4章的「现场影像资料及临时用地平面布置图」落在 4.1 土地损毁分析与评定 之后。
+_RECLAMATION_BODY_IMAGE_ANCHOR: Dict[int, str] = {
+    3: "项目简介",
+    4: "土地损毁分析与评定",
+}
+
+
+def body_image_anchor(domain: str | None, chapter_number: int) -> Optional[str]:
+    """该(域,章)正文配图的落位锚点（小节标题关键词）；`None` = 不自动落位。
+
+    🔴 为什么需要它：装配器只在正文出现 `![图注]` 标记时才插图，而提示词
+       **明令 LLM 不许写图片标记**（图片由系统统一放置）。于是「系统插标记」这一步
+       必须自己做 —— 稳评有第6/8章两处写死的落位，复垦原先一处都没有，
+       结果十章正文**一张图都进不去**（实测 2026-10-10 明远佳苑产物 media=0）。
+    """
+    if domain != _RECLAMATION:
+        return None
+    return _RECLAMATION_BODY_IMAGE_ANCHOR.get(int(chapter_number))
+
+
 def image_caption(
     domain: str | None,
     chapter_number: int,

@@ -450,7 +450,12 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         # 找到该章节里 type 匹配的 spec，用于取 label
         specs = _specs[hint]
         # 优先挂到能匹配 category 的 spec；匹配不上就用第一个 spec 的 label
-        matched = next((s for s in specs if s["type"] == img["category"]), None)
+        # 🔴 `aliases`：某些域的规格用**按图题细分的专名**（如复垦 `site_photo`），
+        #    而分类器只产出粗类（`photo`）。规格可声明别名让粗类也算命中。
+        #    稳评规格没有 `aliases` 键 → 判定与改动前逐字相同。
+        matched = next((s for s in specs
+                        if s["type"] == img["category"]
+                        or img["category"] in (s.get("aliases") or [])), None)
         # 🔴 图注**按域取**（稳评=材料规则标签 > 命中规格标签 > 按类别兜底表 > 首规格标签；
         #    复垦=命中规格图名，未命中则「章标题+示意图」）。见 chapter_catalog.image_caption。
         label = _catalog.image_caption(
@@ -487,6 +492,7 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                          if img["path"] not in used_paths and not img.get("chapter_hint")
                          and not img.get("pinned") and (
                              img["category"] == spec["type"] or
+                             img["category"] in (spec.get("aliases") or []) or
                              (spec["type"] == "meeting" and img["category"] in ("photo", "review")) or
                              (spec["type"] == "photo" and img["category"] in ("photo", "other"))  # 🔴 Allow "other" as photo fallback
                          )]

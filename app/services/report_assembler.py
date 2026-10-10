@@ -23,6 +23,7 @@ from app.agent.chapter_catalog import (
     front_matter_labels,
     front_matter_order,
     cover_org_value,
+    body_image_anchor,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
 )
 from app.domains.registry import domain_of_state
@@ -2222,6 +2223,17 @@ class ReportAssembler:
             # 🔴 再按**子项**分桶：公示/勘察/走访/座谈 各有各的照片，
             #    到各自子项标题处落位（见 `_flush_ch8_subitem`）。
             self._ch8_partition_images(_proc + _rest)
+
+        # 🔴 按域的「落位锚点」章（复垦第3/4章；稳评恒为 None，等于没这段）。
+        #    复用第8章那套 `_pending_section_imgs` 通道 —— 到锚点小节标题处落图，
+        #    万一本章没有该小节，`_flush_pending_section_images` 会在章末兜底补插，不丢图。
+        _anchor = body_image_anchor(self._domain, ch_num)
+        if _anchor:
+            _cim_a = getattr(self, '_chapter_image_map', {})
+            _imgs_a = _cim_a.get(ch_num, [])
+            if _imgs_a:
+                self._pending_section_imgs = {_anchor: list(_imgs_a)}
+                _cim_a[ch_num] = []
 
         for line in lines:
             s = line.strip()
@@ -4451,6 +4463,19 @@ class ReportAssembler:
         """
         _h = str(heading_text or "")
 
+        # 🔴 按域锚点落位（复垦第3/4章）。稳评 `body_image_anchor` 恒为 None → 直接落到
+        #    下面两处写死分支，行为逐字不变。
+        _anchor = body_image_anchor(self._domain, ch_num)
+        if _anchor:
+            if _anchor in _h:
+                if getattr(self, '_pending_section_trigger', None):
+                    self._flush_section_images(doc)   # 先落上一批
+                self._pending_section_trigger = _anchor
+                return
+            if getattr(self, '_pending_section_trigger', None):
+                self._flush_section_images(doc)
+            return
+
         if ch_num == 6:
             # 🔴 业主口径（2026-09-18）：图6-1 项目位置示意图要插在
             #    「项目概况 → 3.项目地理位置」小节正文之后（人工成品案卷的图4-1 决策地理位置
@@ -4828,10 +4853,23 @@ class ReportAssembler:
                 uploaded_items.append({"path": item["path"],
                                        "original_name": item.get("original_name")
                                                         or os.path.basename(str(item["path"]))})
+
+        # 🔴 复垦：报告里的位置示意图/损毁预测图等是**系统按材料画出来的**，不是用户上传的
+        #    （样本里的图就是画的）。在此之前这段逻辑只活在开发机上的独立脚本里，装配器
+        #    完全不知道 —— 于是复垦十章正文一张图都没有（实测 2026-10-10 media=0）。
+        #    生成的图带「图名」注册进来，走图片目录既有的**按名绑定**落到对应章。
+        if self._domain == "reclamation":
+            try:
+                from app.config import settings as _settings
+                from app.services.reclamation_figures import ensure_reclamation_figures
+                uploaded_items += ensure_reclamation_figures(
+                    state.get("_project_materials") or [], _settings.STORAGE_DIR)
+            except Exception as _fe:
+                logger.warning(f"[复垦图件] 生成失败，跳过（不影响出报告）: {_fe}")
+
         img_catalog = build_image_catalog(uploaded_items,
                                           ai_classifications=state.get("_classified_images"),
-                                          domain=self._domain)
-        # 🔴 图片**按类别各自限量**，不做「全局优先级截断」。
+                                          domain=self._domain)        # 🔴 图片**按类别各自限量**，不做「全局优先级截断」。
         #    旧做法把全部图按 map>announcement>photo>… 排序截断到 N 张，
         #    结果公示/现场/座谈照片（photo）被公告与 PDF 内嵌图挤掉，正文一张图都没有。
         #    现在每类独立配额，谁也挤不掉谁；正文图与附件图分别配额。

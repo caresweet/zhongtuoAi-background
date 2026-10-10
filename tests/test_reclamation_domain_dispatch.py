@@ -278,6 +278,18 @@ def test_has_title_page_per_domain():
     assert cat.has_title_page("reclamation") is True
 
 
+def test_body_image_anchor_per_domain():
+    """正文配图落位锚点：稳评**全部 None**（落位仍在装配器那两处写死分支里，逐字不动）；
+    复垦第3/4章各有锚点小节。"""
+    for ch in range(1, 15):
+        assert cat.body_image_anchor("stability", ch) is None
+        assert cat.body_image_anchor(None, ch) is None
+    assert cat.body_image_anchor("reclamation", 3) == "项目简介"
+    assert cat.body_image_anchor("reclamation", 4) == "土地损毁分析与评定"
+    assert cat.body_image_anchor("reclamation", 1) is None
+    assert cat.body_image_anchor("reclamation", 10) is None
+
+
 def test_cover_org_value_per_domain():
     """封面落款第一行的值：稳评逐字取 org_name；复垦取项目单位（用地/建设单位）。
 

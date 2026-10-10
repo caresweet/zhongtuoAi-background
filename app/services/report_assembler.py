@@ -24,6 +24,8 @@ from app.agent.chapter_catalog import (
     front_matter_labels,
     front_matter_order,
     cover_org_value,
+    cover_date_parts,
+    has_questionnaire_tables,
     body_image_anchor,
     typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
@@ -1895,6 +1897,13 @@ class ReportAssembler:
                 _txt = ''.join(t.text or '' for t in _last.iter(qn('w:t'))).strip()
                 _brs = _last.findall('.//' + qn('w:br'))
                 _pb = any((b.get(qn('w:type')) or '') == 'page' for b in _brs)
+                # 🔴 **图片段不是空段**：判据只看了 `<w:t>` 文字，而插图段一个 `w:t`
+                #    都没有 —— 于是文档**末尾的图会被逐段删掉**（上限 10 段）。
+                #    实测 2026-10-10：复垦附件20「主体工程批复文件」的 7 页扫描件被删光，
+                #    文档停在标题那一行（且 `word/media` 里留着 7 个没人引用的孤儿图）。
+                #    稳评附件章的末尾图同样中招。有 `w:drawing` 一律停手。
+                if _last.find('.//' + qn('w:drawing')) is not None:
+                    break
                 if _txt or (_brs and not _pb):
                     break                      # 有文字 / 非分页符 → 停
                 _last.getparent().remove(_last)
@@ -2065,10 +2074,11 @@ class ReportAssembler:
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
         # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「项目单位/编制单位」）。
         _fl = front_matter_labels(self._domain)
+        _dl, _dv = cover_date_parts(self._domain)
         for i, (lab, val) in enumerate((
             (_fl["org_label"], org_name or ''),
             (_fl["implement_label"], implement_unit or ''),
-            ('报告编制日期：', _cn_year_month(datetime.now())),
+            (_dl, _dv),
         )):
             if not val:
                 continue
@@ -2753,6 +2763,37 @@ class ReportAssembler:
         if not hasattr(self, '_table_issues'):
             self._table_issues = []
         _PH = {'', '—', '－', '–', '-', '--', '/', '\\', 'n/a', '无', '略', '…'}
+
+        # ①-0 **「合计」续行并回上一行**（必须在下面「删全占位符行」之前做）。
+        #    模型常把合计行**拆成两行 markdown**：
+        #        | 合计   | — | — | — | — | — |
+        #        | 8070.0 | 100.0 | — | — | — | — |
+        #    下面规则②「只有第一格有字、其余全占位符 → 删」会把**第一行删掉**，
+        #    于是要么合计整行消失（表4-1/4-3 实测），要么数值行留下来、8070.0 落到
+        #    「序号」列（表4-2 实测，业主所指）。正确做法是**并回去**，不是删。
+        _TOTALS = {'合计', '小计', '总计', '合 计', '总 计'}
+        _num_re = re.compile(r'^-?\d[\d,]*(?:\.\d+)?%?$')
+        _merged, _merged_n = [], 0
+        for _r in rows:
+            if _merged and len(_r) > 1:
+                _p = _merged[-1]
+                _prev_is_total = (str(_p[0]).strip() in _TOTALS
+                                  and all(str(c).strip() in _PH for c in _p[1:]))
+                _tail_val = [str(c).strip() for c in _r if str(c).strip() not in _PH]
+                _tail_is_values = (bool(_tail_val)
+                                   and all(_num_re.match(v) for v in _tail_val))
+                if _prev_is_total and _tail_is_values:
+                    _new = [str(_p[0]).strip()] + _tail_val
+                    while len(_new) < len(_p):
+                        _new.append('—')
+                    _merged[-1] = _new[:len(_p)]
+                    _merged_n += 1
+                    continue
+            _merged.append(_r)
+        rows = _merged
+        if _merged_n:
+            logger.warning(f"[表格兜底] 第{ch_num}章：把 {_merged_n} 行「合计」续行并回合计行")
+
         _kept, _dropped = [], 0
         for _r in rows:
             # ① 整行占位符（`| — | — | — |`）→ 无信息，删
@@ -3169,6 +3210,11 @@ class ReportAssembler:
 
         返回 [(marker_name, table_data_dict), ...]，供 [TABLE:xxx] 标记与 LLM 表覆盖使用。
         """
+        # 🔴 复垦**没有问卷**：不按域关掉的话，第9章（复垦是「效益分析」）会凭空
+        #    长出「表9-1 个人问卷统计汇总表 / 表9-2 单位（部门）问卷统计汇总表」，
+        #    人数全 0、比例全「[待分析]」——实测 2026-10-10。
+        if not has_questionnaire_tables(self._domain):
+            return []
         from app.services.table_generation_service import TableGenerationService
         out = []
         state = getattr(self, '_session_state', None) or {}
@@ -4389,6 +4435,18 @@ class ReportAssembler:
                 _add(_item, page, name)
 
         # ② 公司资质 → 附件3
+        # 🔴 附件3 是「**编制单位**资质证书」= 机构的营业执照/资质，**不含个人的培训证书**。
+        #    公司档案里那些 `stability_cert_02/03/04` 其实是三名编制人员的培训证书 ——
+        #    `_load_company_certificate_images` 本意要滤掉它们，但它的 `_person_paths`
+        #    拿**绝对路径** `str(f)` 去比索引里的**相对路径**，永远不相等（死代码），
+        #    所以这里必须自己再滤一遍。判据与稳评同源：`personnel_certs` 索引里的
+        #    `is_person_cert`。（稳评那条路的同一个死代码**未动** —— 单独报给业主。）
+        try:
+            from app.services.personnel_certs import load_index as _li
+            _person = {str(Path(str(v.get("path"))).resolve()) for v in (_li() or {}).values()
+                       if v.get("is_person_cert")}
+        except Exception:
+            _person = set()
         try:
             _certs = self._load_company_certificate_images(domain=self._domain) or []
         except Exception as _ce:
@@ -4397,6 +4455,8 @@ class ReportAssembler:
         for _cp, _cap in _certs:
             if "稳评" in str(_cap):
                 continue                       # 稳评平台备案不进复垦
+            if str(Path(str(_cp)).resolve()) in _person:
+                continue                       # 个人培训证书 ≠ 编制单位资质
             _add(3, str(_cp), str(_cap))
 
         # ③ 图片类 → 附件11 公示 / 附件12 现场照片、影像图

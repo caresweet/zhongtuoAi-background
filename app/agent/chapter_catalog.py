@@ -170,6 +170,17 @@ def uses_company_archive_images(domain: str | None) -> bool:
     return domain != "bidding"
 
 
+def has_questionnaire_tables(domain: str | None) -> bool:
+    """该域是否有「问卷调查统计汇总表」（表9-1 个人 / 表9-2 单位）。
+
+    只有稳评有 —— 它的公众参与靠两份问卷（`questionnaire_parser` 的题面常量 +
+    逐页清点）。**复垦没有问卷这回事**：样本的公众参与只有公示与走访，
+    第9章是「效益分析」。不按域关掉的话，复垦报告里会凭空长出两张
+    人数全是 0、比例全是「[待分析]」的问卷表（实测 2026-10-10）。
+    """
+    return domain != _RECLAMATION
+
+
 def front_matter_labels(domain: str | None) -> Dict[str, str]:
     """装配器「前置件 / 固定抬头 / 兜底文案」按域取的中文标注。
 
@@ -633,13 +644,33 @@ def template_name(domain: str | None) -> str:
 
 
 def cover_type_line(domain: str | None) -> str:
-    """封面副标题（报告类型那一行，带书名号）。
+    """封面副标题（报告类型那一行）。
 
-    稳评逐字等于业主 2026-09-21 口径的「《社会稳定性风险评估》」；复垦换成复垦方案名。
+    稳评逐字等于业主 2026-09-21 口径的「《社会稳定性风险评估》」（**带书名号**）。
+    复垦按样本：五份样本的封面这一行都是「土地复垦方案**报告书**」，
+    「临时用地土地复垦方案报告书」这类写法也**一律不带书名号** ——
+    带书名号是稳评被业主点名改的写法，复垦照抄就成了稳评格式。
     """
     if domain == _RECLAMATION:
-        return "《土地复垦方案》"
+        return "土地复垦方案报告书"
     return "《社会稳定性风险评估》"
+
+
+def cover_date_parts(domain: str | None, now=None) -> tuple:
+    """封面落款第三行的 `(标签, 值)`。
+
+    稳评：`('报告编制日期：', '二〇二六年十月')` —— 逐字等于改动前。
+    复垦按样本：明远路封面是纯数字的「2023  年  1  月」，**没有标签**，
+          所以标签返回空串、值返回同样的纯数字写法。
+    """
+    from datetime import datetime as _dt
+    _now = now or _dt.now()
+    if domain == _RECLAMATION:
+        return "", f"{_now.year}  年  {_now.month}  月"
+    # 延迟 import：装配器在模块级 import 本文件，运行期再取不会成环
+    # （本文件已有从 `app.services.*` 取值的先例，见 `image_caption` 等）。
+    from app.services.report_assembler import _cn_year_month
+    return "报告编制日期：", _cn_year_month(_now)
 
 
 def cover_fallback_title(domain: str | None) -> str:

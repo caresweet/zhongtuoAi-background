@@ -10,6 +10,7 @@
 修法：两个消费者一律经 `app.agent.chapter_catalog` 按域取值，自己不按域分支。
 稳评是默认域，取值逐字等于改动前 —— 本文件的 `*_stability_*` 用例是那条护栏。
 """
+import pytest
 from docx import Document
 
 from app.agent import chapter_catalog as cat
@@ -618,3 +619,89 @@ def test_reclamation_render_has_appendices(tmp_path):
     assert "附件1 土地复垦方案委托函（待补充）" in text
     for _w in ("机构及人员资质材料", "拟征地公告", "专家评审", "稳评问卷调查表"):
         assert _w not in text, _w
+
+
+# ════════════════════════════════════════════════════════════
+# I. 业主 2026-10-10 报的五处（逐条对应）
+# ════════════════════════════════════════════════════════════
+
+def test_cover_type_line_and_date_per_domain():
+    """封面：复垦类型行**不带书名号**、落款第三行**无标签纯数字**。
+
+    样本封面实测（明远路、宁淮城际）：副标题写作「土地复垦方案报告书」
+    「临时用地土地复垦方案报告书」——**一律不带书名号**；落款第三行是
+    「2023  年  1  月」。带书名号的《社会稳定性风险评估》是稳评被业主点名的写法，
+    照抄到复垦封面上就是稳评格式（业主所指「封面第一页还是稳评的格式」）。
+    """
+    from datetime import datetime
+    d = datetime(2026, 10, 1)
+    assert cat.cover_type_line("reclamation") == "土地复垦方案报告书"
+    assert cat.cover_type_line("stability") == "《社会稳定性风险评估》"   # 稳评不动
+    assert cat.cover_date_parts("reclamation", d) == ("", "2026  年  10  月")
+    assert cat.cover_date_parts("stability", d) == ("报告编制日期：", "二〇二六年十月")
+
+
+def test_no_questionnaire_tables_for_reclamation(tmp_path):
+    """复垦没有问卷 —— 不许凭空长出表9-1/9-2。
+
+    这两张表原先是**系统无条件注入第9章**的（稳评的公众参与靠两份问卷）。
+    复垦第9章是「效益分析」，注入的结果是两张人数全 0、比例全「[待分析]」的表。
+    """
+    assert cat.has_questionnaire_tables("stability") is True
+    assert cat.has_questionnaire_tables(None) is True
+    assert cat.has_questionnaire_tables("reclamation") is False
+    _out, text = _render(tmp_path, "reclamation",
+                         {9: {"markdown": "# 土地复垦效益分析\n\n## 9.1 社会效益评价\n\nBODY\n"}},
+                         {"project_name": "测试复垦项目"})
+    assert "问卷统计汇总表" not in text
+
+
+def test_md_table_total_row_continuation_merged(tmp_path):
+    """「合计」被 LLM 拆成两行 markdown → **并回一行**，而不是删掉或错行。
+
+    实测表4-2 原样：
+        | 合计   | — | — | — | — | — |
+        | 8070.0 | 100.0 | — | — | — | — |
+    旧的兜底把「只有第一格有字、其余全占位符」的行**整行删掉** ——
+    于是合计行要么消失（表4-1/4-3），要么数值行留下来、8070.0 落到「序号」列（表4-2）。
+    """
+    md = ("# 项目概况\n\n## 3.4 项目区土地利用状况\n\n"
+          "| 序号 | 地块名称 | 面积 | 占比 |\n"
+          "| --- | --- | --- | --- |\n"
+          "| 1 | 临时用地 | 8070.0 | 100.0 |\n"
+          "| 合计 | — | — | — |\n"
+          "| 8070.0 | 100.0 | — | — |\n")
+    _out, text = _render(tmp_path, "reclamation", {3: {"markdown": md}},
+                         {"project_name": "测试复垦项目"})
+    _flat = " ".join(text.split())
+    assert "合计 | 8070.0 | 100.0" in _flat, _flat
+    # 续行不再单独成行（原先 8070.0 会落到「序号」列）
+    for _ln in text.splitlines():
+        assert not _ln.strip().startswith("8070.0 |"), _ln
+
+
+def test_trailing_images_survive_post_fix(tmp_path):
+    """文档**末尾的图**不许被「清理末尾空白段」删掉。
+
+    那段清理只看 `<w:t>` 文字判断是否空段，而插图段一个 `w:t` 都没有 ——
+    实测附件20 的 7 页扫描件被整段删光（文档停在标题那行，
+    `word/media` 里留 7 个没人引用的孤儿图）。
+    """
+    import zipfile
+    PILImage = pytest.importorskip("PIL.Image")
+    img = tmp_path / "tail.png"
+    PILImage.new("RGB", (40, 30), (240, 240, 240)).save(img)
+    out, _text = _render(tmp_path, "reclamation",
+                         {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"}},
+                         {"project_name": "测试复垦项目"})
+    _p = tmp_path / "generated" / out.split("/")[-1]
+    # 在文档末尾追加一张图再跑一遍后处理，图必须还在
+    from docx import Document as _D
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    a._domain = "reclamation"
+    doc = _D(str(_p))
+    doc.add_paragraph().add_run().add_picture(str(img))
+    a._post_generation_fix(doc, {})
+    xml = doc.element.body.xml
+    assert xml.count("<w:drawing>") >= 1

@@ -30,6 +30,7 @@ from app.agent.chapter_catalog import (
     body_image_anchor,
     typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
+    chapter_no_of_text,
 )
 from app.domains.registry import domain_of_state
 
@@ -5735,14 +5736,14 @@ class ReportAssembler:
 
         comments_root = None
         # 找到每章标题段作为批注锚点
+        # 🔴 按域取章号（`chapter_no_of_text`）：原来这里写死了稳评的 `^第X章`，
+        #    复垦的 `1 前言` 一条都匹配不上 → 所有批注回落到 `doc.paragraphs[0]`
+        #    （封面标题）→ **交付稿首页挂满批注气球**（实测 2026-10-10 九条全在封面）。
         ch_anchor = {}
         for p in doc.paragraphs:
-            m = re.match(r'^第([一二三四五六七八九十\d]+)章\s', p.text.strip())
-            if m:
-                cn = m.group(1)
-                num = CN_NUM.get(cn, int(cn) if cn.isdigit() else 0)
-                if num:
-                    ch_anchor[num] = p
+            num = chapter_no_of_text(self._domain, p.text.strip())
+            if num:
+                ch_anchor[num] = p
         if not ch_anchor and doc.paragraphs:
             ch_anchor[1] = doc.paragraphs[0]
 

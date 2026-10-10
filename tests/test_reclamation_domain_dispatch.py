@@ -129,10 +129,12 @@ def test_reclamation_prompt_ch3_is_a_narrative_not_review_table():
 # C. 装配器 —— 端到端渲染（用 tmp 目录，不碰真实 storage / 库）
 # ════════════════════════════════════════════════════════════
 
-def _render(tmp_path, domain, chapters, filled):
+def _render(tmp_path, domain, chapters, filled, extra_state=None):
     from app.services.report_assembler import ReportAssembler
     state = {"session_id": "t", "_domain": domain,
              "chapters": chapters, "filled_data": filled}
+    if extra_state:
+        state.update(extra_state)
     a = ReportAssembler(storage_dir=tmp_path)
     out = a.assemble(state)
     doc = Document(str(tmp_path / "generated" / out.split("/")[-1]))
@@ -782,3 +784,49 @@ def test_qty_units_normalized_per_sample(tmp_path):
     assert "100m²" in text           # 田面平整
     assert "吨" in text              # 土壤培肥
     assert "| 100m |" not in text and "| m |" not in text
+
+
+def test_chapter_no_of_text_per_domain():
+    """段文本 → 章号：复垦「1 前言」、稳评「第三章、…」；都不是则 0。
+
+    🔴 审核批注的锚点原先是写死稳评正则的 —— 复垦章标题一条都匹配不上，
+       所有批注回落到 `doc.paragraphs[0]`（封面标题），交付稿首页挂满批注气球。
+    """
+    assert cat.chapter_no_of_text("reclamation", "1 前言") == 1
+    assert cat.chapter_no_of_text("reclamation", "14 附件") == 14
+    assert cat.chapter_no_of_text("reclamation", "第三章、评估过程") == 0
+    assert cat.chapter_no_of_text("reclamation", "1.1 编制背景及过程") == 0   # 小节不是章
+    assert cat.chapter_no_of_text("reclamation", "明远路以南地块商住项目") == 0
+    assert cat.chapter_no_of_text("stability", "第三章、评估过程") == 3
+    assert cat.chapter_no_of_text("stability", "第11章 分析预测风险源") == 11
+    assert cat.chapter_no_of_text("stability", "1 前言") == 0
+
+
+def test_audit_comments_anchor_on_chapters_not_cover(tmp_path):
+    """审核批注要挂在**各自章节**上，不许全落到封面。
+
+    实测（2026-10-10）：锚点正则写死稳评的 `^第X章`，复垦的 `1 前言` 匹配不上 →
+    9 条批注全挂 `doc.paragraphs[0]`（封面标题）→ 交付稿首页一排气球。
+    """
+    import re as _re
+    import zipfile
+    _gaps = {1: [{"detail": "第1章缺 X", "severity": "warn", "sentence": "第一句"}],
+             3: [{"detail": "第3章缺 Y", "severity": "info", "sentence": "第三句"}]}
+    out, _ = _render(tmp_path, "reclamation",
+                     {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"},
+                      3: {"markdown": "# 项目概况\n\n## 3.1 项目简介\n\nBODY3\n"}},
+                     {"project_name": "测试复垦项目"},
+                     extra_state={"_chapter_gaps": _gaps})
+    _p = tmp_path / "generated" / out.split("/")[-1]
+    z = zipfile.ZipFile(str(_p))
+    if "word/comments.xml" not in z.namelist():
+        pytest.skip("本次渲染没有审核批注（无缺口数据）")
+    x = z.read("word/document.xml").decode()
+    paras = _re.findall(r'<w:p[ >].*?</w:p>', x, _re.S)
+    assert not _re.findall(r'commentRangeStart', paras[0]), "封面（段0）不该挂批注"
+    _anchors = []
+    for _pa in paras:
+        if _re.findall(r'commentRangeStart', _pa):
+            _anchors.append("".join(_re.findall(r'<w:t[^>]*>([^<]*)</w:t>', _pa)).strip())
+    # 有缺口的第1/3章各挂一条，锚在**章标题**上
+    assert "1 前言" in _anchors and "3 项目概况" in _anchors, _anchors

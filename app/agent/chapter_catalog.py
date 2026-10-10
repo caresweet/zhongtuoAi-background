@@ -343,6 +343,25 @@ def is_chapter_heading_text(domain: str | None, text: str) -> bool:
     return bool(re.match(r'^第[一二三四五六七八九十]+章', t))
 
 
+def chapter_no_of_text(domain: str | None, text: str) -> int:
+    """段文本 → 章号；**不是章标题返回 0**。
+
+    🔴 为什么要有它：装配器里按章挂东西的地方（审核批注的锚点）原先直接写了
+       稳评的正则 `^第([一二三四五六七八九十\\d]+)章\\s` —— 复垦章标题是
+       `1 前言`，**一条都匹配不上**，于是所有批注统统回落到 `doc.paragraphs[0]`
+       （封面标题），交付稿**首页挂满批注气球**（实测 2026-10-10，9 条全在封面）。
+
+    稳评：委托 `chapter_definitions.chapter_no_of_heading`（逐字不变）；
+    复垦：`3 项目概况` 这种「阿拉伯数字 + 空格」。
+    """
+    t = (text or "").strip()
+    if domain == _RECLAMATION:
+        m = re.match(r'^(\d{1,2})\s+\S', t)
+        return int(m.group(1)) if m else 0
+    from app.agent.chapter_definitions import chapter_no_of_heading
+    return chapter_no_of_heading(t)
+
+
 def _strip_heading_number(s: str) -> str:
     """去掉标题自带的 `X.Y` / `（一）` 编号，只留名字。"""
     s = re.sub(r'^[\d\.]+\s*', '', s or '')

@@ -220,8 +220,11 @@ def test_front_matter_labels_per_domain():
     for k, v in rec.items():
         for m in ("稳评", "社会稳定风险评估", "评审表", "DB32", "征地", "征收"):
             assert m not in v, f"复垦前置件标签「{k}={v}」混入稳评标记「{m}」"
-    assert rec["org_label"] == "复垦责任主体："
-    assert rec["implement_label"] == "复垦实施单位："
+    # 🔴 封面落款抬头取自两份复垦样本的封面：
+    #    「项目单位：中铁建工集团有限公司 / 编制单位：江苏众拓测绘有限公司」——
+    #    复垦用「项目单位 / 编制单位」，不是稳评的「责任主体 / 实施单位」。
+    assert rec["org_label"] == "项目单位："
+    assert rec["implement_label"] == "编制单位："
     assert rec["roster_heading"] == "复垦方案编制人员及分工情况"
     assert rec["roster_lead_role"] == "复垦方案负责人"
 
@@ -235,7 +238,7 @@ def test_reclamation_render_front_matter_has_no_stability_wording(tmp_path):
     for m in ("稳评", "社会稳定风险评估", "评审表", "DB32", "征地", "征收", "拟征收"):
         assert m not in text, f"复垦报告混入稳评标记「{m}」"
     # 复垦口径的前置件文案确实盖上了
-    assert "复垦实施单位：某某复垦公司" in text
+    assert "编制单位：某某复垦公司" in text
     assert "复垦方案编制人员及分工情况" in text
 
 
@@ -247,4 +250,79 @@ def test_stability_render_front_matter_labels_unchanged(tmp_path):
                        "implement_unit": "某某稳评公司"})
     assert "稳评实施单位：某某稳评公司" in text
     assert "稳评工作组人员及分工情况" in text
+
+
+# ════════════════════════════════════════════════════════════
+# F. 前置件清单 / 章标题体例（按域接缝）
+#    规格取自两份复垦样本（明远佳苑二期报告书、盐业井神方案），两样本一致：
+#      封面(项目单位/编制单位/年月) → 扉页 → 目录 → 「1 前言 / 1.1 编制背景及过程」
+#    样本前置里**没有**公司资质证书页、**没有**公司简介页（含人员名单）。
+#    稳评（默认域）逐字等于改动前 —— 下面 `*_stability*` 是那条护栏。
+# ════════════════════════════════════════════════════════════
+
+def test_front_matter_order_per_domain():
+    """前置件清单：稳评四件逐字不变；复垦无资质/简介页、有扉页。"""
+    assert cat.front_matter_order("stability") == \
+        ["cover", "qualifications", "intro", "toc"]
+    assert cat.front_matter_order(None) == ["cover", "qualifications", "intro", "toc"]
+    assert cat.front_matter_order("reclamation") == ["cover", "title_page", "toc"]
+
+
+def test_has_title_page_per_domain():
+    assert cat.has_title_page("stability") is False
+    assert cat.has_title_page("reclamation") is True
+
+
+def test_chapter_heading_text_per_domain():
+    """稳评逐字等于改动前 `_add_chapter_title_page` 的 f"第{cn}章、{title}"。"""
+    assert cat.chapter_heading_text("stability", 3, "三", "评估过程、方法和依据") \
+        == "第三章、评估过程、方法和依据"
+    assert cat.chapter_heading_text(None, 1, "一", "编制说明") == "第一章、编制说明"
+    # 复垦取样本体例：阿拉伯数字 + 空格
+    assert cat.chapter_heading_text("reclamation", 1, None, "前言") == "1 前言"
+    assert cat.chapter_heading_text("reclamation", 10, None, "保障措施") == "10 保障措施"
+
+
+def test_chapter_title_own_page_per_domain():
+    assert cat.chapter_title_own_page("stability") is True
+    assert cat.chapter_title_own_page("reclamation") is False
+
+
+def test_has_chinese_sub_headings_per_domain():
+    assert cat.has_chinese_sub_headings("stability") is True
+    assert cat.has_chinese_sub_headings(None) is True
+    assert cat.has_chinese_sub_headings("reclamation") is False
+
+
+def test_is_chapter_heading_text_per_domain():
+    """目录缓存据此跳过前置页标题 —— 复垦章标题是阿拉伯数字，稳评正则会漏。"""
+    assert cat.is_chapter_heading_text("stability", "第三章、评估过程") is True
+    assert cat.is_chapter_heading_text("stability", "公司简介") is False
+    assert cat.is_chapter_heading_text("reclamation", "3 项目概况") is True
+    assert cat.is_chapter_heading_text("reclamation", "公司简介") is False
+
+
+def test_normalize_reclamation_headings():
+    """LLM 退回「（一）/ 加粗」体例时，按章节目录把小节拉回 `X.Y`。
+
+    这是「（一）项目简介」的真凶修复：单章后处理原用**稳评**标准标题集比对，
+    复垦的 `## 3.1 项目简介` 不在集合里 → 被改写成 `**（一）项目简介**`。
+    """
+    md = ("## （一）项目简介\n\n正文\n\n"
+          "### 项目区自然概况\n\n正文\n\n"
+          "**（三）社会经济概况**\n\n正文\n\n"
+          "## 没在小节表里的标题\n\n保留\n")
+    out = cat.normalize_reclamation_headings(3, md)
+    assert "## 3.1 项目简介" in out
+    assert "## 3.2 项目区自然概况" in out
+    assert "## 3.3 社会经济概况" in out
+    assert "（一）" not in out and "（三）" not in out
+    # 认不出的标题原样保留，不硬改
+    assert "## 没在小节表里的标题" in out
+
+
+def test_normalize_reclamation_headings_noop_for_stability_chapter_number():
+    """章号不在复垦目录里（如 11）→ 原样返回，不误改。"""
+    md = "## 3.1 项目简介\n\n正文\n"
+    assert cat.normalize_reclamation_headings(11, md) == md
 

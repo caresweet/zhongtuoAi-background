@@ -109,7 +109,9 @@ def _reclamation_prompt(chapter=3):
     return a._default_system_prompt(_state("reclamation"))
 
 
-@pytest.mark.parametrize("chapter", [1, 2, 3])
+# 🔴 第 2 章已是**照搬章**（ReferenceChapterAgent，零 LLM —— 见章目录的照搬分派），
+#    它没有 `_default_system_prompt`。这里换成同样由 LLM 生成的第 1/3/4 章。
+@pytest.mark.parametrize("chapter", [1, 3, 4])
 def test_reclamation_prompt_has_no_stability_flavour(chapter):
     p = _reclamation_prompt(chapter)
     assert "稳评" not in p
@@ -121,6 +123,20 @@ def test_reclamation_prompt_has_no_stability_flavour(chapter):
     assert p.startswith(RECLAMATION_IDENTITY_PROMPT)
     assert "## 🔴 数据归位铁律" in p
     assert cat.chapter_data_iron_rule("reclamation") in p
+
+
+def test_reclamation_chapter2_goes_verbatim_track():
+    """第 2 章是照搬章，且语料必须指向**复垦**（不是稳评的白马湖风电参照件）。
+
+    参考件渲染层不传 ref_id 时会回落到「默认域=稳评」的语料 —— 复垦第 2 章就会被
+    填进白马湖风电的原文。这条把「ref_id 显式带域」钉住。
+    """
+    from app.agent.agents.chapters import get_chapter_agent
+    from app.services.reference_corpus import _current_ref_id
+    a = get_chapter_agent(2, domain="reclamation")
+    assert type(a).__name__ == "ReferenceChapterAgent"
+    assert a._ref_id == _current_ref_id("reclamation")
+    assert a._ref_id != _current_ref_id("stability")
 
 
 def test_reclamation_prompt_section_spec_is_reclamation_structure():

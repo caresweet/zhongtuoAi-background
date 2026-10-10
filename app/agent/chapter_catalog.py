@@ -19,6 +19,7 @@ master_orchestrator）按域取章集合/章标题/章类型/章结构文本的�
    故上列多数函数在稳评分支**直接委托**给既有实现，不复制第二份。
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 _RECLAMATION = "reclamation"
@@ -159,9 +160,11 @@ def front_matter_labels(domain: str | None) -> Dict[str, str]:
     """
     if domain == _RECLAMATION:
         return {
-            # 封面落款两个抬头（各 6 字 + 冒号，天然对齐）
-            "org_label": "复垦责任主体：",
-            "implement_label": "复垦实施单位：",
+            # 封面落款两个抬头。🔴 取值来自两份复垦样本的封面：
+            #   「项目单位：中铁建工集团有限公司 / 编制单位：江苏众拓测绘有限公司」——
+            #   复垦用的是「项目单位 / 编制单位」，不是稳评的「责任主体 / 实施单位」。
+            "org_label": "项目单位：",
+            "implement_label": "编制单位：",
             # 公司简介里「人员及分工」区标题
             "roster_heading": "复垦方案编制人员及分工情况",
             # 人员库为空时兜底名单的首个岗位名
@@ -186,6 +189,120 @@ def front_matter_labels(domain: str | None) -> Dict[str, str]:
         "map_caption": "拟征收土地位置示意图",
         "audit_comment_author": "稳评审核Agent",
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 前置件 / 章标题体例（装配器 `report_assembler` 按域取值）
+# ═══════════════════════════════════════════════════════════════
+# 两份复垦样本（明远佳苑二期报告书、盐业井神方案）规格完全一致：
+#   封面(项目单位/编制单位/年月) → 扉页(项目名称/项目单位/单位地址/联系人/电话)
+#   → 目录 → 「1 前言 / 1.1 …」（阿拉伯数字；章标题不独占整页）
+# **没有**稳评那两页：「公司资质证书」「公司简介(含人员名单)」。
+# 稳评（默认域）逐字等于改动前 —— 这是「稳评输出不变」的结构性依据。
+
+_FRONT_MATTER_ORDER = {
+    "stability": ["cover", "qualifications", "intro", "toc"],
+    "reclamation": ["cover", "title_page", "toc"],
+}
+
+
+def front_matter_order(domain: str | None) -> List[str]:
+    """前置件渲染顺序（token 列表）。稳评四件，逐字等于改动前的拼接顺序与分页点。"""
+    return list(_FRONT_MATTER_ORDER.get(domain or "stability",
+                                        _FRONT_MATTER_ORDER["stability"]))
+
+
+def has_title_page(domain: str | None) -> bool:
+    """是否有「扉页/项目信息页」。稳评没有；复垦有。"""
+    return "title_page" in front_matter_order(domain)
+
+
+def chapter_heading_text(domain: str | None, chapter_number: int,
+                         cn: str, title: str) -> str:
+    """章标题文本（Heading 1）。
+
+    稳评 `第三章、评估过程、方法和依据` —— 逐字等于改动前 `_add_chapter_title_page`
+    的 `f"第{cn}章、{title}"`；复垦 `3 项目概况`（样本体例：阿拉伯数字 + 空格）。
+    """
+    if domain == _RECLAMATION:
+        return f"{int(chapter_number)} {title}"
+    return f"第{cn}章、{title}"
+
+
+def chapter_title_own_page(domain: str | None) -> bool:
+    """章标题是否独占整页并垂直居中。稳评是；复垦不是（样本里标题就在正文页顶）。"""
+    return domain != _RECLAMATION
+
+
+def has_chinese_sub_headings(domain: str | None) -> bool:
+    """本域小节体例是否为稳评式「（一）（二）」。
+
+    真 → 单章后处理走 `_normalize_headings` / `_apply_section_subs` 那套归一；
+    假（复垦）→ 走 `normalize_reclamation_headings`，保住 `X.Y` 编号。
+    """
+    return domain != _RECLAMATION
+
+
+def is_chapter_heading_text(domain: str | None, text: str) -> bool:
+    """该文本是不是「正文里的章标题」（`_fill_toc_cache` 据此跳过前置页标题）。"""
+    t = (text or "").strip()
+    if domain == _RECLAMATION:
+        return bool(re.match(r'^\d+\s+\S', t))
+    return bool(re.match(r'^第[一二三四五六七八九十]+章', t))
+
+
+def _strip_heading_number(s: str) -> str:
+    """去掉标题自带的 `X.Y` / `（一）` 编号，只留名字。"""
+    s = re.sub(r'^[\d\.]+\s*', '', s or '')
+    s = re.sub(r'^[（(][一二三四五六七八九十]+[）)]\s*', '', s)
+    return s.strip()
+
+
+def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
+    """复垦单章后处理：把 LLM 写下的小节标题拉回 `X.Y 标题` 体例。
+
+    🔴 为什么需要它：单章后处理原先只有稳评那一套 —— `_normalize_headings` 拿
+       `template_headings.CHAPTER_HEADINGS`（**稳评的**标准标题集）比对，复垦的
+       `## 3.1 项目简介` 不在集合里，于是命中「自创标题」分支被改写成
+       `**（一）项目简介**`：层级掉成正文加粗、`X.Y` 编号也没了。
+       （照搬章 2/5/7/10 走参照件渲染、不过这段后处理，所以它们的 `2.1` 一直是对的
+        —— 这正是「一半章对、一半章错」的由来。）
+
+    规则：按 `RECLAMATION_CHAPTER_DEFINITIONS[ch]["sections"]`（如 `3.1 项目简介`）
+    把小节标题重写成规范编号；**认不出的标题原样保留**（不硬改）。
+    """
+    from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
+    d = RECLAMATION_CHAPTER_DEFINITIONS.get(int(chapter_number), {})
+    sections = [str(s).strip() for s in (d.get("sections") or [])]
+    if not sections:
+        return md
+    by_name: Dict[str, str] = {}
+    for s in sections:
+        m = re.match(r'^(\d+(?:\.\d+)*)\s*(.+)$', s)
+        if m:
+            by_name[_strip_heading_number(m.group(2))] = m.group(1)
+
+    out = []
+    for line in md.split("\n"):
+        s = line.strip()
+        if not s:
+            out.append(line)
+            continue
+        m = re.match(r'^(#{2,4})\s*(.+)$', s)
+        if m:
+            body = _strip_heading_number(m.group(2).strip().strip('*').strip())
+        else:
+            mb = re.match(r'^\*\*(.+)\*\*$', s)      # LLM 退回的加粗小标题
+            if not mb:
+                out.append(line)
+                continue
+            body = _strip_heading_number(mb.group(1).strip())
+        num = by_name.get(body)
+        if not num:
+            out.append(line)
+            continue
+        out.append(f"{'###' if num.count('.') >= 2 else '##'} {num} {body}")
+    return "\n".join(out)
 
 
 # ═══════════════════════════════════════════════════════════════

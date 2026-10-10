@@ -51,8 +51,14 @@ def test_word_ranges_are_evidence_based():
 
 
 def test_chapter_kind_and_title_lookup():
-    assert RECLAMATION_CHAPTER_KIND[6] == "table"
-    assert RECLAMATION_CHAPTER_KIND[7] == "table"
+    # 🔴 第6/7章原标 "table"（本意是「以表格为主」）。但编排层对 "table" 的理解是
+    #    「由**组装器**确定性渲染、不经 LLM」（稳评第3章评审表/第14章附件那类），
+    #    命中即 `return state` **跳过该章** —— 而复垦的组装器并不渲染这两章，
+    #    成稿于是静默少两章。复垦没有任何组装器渲染的章，故一律 "fact"。
+    assert RECLAMATION_CHAPTER_KIND[6] == "fact"
+    assert RECLAMATION_CHAPTER_KIND[7] == "fact"
     assert RECLAMATION_CHAPTER_KIND[1] == "fact"
+    assert set(RECLAMATION_CHAPTER_KIND.values()) == {"fact"}, \
+        "复垦不应出现 table/attachment 类章（会被编排层跳过）"
     assert get_reclamation_chapter_title(4) == "土地复垦方向可行性分析"
     assert get_reclamation_chapter_title(99) == "第99章"

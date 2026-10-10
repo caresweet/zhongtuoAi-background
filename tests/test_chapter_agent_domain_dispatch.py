@@ -29,15 +29,22 @@ def test_reclamation_title_and_rag_query_not_overwritten_by_stability():
 
 
 def test_reclamation_out_of_range_returns_none():
-    """一期只实现第 1–3 章；**4–10 也在「无 agent」之列**，不得落到稳评的 agent。
+    """只有**章号越界**（>10）才返回 None；1–10 每章都必须有 agent。
 
-    4–10 是复垦的合法章号，但本期未实现对应 agent —— 必须返回 None（编排层跳过）。
-    若这里改回稳评的 agent，复垦第 4 章就会拿到稳评的风险源正文。
+    🔴 这条原先断言的是「4–10 返回 None」，理由是「一期只实现 1–3 章」。那是**错的**：
+       编排层拿到 None 会**直接跳过该章**，成稿因此少章 —— 实测第 6/7 章整章消失、
+       日志里连一行都不打（idx 从 4 直接跳到 7）。
+       现在 1–10 都有 agent：1/3 专属、2/5/7/10 走照搬（ReferenceChapterAgent）、
+       4/6/8/9 走通用复垦章。
     """
-    for n in range(4, 11):
+    for n in range(1, 11):
+        a = get_chapter_agent(n, domain="reclamation")
+        assert a is not None, n
+        # 🔴 绝不能落到稳评的 agent（复垦 1–10 与稳评 1–14 章号完全重合）
+        assert "Reclamation" in type(a).__name__ or type(a).__name__ == "ReferenceChapterAgent", \
+            f"第{n}章拿到了 {type(a).__name__}"
+    for n in (0, 11, 14, 99):
         assert get_chapter_agent(n, domain="reclamation") is None, n
-    assert get_chapter_agent(11, domain="reclamation") is None
-    assert get_chapter_agent(14, domain="reclamation") is None
 
 
 def test_reclamation_composed_rag_query_has_no_stability_wording():

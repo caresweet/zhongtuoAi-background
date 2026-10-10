@@ -125,7 +125,9 @@ def _user_prompt(domain, chapter):
     return a._default_user_prompt(_state(domain), _RAG, _UD)
 
 
-@pytest.mark.parametrize("chapter", [1, 2, 3])
+# 🔴 第 2 章已是照搬章（ReferenceChapterAgent，零 LLM），没有 `_default_user_prompt`。
+#    换成同样由 LLM 生成的第 1/3/4 章；照搬章的产出去向另见 test_chapter_prompt_domain。
+@pytest.mark.parametrize("chapter", [1, 3, 4])
 def test_reclamation_user_prompt_has_no_stability_flavour(chapter, _stub_external):
     p = _user_prompt("reclamation", chapter)
     for bad in ("稳评", "DB32", "社会稳定风险评估", "拟征收土地"):

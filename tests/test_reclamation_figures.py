@@ -107,16 +107,19 @@ def test_figure_name_carries_the_binding_keyword():
     assert "位置示意图" in "图3-1 工程位置示意图.png"
 
 
-def test_generic_photo_binds_to_ch4_via_alias(tmp_path):
+def test_photo_folder_binds_to_ch4_via_alias(tmp_path):
     """无关键词的照片名（IMG_xxxx / 扫描仪默认名）也要能进正文第4章。
 
     复垦规格的 `type` 是按图题细分的专名（`site_photo`），而分类器只产出粗类
-    （`photo` / `other`）—— 不写 `aliases` 就**永远**绑不上，用户上传的照片
-    只能落附件，正文仍是干文字（这正是「图片没进报告」的一条成因）。
+    （`photo`）—— 不写 `aliases` 就**永远**绑不上，用户上传的照片只能落附件，
+    正文仍是干文字（这正是「图片没进报告」的一条成因）。
+
+    🔴 目录用「实地勘察」而不是「现场照片」：后者会被 `RECLAMATION_IMAGE_SPECS`
+      的**关键词**直接命中，走的是另一条路，测不到 `aliases` 这条。
     """
     PILImage = pytest.importorskip("PIL.Image")
     from app.services.image_catalog import build_image_catalog
-    img_dir = tmp_path / "images"
+    img_dir = tmp_path / "实地勘察"
     img_dir.mkdir()
     items = []
     for i, n in enumerate(("IMG_2043.jpg", "MX-M3508N_001.jpg")):
@@ -124,6 +127,21 @@ def test_generic_photo_binds_to_ch4_via_alias(tmp_path):
         PILImage.new("RGB", (60, 40), (200 - i * 40, 180, 160)).save(p)
         items.append({"path": str(p), "original_name": n})
     cat = build_image_catalog(items, domain="reclamation")
-    assert {c["category"] for c in cat["catalog"]} == {"other"}
+    assert {c["category"] for c in cat["catalog"]} == {"photo"}
     assert len(cat["by_chapter"].get(4, [])) == 2
     assert cat["by_chapter"][4][0]["label"] == "临时用地现场照片"
+
+
+def test_unclassified_scan_never_enters_body(tmp_path):
+    """认不出的图（`other`）**不许**进正文 —— 实测环评登记表/批复的扫描页正是 `other`，
+    曾按别名被当「现场照片」印进第4章。宁可少一张图，也不许把公文扫描件当现场照片。"""
+    PILImage = pytest.importorskip("PIL.Image")
+    from app.services.image_catalog import build_image_catalog
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    p = img_dir / "pdf_环保局批准文件_p1_img0.jpeg"
+    PILImage.new("RGB", (60, 40), (240, 240, 240)).save(p)
+    cat = build_image_catalog([{"path": str(p), "original_name": p.name}],
+                              domain="reclamation")
+    assert [c["category"] for c in cat["catalog"]] == ["other"]
+    assert cat["by_chapter"].get(4, []) == []

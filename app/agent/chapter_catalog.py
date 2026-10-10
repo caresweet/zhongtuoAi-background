@@ -268,8 +268,13 @@ def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
        （照搬章 2/5/7/10 走参照件渲染、不过这段后处理，所以它们的 `2.1` 一直是对的
         —— 这正是「一半章对、一半章错」的由来。）
 
-    规则：按 `RECLAMATION_CHAPTER_DEFINITIONS[ch]["sections"]`（如 `3.1 项目简介`）
-    把小节标题重写成规范编号；**认不出的标题原样保留**（不硬改）。
+    规则：
+      ① 与 `RECLAMATION_CHAPTER_DEFINITIONS[ch]["sections"]`（如 `1.2 复垦方案摘要`）
+         同名的小节 → 拉回规范编号；
+      ② 认不出的「（一）（二）」条目 → 归到**当前小节**下做三级编号（`1.2.1`、`1.2.2`…，
+         与样本体例一致）。序号按出现顺序重排，避免 LLM 分成两段后从「（一）」重来
+         （实测第 6 章出现过两组「（一）」）；
+      ③ 其余标题原样保留（不硬改）。
     """
     from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
     d = RECLAMATION_CHAPTER_DEFINITIONS.get(int(chapter_number), {})
@@ -282,7 +287,9 @@ def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
         if m:
             by_name[_strip_heading_number(m.group(2))] = m.group(1)
 
-    out = []
+    out: List[str] = []
+    cur = ""      # 当前二级小节号（如 `1.2`）
+    sub = 0       # 当前小节下的三级序号
     for line in md.split("\n"):
         s = line.strip()
         if not s:
@@ -290,18 +297,26 @@ def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
             continue
         m = re.match(r'^(#{2,4})\s*(.+)$', s)
         if m:
-            body = _strip_heading_number(m.group(2).strip().strip('*').strip())
+            raw = m.group(2).strip().strip('*').strip()
         else:
-            mb = re.match(r'^\*\*(.+)\*\*$', s)      # LLM 退回的加粗小标题
+            mb = re.match(r'^\*\*(.+)\*\*$', s)
             if not mb:
                 out.append(line)
                 continue
-            body = _strip_heading_number(mb.group(1).strip())
+            raw = mb.group(1).strip()
+        body = _strip_heading_number(raw)
         num = by_name.get(body)
-        if not num:
-            out.append(line)
+        if num:
+            cur = num
+            sub = 0
+            out.append(f"{'###' if num.count('.') >= 2 else '##'} {num} {body}")
             continue
-        out.append(f"{'###' if num.count('.') >= 2 else '##'} {num} {body}")
+        # 「（一）xxx」条目 → 当前小节下的三级编号
+        if cur and re.match(r'^[（(][一二三四五六七八九十\d]+[）)]', raw):
+            sub += 1
+            out.append(f"### {cur}.{sub} {body}")
+            continue
+        out.append(line)
     return "\n".join(out)
 
 

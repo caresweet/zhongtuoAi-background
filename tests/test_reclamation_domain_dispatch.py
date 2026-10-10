@@ -364,3 +364,24 @@ def test_stability_render_keeps_qualifications_and_intro(tmp_path):
     assert "公司简介" in text
     assert "稳评工作组人员及分工情况" in text
     assert "送审时间：" not in text          # 稳评没有扉页
+
+
+def test_normalize_reclamation_headings_sub_items():
+    """小节下的「（一）（二）」→ 当前小节的三级编号（样本体例 `1.2.1`）。"""
+    md = ("## 1.1 编制背景及过程\n\n正文\n\n"
+          "## （一）复垦方案服务年限\n\nA\n\n## （二）各类土地面积\n\nB\n")
+    out = cat.normalize_reclamation_headings(1, md)
+    assert "### 1.1.1 复垦方案服务年限" in out
+    assert "### 1.1.2 各类土地面积" in out
+    assert "（一）" not in out and "（二）" not in out
+
+
+def test_normalize_reclamation_headings_renumbers_restarted_group():
+    """LLM 把同一小节分成两段、序号各自从「（一）」重来 —— 按出现顺序重排，不出重号。"""
+    md = ("## 6.1 工程设计\n\n### （一）表土剥离\n\nA\n\n### （二）场地清理\n\nB\n\n"
+          "### （一）监测措施\n\nC\n\n### （二）管护措施\n\nD\n\n## 6.2 工程量测算\n\nE\n")
+    out = cat.normalize_reclamation_headings(6, md)
+    for want in ("### 6.1.1 表土剥离", "### 6.1.2 场地清理",
+                 "### 6.1.3 监测措施", "### 6.1.4 管护措施"):
+        assert want in out, want
+    assert out.count("### 6.1.1") == 1

@@ -444,13 +444,20 @@ def test_reclamation_render_has_title_page(tmp_path):
         assert s in text, s
 
 
-def test_reclamation_title_page_omits_empty_rows(tmp_path):
-    """抽不到的字段**整行不出现** —— 不印占位符，也不为它弹窗问用户。"""
+def test_reclamation_title_page_keeps_all_six_rows(tmp_path):
+    """扉页按样本**六行齐全**，抽不到的字段留**空横线**给手填。
+
+    🔴 这条断言 2026-10-10 被业主推翻过：原设计是「值为空则整行不输出」，
+       于是材料里没有「单位地址/送审时间」时扉页只剩 4 行，业主一眼看出
+       「信息还缺少了几项」。样本（明远路 第2页）是 6 行填表、每行一条横线 ——
+       横线在就等于留了空位，**不是占位符**（仍不印「待填写」这类字）。
+    """
     _, text = _render(tmp_path, "reclamation",
                       {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nX"}},
                       {"project_name": "某复垦项目", "doc_reference": "苏复垦〔2026〕1号"})
-    for lab in ("单位地址：", "联 系 人：", "电　　话：", "送审时间："):
-        assert lab not in text, lab
+    for lab in ("项目名称：", "项目单位：", "单位地址：", "联 系 人：", "电　　话：", "送审时间："):
+        assert lab in text, lab
+    assert "【待补充】" not in text          # 空值留横线，但不印占位符字
 
 
 def test_stability_render_keeps_qualifications_and_intro(tmp_path):

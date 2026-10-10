@@ -14,6 +14,7 @@ from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 from lxml import etree
 from app.agent.chapter_definitions import chapter_no_of_heading
 from app.agent.chapter_catalog import (
@@ -122,6 +123,63 @@ def _cn_num(n: int) -> str:
     return f"{n // 10}十" + (['', '一', '二', '三', '四', '五', '六', '七', '八', '九'][n % 10] if n % 10 else '')
 
 _CN_DIGIT = '〇一二三四五六七八九'
+
+
+def _add_page_break(doc) -> None:
+    """加一个分页符；**紧邻上一个已是分页符时不再加**。
+
+    🔴 前置件各块（封面/资质/简介/扉页）各自结尾都自带一个分页符，装配器在目录前
+       又补一个 —— 两个挨在一起就是**一整页空白**。以前这个重复被「空段清理」顺手
+       吃掉了（连正文该有的分页一起吃掉，见 `_post_generation_fix` 的注释），
+       现在清理不再动分页符，就得在这里挡重复。
+    """
+    # 🔴 `sdt` 也要算进来：目录就是一个 sdt，不算它的话「目录后分页」会被误判成重复
+    _kids = [c for c in doc.element.body.iterchildren()
+             if c.tag.split('}')[1] in ('p', 'tbl', 'sdt')]
+    if _kids:
+        _last = _kids[-1]
+        if any((b.get(qn('w:type')) or '') == 'page'
+               for b in _last.findall('.//' + qn('w:br'))):
+            return
+    doc.add_page_break()
+
+
+def _add_para_bottom_border(p) -> None:
+    """给段落加一条**下边框**（＝填表横线，复垦扉页每行下面那条）。
+
+    🔴 `w:pBdr` 在 `w:pPr` 里的位置有 schema 约束：必须排在 `numPr` 之后、
+       `shd`/`tabs`/`spacing`/`ind`/`jc` 之前。位置放错，Word 会因校验失败
+       **忽略整段 `w:pPr`**（`_fill_toc_cache` 里那条 `w:spacing` 踩过同样的坑）。
+       所以这里按「第一个属于 pBdr 之后」的元素插在它前面，找不到才 append。
+    """
+    pPr = p._p.get_or_add_pPr()
+    bdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '8')          # 8/8 pt = 1pt 细线
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), '000000')
+    bdr.append(bottom)
+    _ins = None
+    for _ch in pPr:
+        if _ch.tag in _PPR_AFTER_PBDR:
+            _ins = _ch
+            break
+    if _ins is not None:
+        _ins.addprevious(bdr)
+    else:
+        pPr.append(bdr)
+
+
+# `w:pPr` 里**排在 `w:pBdr` 之后**的元素（用于定位插入点，见 `_add_para_bottom_border`）
+_PPR_AFTER_PBDR = frozenset(qn(_t) for _t in (
+    'w:shd', 'w:tabs', 'w:suppressAutoHyphens', 'w:kinsoku', 'w:wordWrap',
+    'w:overflowPunct', 'w:topLinePunct', 'w:autoSpaceDE', 'w:autoSpaceDN',
+    'w:bidi', 'w:adjustRightInd', 'w:snapToGrid', 'w:spacing', 'w:ind',
+    'w:contextualSpacing', 'w:mirrorIndents', 'w:suppressOverlap', 'w:jc',
+    'w:textDirection', 'w:textAlignment', 'w:textboxTightWrap', 'w:outlineLvl',
+    'w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr', 'w:pPrChange',
+))
 
 
 def _cn_year_month(d) -> str:
@@ -600,9 +658,9 @@ class ReportAssembler:
 
         # ── 目录（正文各章之前）──
         #    参照件结构：封面 → 资质/简介 → 目录 → 第一章…第十四章
-        doc.add_page_break()
+        _add_page_break(doc)
         self._add_toc(doc, chapters, template_path=state.get("template_path"))
-        doc.add_page_break()   # 🔴 目录后另起一页，评审表从新页开始
+        _add_page_break(doc)   # 🔴 目录后另起一页，评审表从新页开始
 
         # 注：评审表是**第3章**（参照件《白马湖…报告》结构），
         #     在下面的章节循环里于 ch_num == 3 时渲染。
@@ -1735,6 +1793,15 @@ class ReportAssembler:
         for p in doc.paragraphs:
             if _has_image(p):
                 continue
+            # 🔴 **分页符段落不是空段**：判据只看有没有文字，而「另起一页」用的正是
+            #    一个没有文字的段落（`w:br w:type="page"`）—— 于是它被当空段删掉，
+            #    该分页的地方不再分页。实测 2026-10-10：复垦扉页与目录之间的分页符
+            #    被删 → **扉页和目录挤在同一页**（业主：「第二页又有目录又有信息」）。
+            #    分页符是**版式指令**，遇到就当内容，并把连续空段计数清零。
+            if any((b.get(qn('w:type')) or '') == 'page'
+                   for b in p._element.findall('.//' + qn('w:br'))):
+                empty_count = 0
+                continue
             if not p.text.strip():
                 empty_count += 1
                 if empty_count > 2:  # Max 2 consecutive empty paragraphs
@@ -2119,9 +2186,12 @@ class ReportAssembler:
         _set_run_font(p.add_run(cover_type_line(self._domain)), _th_font,
                       size=Pt(_th_pt), bold=True, ascii_font=FONT_ASCII)
 
-        # ── 信息块：标签 + 值；值为空则整行略过 ──
-        #    「项目单位」优先取 `project_unit`（材料里的「用地单位/建设单位」），
-        #    退回 `org_name`（封面那条落款同一来源）。
+        # ── 信息块：**样本是 6 行填表**（每行值下面一条横线），值缺失也留着横线给手填 ──
+        #    样本（明远路 第2页 实测）：
+        #        项目名称：…   项目单位：…   单位地址：…   联 系 人：…   电　话：…   送审时间：…
+        #    每行下面都有一条横线。**行不能少** —— 以前「值为空则整行略过」，
+        #    材料里没有「单位地址/送审时间」时就只剩 4 行，业主一眼就看出「信息缺了几项」。
+        #    横线在=留了空位可手填；不印「待填写」这类占位符（业主硬约束）。
         _rows = (
             ("项目名称：", pn),
             ("项目单位：", filled.get("project_unit") or filled.get("org_name") or ""),
@@ -2130,16 +2200,18 @@ class ReportAssembler:
             ("电　　话：", filled.get("contact_phone") or ""),
             ("送审时间：", filled.get("submit_date") or ""),
         )
-        _first = True
-        for lab, val in _rows:
+        for _i, (lab, val) in enumerate(_rows):
             v = str(val or "").strip()
-            if not v:
-                continue
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = Pt(72) if _first else Pt(6)
-            p.paragraph_format.space_after = Pt(0)
-            _set_run_font(p.add_run(lab + v), _ti_font, size=Pt(_ti_pt), ascii_font=FONT_ASCII)
-            _first = False
+            p.paragraph_format.space_before = Pt(72) if _i == 0 else Pt(22)
+            p.paragraph_format.space_after = Pt(6)
+            if v:
+                _set_run_font(p.add_run(lab + v), _ti_font, size=Pt(_ti_pt),
+                              ascii_font=FONT_ASCII)
+            else:
+                _set_run_font(p.add_run(lab), _ti_font, size=Pt(_ti_pt),
+                              ascii_font=FONT_ASCII)
+            _add_para_bottom_border(p)
 
         doc.add_page_break()
 
@@ -5570,6 +5642,13 @@ class ReportAssembler:
                 _last = _kids[-1]
                 if ''.join(t.text or '' for t in _last.iter(qn('w:t'))).strip():
                     break                                   # 有字 → 停
+                # 🔴 **分页符段落不是空段**（判据只看文字时它算空 —— 第三次踩同一个坑）：
+                #    目录前后各有一个 `add_page_break()` 段落，被这里啃掉 →
+                #    **扉页与目录挤在同一页**（业主：「第二页又有目录又有信息」）。
+                #    分页符是版式指令，遇到就停手。
+                if any((b.get(qn('w:type')) or '') == 'page'
+                       for b in _last.findall('.//' + qn('w:br'))):
+                    break
                 if _last.find(qn('w:pPr') + '/' + qn('w:sectPr')) is not None:
                     break                                   # 别动既有分节段落
                 _last.getparent().remove(_last)

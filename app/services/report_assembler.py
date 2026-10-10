@@ -2863,6 +2863,9 @@ class ReportAssembler:
 
         # 🔴 表题统一放表格「正上方」（公文/GB 排版规范：表题在上、图题在下）
         # 🔴 表号一律由系统按「章-序号」重编，治 LLM 写错表号（如第八章的评分表写成「表7-1」）
+        # 🔴 复垦工程量表：单位按样本**确定性归一**（模型常把 `100m³` 写成 `100m`）
+        if rows:
+            rows = [rows[0]] + self._normalize_qty_units(rows[0], rows[1:])
         header_cells = rows[0] if rows else []
 
         # 🔴 表4-3 / 表12-3「群众意见分析」：**按系统模板渲染**。
@@ -3140,6 +3143,41 @@ class ReportAssembler:
             caption=str(caption).strip())
         logger.info(f"[表4-2] 按勘测定界地类渲染 {len(out_rows)} 行（合计 {total / 10000.0:.4f} 公顷）")
         return True
+
+    def _normalize_qty_units(self, headers, rows):
+        """复垦工程量表的**单位归一**（确定性，不靠模型自觉）。
+
+        🔴 为什么不能只写进提示词：实测第6章提示词里已明写「单位用 `100m³`」，
+           markdown 里**模型还是写成 `100m`**（丢了立方）。单位是公式化的 ——
+           哪一项用什么单位在样本里是固定的，直接按工程名归一，比反复叮嘱可靠。
+
+        样本（明远路 6.2 工程量表）的实际单位：
+            表土剥离 / 表土回填 / 混凝土面层拆除 / 垫层清除 / 垃圾外运 / 沟渠疏通 → 100m³
+            土地翻耕 → 公顷      田面平整 → 100m²      土壤培肥（有机肥/复合肥） → 吨
+        """
+        _h = "".join(str(x) for x in (headers or []))
+        if not ("工程" in _h and "单位" in _h and "数量" in _h):
+            return rows
+        _UNIT_BY_ITEM = (
+            ("田面平整", "100m²"),
+            ("土地翻耕", "公顷"),
+            ("土壤培肥", "吨"),
+            ("表土剥离", "100m³"), ("表土回填", "100m³"), ("表土剥覆", "100m³"),
+            ("混凝土", "100m³"), ("垫层", "100m³"), ("垃圾外运", "100m³"),
+            ("沟渠", "100m³"), ("疏通", "100m³"), ("拆除", "100m³"), ("清理", "100m³"),
+        )
+        out = []
+        for r in rows:
+            r = list(r)
+            if len(r) >= 3:
+                _name = str(r[1])
+                _want = next((u for k, u in _UNIT_BY_ITEM if k in _name), "")
+                # 只改「单位格」且只在该行是具体分项时（层级行是 `—`）
+                if _want and str(r[2]).strip() not in ("", "—", "-"):
+                    if str(r[2]).strip() != _want:
+                        r[2] = _want
+            out.append(r)
+        return out
 
     def _render_table_from_dict(self, doc, table_data: dict, caption: str = ""):
         """从 {headers, rows} 结构渲染系统生成的标准表（如表3-1六维群众意见表）。

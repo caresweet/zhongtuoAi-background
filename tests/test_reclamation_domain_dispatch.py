@@ -745,9 +745,33 @@ def test_ch6_requirements_block_is_chapter_specific():
     assert "本章专属要求（第6章" in b6
     assert "calc_earthwork" in b6
     assert "100m³" in b6
+    # 单位那关不只靠提示词：见 `_normalize_qty_units`（模型实测把 100m³ 写成 100m）
     for _ch in (1, 4, 7, 10):
         assert "本章专属要求" not in cat.requirements_block("reclamation", 1000, 2000, _ch)
     # 不传章号 = 改动前逐字相同；稳评永远返回空串（它走内联正文）
     assert cat.requirements_block("reclamation", 1200, 1600) == \
         cat.requirements_block("reclamation", 1200, 1600, None)
     assert cat.requirements_block("stability", 100, 200, 6) == ""
+
+
+def test_qty_units_normalized_per_sample(tmp_path):
+    """复垦工程量表的单位**确定性归一** —— 模型实测把 `100m³` 写成 `100m`。
+
+    提示词里明写了单位，模型还是丢立方（样本 6.2 的量表单位是固定的四种）。
+    """
+    md = ("# 土地复垦工程设计及工程量测算\n\n## 6.2 工程量测算\n\n"
+          "表6-1 土地复垦工程量测算表\n\n"
+          "| 序号 | 工程或费用名称 | 单位 | 数量 |\n"
+          "| --- | --- | --- | --- |\n"
+          "| 一 | 土壤重构工程 | — | — |\n"
+          "| 1 | 表土剥离 | 100m | 8.1 |\n"
+          "| 2 | 土地翻耕 | m | 0.05 |\n"
+          "| 3 | 田面平整 | 100m | 80.7 |\n"
+          "| 4 | 土壤培肥（有机肥） | t | 0.7 |\n")
+    _out, text = _render(tmp_path, "reclamation", {6: {"markdown": md}},
+                         {"project_name": "测试复垦项目"})
+    assert "100m³" in text          # 表土剥离
+    assert "公顷" in text            # 土地翻耕
+    assert "100m²" in text           # 田面平整
+    assert "吨" in text              # 土壤培肥
+    assert "| 100m |" not in text and "| m |" not in text

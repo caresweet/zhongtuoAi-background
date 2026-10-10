@@ -732,3 +732,22 @@ def test_land_use_table_rendered_from_land_classification(tmp_path):
     assert "以耕地为主" not in text                # LLM 那行被拦掉了
     # 面积/占比都按数据算，不是抄的
     assert "8.83" in text                         # 0.0478 / 0.5416 × 100（四舍五入）
+
+
+def test_ch6_requirements_block_is_chapter_specific():
+    """第6章专属要求只并进第6章：必须调 `calc_earthwork`、给实数、单位照样本。
+
+    实测业主指出「表6-1 格式和数据也不对」：分项全写「以现场核定为准」，
+    单位写成 `100m`（样本是 `100m³`）。面积其实已经有了（事实卡「地类构成」，
+    由勘测定界的土地分类面积表视觉读出），工具也早注册好了 —— 缺的只是明确要求。
+    """
+    b6 = cat.requirements_block("reclamation", 1200, 1600, 6)
+    assert "本章专属要求（第6章" in b6
+    assert "calc_earthwork" in b6
+    assert "100m³" in b6
+    for _ch in (1, 4, 7, 10):
+        assert "本章专属要求" not in cat.requirements_block("reclamation", 1000, 2000, _ch)
+    # 不传章号 = 改动前逐字相同；稳评永远返回空串（它走内联正文）
+    assert cat.requirements_block("reclamation", 1200, 1600) == \
+        cat.requirements_block("reclamation", 1200, 1600, None)
+    assert cat.requirements_block("stability", 100, 200, 6) == ""

@@ -750,7 +750,7 @@ def build_chapter_prompt(
     # ── 末段「写作要求」块：稳评 / 复垦各一套，互不掺和 ──
     # 🔴 复垦：经 catalog 取复垦口径的要求文本（不含稳评规范/口径与稳评 DB 反馈）。
     # 🔴 稳评：沿用下面这份内联正文 —— 逐字保持不变（稳评护栏）。
-    _req_block = _catalog.requirements_block(domain, min_words, max_words)
+    _req_block = _catalog.requirements_block(domain, min_words, max_words, num)
     if _req_block:
         prompt += _req_block
     else:

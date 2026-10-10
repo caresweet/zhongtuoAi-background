@@ -463,10 +463,43 @@ _RECLAMATION_REQUIREMENTS = """
 """
 
 
-def render_reclamation_requirements(min_words: int, max_words: int) -> str:
-    """渲染复垦单章提示词的「写作要求」块。"""
+# 第6章「工程设计及工程量测算」的**专属要求**（只并进第6章的提示词）。
+# 🔴 为什么单列：复垦的工程量表（样本 6.2「具体详见下表：」后那张）**每一个分项都是实数**
+#    —— 表土剥离 5.378(100m³)、混凝土面层拆除 4.1445、土地翻耕 0.2689(公顷)…。
+#    实测我们这一章全写「以现场核定为准」「以实测为准」，单位还写成 `100m`（少个立方），
+#    业主直接指出「格式和数据也不对」。面积数据其实**现在有了**（事实卡的「地类构成」，
+#    由勘测定界的土地分类面积表视觉读出），工具 `calc_earthwork` 也早就注册好了，
+#    缺的只是明确要求模型去调它、并把结果落成实数。
+_RECLAMATION_CH6_REQUIREMENTS = """
+
+## 本章专属要求（第6章 工程设计及工程量测算）
+
+- 🔴 **工程量表的每一个分项都要给出实数与单位**，不得写「以实测为准」「以现场核定为准」
+  「以现场实际发生量为准」这类占位（这是业主点名的问题）。实数的来源有两条，任选其一：
+    * **优先调用工具 `calc_earthwork`**：它按复垦设计测算（表土剥离 = 耕地面积×剥离厚度、
+      混凝土层/垫层 = 功能区面积×层厚、沟渠疏通 = 沟渠面积×系数）。面积取事实卡「地类构成」
+      （来自勘测定界），厚度/系数可用工具缺省的样本经验值。**把工具返回的数写进表**。
+    * 事实卡里已有的量（如田面平整面积、复垦区面积）直接写实数。
+- 🔴 **单位照样本写法，不得简写**：`100m³`（表土剥离、表土回填、混凝土面层拆除、垫层清除、
+  垃圾外运、沟渠疏通）、`公顷`（土地翻耕）、`100m²`（田面平整）、`吨`（土壤培肥）。
+  **不要写成 `m`、`m2`、`m3`**（样本用的是"百立方米/公顷/百平方米"这三个计量单位）。
+- 层级照样本用「一」「（一）」「1」三档，与「土壤重构工程 → 土壤剥离工程 → 表土剥离」的结构一致。
+- 表后写一句对数据的解读（各项工程量怎么来的、依据什么设计标准），不要让表格悬空。
+"""
+
+
+def render_reclamation_requirements(min_words: int, max_words: int,
+                                    chapter_number: int = None) -> str:
+    """渲染复垦单章提示词的「写作要求」块。
+
+    `chapter_number` 用于并进**该章专属**的要求（目前只有第6章工程量表那一段）。
+    不传 → 与改动前逐字相同。
+    """
     from app.validation.content_guardrails import AI_BUZZWORDS
-    return _RECLAMATION_REQUIREMENTS.format(
+    _block = _RECLAMATION_REQUIREMENTS.format(
         min_words=min_words, max_words=max_words,
         buzzwords=", ".join(AI_BUZZWORDS),
     )
+    if chapter_number is not None and int(chapter_number) == 6:
+        _block += _RECLAMATION_CH6_REQUIREMENTS
+    return _block

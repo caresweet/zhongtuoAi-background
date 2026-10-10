@@ -697,16 +697,18 @@ def has_chapter_specific_requirements(domain: str | None) -> bool:
     return domain != _RECLAMATION
 
 
-def requirements_block(domain: str | None, min_words: int, max_words: int) -> str:
+def requirements_block(domain: str | None, min_words: int, max_words: int,
+                       chapter_number: int = None) -> str:
     """单章提示词末段的「写作要求」块（按域取）。
 
-    复垦：返回复垦口径的要求文本（不含稳评的规范/口径）；
+    复垦：返回复垦口径的要求文本（不含稳评的规范/口径）；`chapter_number` 用于并进
+    该章的专属要求（第6章工程量表那一段）。
     稳评：返回空串 —— 稳评那份是 `master_orchestrator` 的内联正文，
-    逐字保持不变，由调用点继续使用内联版本。
+    逐字保持不变，由调用点继续使用内联版本（**不接收 chapter_number**）。
     """
     if domain == _RECLAMATION:
         from app.agent.reclamation_definitions import render_reclamation_requirements
-        return render_reclamation_requirements(min_words, max_words)
+        return render_reclamation_requirements(min_words, max_words, chapter_number)
     return ""
 
 

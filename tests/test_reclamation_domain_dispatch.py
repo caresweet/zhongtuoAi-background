@@ -705,3 +705,30 @@ def test_trailing_images_survive_post_fix(tmp_path):
     a._post_generation_fix(doc, {})
     xml = doc.element.body.xml
     assert xml.count("<w:drawing>") >= 1
+
+
+def test_land_use_table_rendered_from_land_classification(tmp_path):
+    """表4-2 由**勘测定界的地类数据**按样本结构渲染，不再用 LLM 那行「以耕地为主」。
+
+    样本（明远路 表4-4）是按地类逐项 + 合计；数据源是勘测定界的「土地分类面积表」，
+    由 `land_class_extract` 视觉读出后落在 `filled_data["land_classification"]`。
+    """
+    md = ("# 土地复垦方向可行性分析\n\n## 4.2 复垦区土地利用状况\n\n"
+          "表4-2 临时用地土地利用现状统计表\n\n"
+          "| 序号 | 地块名称 | 面积() | 占比(%) |\n"
+          "| --- | --- | --- | --- |\n"
+          "| 1 | 临时用地 | 8070.0 | 100.0 |\n")
+    filled = {"project_name": "测试复垦项目",
+              "land_classification": {
+                  "rows": [{"一级地类": "耕地", "二级地类": "水田", "面积_m2": 478.0},
+                           {"一级地类": "林地", "二级地类": "其他林地", "面积_m2": 2211.0},
+                           {"一级地类": "交通运输用地", "二级地类": "公路用地", "面积_m2": 2727.0}],
+                  "合计_m2": 5416.0}}
+    _out, text = _render(tmp_path, "reclamation", {4: {"markdown": md}}, filled)
+    assert "一级地类" in text and "二级地类" in text
+    assert "水田" in text and "其他林地" in text and "公路用地" in text
+    assert "0.0478" in text and "0.2211" in text and "0.2727" in text
+    assert "0.5416" in text                       # 合计
+    assert "以耕地为主" not in text                # LLM 那行被拦掉了
+    # 面积/占比都按数据算，不是抄的
+    assert "8.83" in text                         # 0.0478 / 0.5416 × 100（四舍五入）

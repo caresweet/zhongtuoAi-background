@@ -401,6 +401,8 @@ class ReportAssembler:
         session_id = state.get("session_id", "report")
         chapters = state.get("chapters", {})
         filled = state.get("filled_data", {})
+        # `_render_md_table` 要按域改渲染（复垦表4-2）时用它取事实卡数据
+        self._filled = filled
 
         # 🔴 报告域：决定本报告按哪个域的章节目录装配（章号/标题/是否有评审表章/
         #    是否有附件章）。缺省回落稳评 —— 老调用点（脚本）不传 `_domain` 时
@@ -2720,6 +2722,15 @@ class ReportAssembler:
         🔴 表题规范：表题统一放在表格「正下方」（DB32/T4013 排版规范）。
         caption 为空时自动生成「表{章}-{序号}」。
         """
+        # 🔴 复垦表4-2「临时用地土地利用现状统计表」**改由系统按样本结构渲染**：
+        #    样本是「按地类逐项 + 小计 + 合计」，数据来自勘测定界的土地分类面积表
+        #    （`land_class_extract` 视觉读出 → `filled_data["land_classification"]`）。
+        #    LLM 手写的那张实测只有一行「以耕地为主」，数据没法看。
+        #    ⚠️ 钩子必须挂在这里（`_render_md_table` 入口）：markdown 表的 flush 有**四处**
+        #       （表间分隔、遇到正文、章末），只挂章末那处根本不触发（实测）。
+        if self._render_reclamation_land_use_table(
+                doc, caption, ch_num, getattr(self, '_filled', None) or {}):
+            return
         rows = []
         for line in table_lines:
             if re.match(r'^\|[\s\-:|—]+\|$', line):
@@ -3065,6 +3076,70 @@ class ReportAssembler:
         r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
         r.font.size = TABLE_SIZE
         r.bold = bold
+
+    def _render_reclamation_land_use_table(self, doc, caption, ch_num, filled) -> bool:
+        """复垦表4-2「临时用地土地利用现状统计表」——**按样本结构**就地渲染。
+
+        样本（明远路报告书 表4-4）的结构是**按地类逐项**：
+
+            地类名称及编码          面积（公顷）  占比（%）
+            耕地（01）  水田（0101）   0.0478      5.92
+                        小计          0.0478      5.92
+            水域及水利设施用地（11）沟渠（1107） 0.0074  0.92
+                        小计          0.0074      0.92
+            …
+            合计                      0.8070      100
+
+        数据来自勘测定界的「土地分类面积表」（`land_class_extract` 视觉读出，
+        落在 `filled_data["land_classification"]`）—— 那份 PDF 的文本层把单元格边界
+        丢了，解析器与 pdfplumber 都读不出，只能走视觉。
+
+        🔴 用 `_render_table_from_dict`（与稳评系统表同一条路）：表题、边框、字号、
+            表号重编全部复用，不再另写一套。样本用合并单元格把「一级地类」并成一格，
+            这里拆成两列（一级地类 / 二级地类）—— 信息一样、不用合并，读起来更清楚。
+
+        返回 True = 已渲染（调用方不要再渲染 LLM 那张）。
+        """
+        lc = (filled or {}).get("land_classification") or {}
+        rows = lc.get("rows") or []
+        if not rows:
+            return False
+        if "临时用地土地利用现状统计表" not in str(caption or ""):
+            return False
+
+        total = float(lc.get("合计_m2") or 0) or sum(float(r.get("面积_m2") or 0) for r in rows)
+        if total <= 0:
+            return False
+
+        # 按一级地类分组（保持原表顺序）
+        groups, order = {}, []
+        for r in rows:
+            g = str(r.get("一级地类") or "").strip() or "—"
+            if g not in groups:
+                groups[g] = []
+                order.append(g)
+            groups[g].append(r)
+
+        out_rows = []
+        for g in order:
+            items = groups[g]
+            for r in items:
+                _ha = float(r.get("面积_m2") or 0) / 10000.0
+                out_rows.append([g, str(r.get("二级地类") or "").strip() or "—",
+                                 f"{_ha:.4f}", f"{_ha * 10000.0 / total * 100:.2f}"])
+            if len(items) > 1:       # 单子项时小计与上面那行重复，不印
+                _sub = sum(float(r.get("面积_m2") or 0) for r in items)
+                out_rows.append([f"{g} 小计", "—",
+                                 f"{_sub / 10000.0:.4f}", f"{_sub / total * 100:.2f}"])
+        out_rows.append(["合计", "—", f"{total / 10000.0:.4f}", "100"])
+
+        self._render_table_from_dict(
+            doc,
+            {"headers": ["一级地类", "二级地类", "面积（公顷）", "占比（%）"],
+             "rows": out_rows},
+            caption=str(caption).strip())
+        logger.info(f"[表4-2] 按勘测定界地类渲染 {len(out_rows)} 行（合计 {total / 10000.0:.4f} 公顷）")
+        return True
 
     def _render_table_from_dict(self, doc, table_data: dict, caption: str = ""):
         """从 {headers, rows} 结构渲染系统生成的标准表（如表3-1六维群众意见表）。
@@ -4436,17 +4511,8 @@ class ReportAssembler:
 
         # ② 公司资质 → 附件3
         # 🔴 附件3 是「**编制单位**资质证书」= 机构的营业执照/资质，**不含个人的培训证书**。
-        #    公司档案里那些 `stability_cert_02/03/04` 其实是三名编制人员的培训证书 ——
-        #    `_load_company_certificate_images` 本意要滤掉它们，但它的 `_person_paths`
-        #    拿**绝对路径** `str(f)` 去比索引里的**相对路径**，永远不相等（死代码），
-        #    所以这里必须自己再滤一遍。判据与稳评同源：`personnel_certs` 索引里的
-        #    `is_person_cert`。（稳评那条路的同一个死代码**未动** —— 单独报给业主。）
-        try:
-            from app.services.personnel_certs import load_index as _li
-            _person = {str(Path(str(v.get("path"))).resolve()) for v in (_li() or {}).values()
-                       if v.get("is_person_cert")}
-        except Exception:
-            _person = set()
+        #    个人证书的剔除在 `_load_company_certificate_images` 里统一做了（那儿原先
+        #    是死代码，已修），这里只再挡掉稳评专有的那张「稳评平台备案」。
         try:
             _certs = self._load_company_certificate_images(domain=self._domain) or []
         except Exception as _ce:
@@ -4455,8 +4521,6 @@ class ReportAssembler:
         for _cp, _cap in _certs:
             if "稳评" in str(_cap):
                 continue                       # 稳评平台备案不进复垦
-            if str(Path(str(_cp)).resolve()) in _person:
-                continue                       # 个人培训证书 ≠ 编制单位资质
             _add(3, str(_cp), str(_cap))
 
         # ③ 图片类 → 附件11 公示 / 附件12 现场照片、影像图
@@ -5179,16 +5243,27 @@ class ReportAssembler:
             #    「公司资质证书」区、还按顺序编成「资质证书 3/4/5」，结果前置页贴的证书
             #    与「稳评工作组人员及分工情况」名单**完全是两拨人**（业主：要一致）。
             #    个人证书一律走 `_selected_personnel_cert_images()`，跟着勾选的人走。
+            # 🔴 判据原来**是死代码**：索引里存的是**相对路径**
+            #    （`storage/extracted_imgs/stability_cert_02.jpeg`），而这里拿
+            #    `str(f)`（绝对路径）去比，永远不相等 —— 于是 02/03/04 一直被当成
+            #    机构资质贴进了「公司资质证书」区（复垦附件3 实测也是同样三张）。
+            #    同时比「解析后的绝对路径」与「文件名」：前者精确，后者不受 cwd 影响。
+            _person_paths, _person_names = set(), set()
             try:
                 from app.services.personnel_certs import load_index as _load_cert_index
-                _person_paths = {str(v.get("path")) for v in (_load_cert_index() or {}).values()
-                                 if v.get("is_person_cert")}
+                for _v in (_load_cert_index() or {}).values():
+                    if not _v.get("is_person_cert"):
+                        continue
+                    _pp = str(_v.get("path") or "")
+                    if _pp:
+                        _person_paths.add(str(Path(_pp).resolve()))
+                        _person_names.add(Path(_pp).name)
             except Exception:
-                _person_paths = set()
+                pass
             for f in sorted(self.company_dir.iterdir()):
                 if not f.name.startswith('stability_cert_'): continue
                 if f.suffix.lower() not in ('.jpg','.jpeg','.png','.gif','.bmp'): continue
-                if str(f) in _person_paths: continue
+                if str(f.resolve()) in _person_paths or f.name in _person_names: continue
                 # 🔴 图注按实际内容给 —— 别再输出「资质证书 3」这种按序号编的名字
                 if '00' in f.stem: cap = '公司营业执照'
                 elif '01' in f.stem: cap = '稳评平台备案'

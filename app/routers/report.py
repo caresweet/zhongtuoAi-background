@@ -198,6 +198,56 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     state["_project_material_facts"] = summary.get("facts", {})
     state["_project_material_summary"] = summary
 
+    # 🔴 复垦：勘测定界的「土地分类面积表」→ 各地类面积。
+    #    这是第4章表4-2「临时用地土地利用现状统计表」与第6章工程量测算**唯一的**数据源。
+    #    那份 PDF 的文本层把单元格边界丢了（实测 `74.02211.02763.02580.02727.0` 连成一串），
+    #    `land_survey_parser` 返回 {}、`pdfplumber.extract_tables()` 一张表都认不出 ——
+    #    只能走**视觉**。按页图 md5 缓存，重跑不重复烧 token。
+    if (state.get("_domain") or "stability") == "reclamation":
+        try:
+            from app.services.land_class_extract import extract_land_classification
+            _fd = state.setdefault("filled_data", {})
+            if not _fd.get("land_classification"):
+                _cands = []
+                for _m in existing_materials:
+                    if not isinstance(_m, dict):
+                        continue
+                    _n = str(_m.get("source_name") or "")
+                    if not any(k in _n for k in ("勘测定界", "勘测")):
+                        continue
+                    _sp = str(_m.get("source_path") or "")
+                    _p = next((c for c in (Path(_sp), settings.STORAGE_DIR / _sp,
+                                           settings.STORAGE_DIR / "images" / Path(_sp).name)
+                               if c.exists()), None)
+                    if _p:
+                        _cands.append((str(_p), _n))
+                # 主体项目那份勘测定界是**主体工程**的（9.64 公顷），不是复垦责任范围 ——
+                # 排到最后；并以「合计最接近 known 临时用地面积」为准收官（自校验）。
+                _cands.sort(key=lambda c: ("主体项目" in c[1], ))
+                try:
+                    _known = float(str(_fd.get("area_m2") or 0).replace(",", "")) or 0.0
+                except Exception:
+                    _known = 0.0
+                _best, _best_gap = {}, None
+                for _pdf, _n in _cands:
+                    _lc = await extract_land_classification(_pdf, storage_dir=str(settings.STORAGE_DIR))
+                    if not (_lc or {}).get("rows"):
+                        continue
+                    _gap = abs(float(_lc.get("合计_m2") or 0) - _known) if _known else 0.0
+                    if _best_gap is None or _gap < _best_gap:
+                        _best, _best_gap = _lc, _gap
+                    if _known and _gap <= max(1.0, _known * 0.02):
+                        break
+                if _best:
+                    _fd["land_classification"] = _best
+                    state["_project_material_facts"] = {
+                        **(state.get("_project_material_facts") or {}),
+                        "land_classification": _best.get("rows"),
+                    }
+        except Exception as _lce:
+            import logging as _lg
+            _lg.getLogger(__name__).warning(f"[地类] 勘测定界地类抽取跳过: {_lce}")
+
     # 🔴 Extract authoritative data from PDF OCR text (user-provided data ALWAYS wins)
     # 🔴 预公告解析要**跨材料挑最好的那一份**，不能「先到先得」：
     #    勘测定界报告/座谈会记录里也常出现「根据《中华人民共和国…」这类残缺引用，

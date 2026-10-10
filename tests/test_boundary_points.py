@@ -59,3 +59,23 @@ def test_read_real_boundary_file():
 def test_missing_file_is_empty_not_exception():
     r = read_boundary_file("/no/such/file.dat")
     assert r["count"] == 0 and r["area_m2"] == 0.0
+
+
+def test_read_dxf_polygons_area_matches_approval():
+    """DXF 闭合多段线 → 面积。实测红线图算出 96431.78 ㎡，
+    与批复的「二期占地面积 96413.61 ㎡」相差 0.019%。"""
+    import pathlib
+    import pytest
+    from app.services.boundary_points import read_dxf_polygons
+    p = pathlib.Path("/Users/mac/Downloads/明远佳苑/主体红线/主体项11111目红线2000120.dxf")
+    if not p.exists():
+        pytest.skip("测试材料不在本机")
+    polys = read_dxf_polygons(str(p))
+    assert polys, "没解析出闭合多段线"
+    total = sum(x["area_m2"] for x in polys)
+    assert abs(total - 96413.61) <= 96413.61 * 0.02
+
+
+def test_read_dxf_polygons_missing_file_is_empty():
+    from app.services.boundary_points import read_dxf_polygons
+    assert read_dxf_polygons("/no/such.dxf") == []

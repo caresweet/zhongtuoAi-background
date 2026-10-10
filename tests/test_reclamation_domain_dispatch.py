@@ -359,6 +359,39 @@ def test_normalize_reclamation_headings():
     assert "## 没在小节表里的标题" in out
 
 
+def test_normalize_reclamation_headings_bare_line_items():
+    """裸行的「（一）表土剥离」也要编号 —— 装配器本来就把它当标题渲染。
+
+    实测第6章 LLM 写成裸行，原先的归一化只认 `###`／`**加粗**`，5 条「（一）…（五）」
+    原样印进报告：没编号、也没层级，与全篇 `X.Y.Z` 体例不一致。
+    """
+    md = ("## 6.1 工程设计\n"
+          "### 6.1.1 工程技术措施设计\n"
+          "（一）表土剥离\n"
+          "临时用地施工前……\n"
+          "（二）场地清理\n"
+          "### 6.1.2 生物化学措施设计\n"
+          "（一）监测措施\n"
+          "## 6.2 工程量测算\n")
+    out = cat.normalize_reclamation_headings(6, md)
+    # 归到**它所属的那一级**（6.1.1 之下 → 6.1.1.1），不是 6.1 那层
+    assert "#### 6.1.1.1 表土剥离" in out
+    assert "#### 6.1.1.2 场地清理" in out
+    # 换到 6.1.2 后序号从 1 重排，不会续成 6.1.1.3
+    assert "#### 6.1.2.1 监测措施" in out
+    assert "（一）" not in out and "（二）" not in out
+    # 正文段落不受影响
+    assert "临时用地施工前……" in out
+
+
+def test_normalize_reclamation_headings_bare_line_guard():
+    """裸行判据与装配器逐字一致（短、无句读）—— 正文里以「（一）」开头的**句子**不许改。"""
+    md = ("## 6.1 工程设计\n"
+          "（一）表土剥离应结合表土厚度与土源条件确定，施工前完成，剥离后集中堆存并做好防护。\n")
+    out = cat.normalize_reclamation_headings(6, md)
+    assert out.splitlines()[1].startswith("（一）表土剥离应结合")
+
+
 def test_normalize_reclamation_headings_noop_for_stability_chapter_number():
     """章号不在复垦目录里（如 11）→ 原样返回，不误改。"""
     md = "## 3.1 项目简介\n\n正文\n"

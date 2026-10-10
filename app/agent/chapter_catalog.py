@@ -318,10 +318,17 @@ def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
             raw = m.group(2).strip().strip('*').strip()
         else:
             mb = re.match(r'^\*\*(.+)\*\*$', s)
-            if not mb:
-                out.append(line)
-                continue
-            raw = mb.group(1).strip()
+            if mb:
+                raw = mb.group(1).strip()
+            else:
+                # 🔴 裸行的「（一）表土剥离」也算标题 —— 装配器本来就把它当二级标题渲染
+                #    （见 `report_assembler` 的 `^（[一二三四五六七八九十]+）…$` 分支），
+                #    这里不认就会漏：实测第6章 LLM 写成裸行，5 条 `（一）…（五）` 原样印进报告，
+                #    没编号也没层级。判据与装配器**逐字一致**（短、且不含句读）。
+                if not re.match(r'^[（(][一二三四五六七八九十\d]+[）)]\s*[^\s。，,；;]{2,30}$', s):
+                    out.append(line)
+                    continue
+                raw = s
         body = _strip_heading_number(raw)
         num = by_name.get(body)
         if num:
@@ -329,10 +336,19 @@ def normalize_reclamation_headings(chapter_number: int, md: str) -> str:
             sub = 0
             out.append(f"{'###' if num.count('.') >= 2 else '##'} {num} {body}")
             continue
-        # 「（一）xxx」条目 → 当前小节下的三级编号
+        # 🔴 标题**自带编号**（如 `### 6.1.1 工程技术措施设计`，其名不在 `sections` 里）
+        #    → 它同样定义了一个「当前小节」，否则它下面的「（一）…」会被归到
+        #    6.1 那一层，编出与 6.1.1 撞号的 `6.1.1`（实测第6章）。
+        ms = re.match(r'^(\d+(?:\.\d+)+)\s*\S', raw)
+        if ms:
+            cur = ms.group(1)
+            sub = 0
+            out.append(line)
+            continue
+        # 「（一）xxx」条目 → 当前小节下的下一级编号
         if cur and re.match(r'^[（(][一二三四五六七八九十\d]+[）)]', raw):
             sub += 1
-            out.append(f"### {cur}.{sub} {body}")
+            out.append(f"{'#' * min(4, cur.count('.') + 2)} {cur}.{sub} {body}")
             continue
         out.append(line)
     return "\n".join(out)

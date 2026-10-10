@@ -211,6 +211,9 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
                  "map_plots", "map_scale", "map_date")
     _ann_best: dict = {}
     _ann_best_n = -1
+    # 封面/扉页字段（项目单位/单位地址/联系人/电话/送审时间）逐材料收集，
+    # 循环后统一合并 —— 见 `front_matter_extract.merge_front_matter` 的成对规则。
+    _fm_pairs: list = []
     for item in existing_materials:
         txt = str(item.get('text_content', '') or '')
         if not txt:
@@ -279,6 +282,30 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
                 mark(filled, "material", *_written)
             except Exception:
                 pass
+        # 封面/扉页字段：逐材料收集，循环后统一合并（成对规则见该模块）
+        try:
+            from app.services.front_matter_extract import extract_front_matter_fields
+            _fm_pairs.append(extract_front_matter_fields(txt))
+        except Exception:
+            pass
+
+    # 🔴 封面/扉页字段合并（**单一事实源**，`deep_material_analyzer` 复用同一份正则；
+    #    此前项目里同一个坏正则抄过两份，修一份漏一份）。
+    #    业主口径：抽不到就整行不出现，**不为它弹窗问用户**。
+    try:
+        from app.services.front_matter_extract import merge_front_matter
+        from app.services.field_sources import mark
+        filled = state.setdefault("filled_data", {})
+        _fm_written = []
+        for _k, _v in merge_front_matter(_fm_pairs).items():
+            if _v and _k not in filled:
+                filled[_k] = str(_v)
+                _fm_written.append(_k)
+        if _fm_written:
+            mark(filled, "material", *_fm_written)
+    except Exception as _fme:
+        logger.warning(f"封面/扉页字段抽取跳过: {_fme}")
+
     state["_project_material_chunks"] = [
         {
             "source_path": item.get("source_path", ""),

@@ -21,7 +21,7 @@ from app.agent.chapter_catalog import (
     has_review_table, appendix_chapter_no,
     report_kind_name, cover_type_line, cover_fallback_title,
     front_matter_labels,
-    front_matter_order, has_title_page,
+    front_matter_order,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
 )
 from app.domains.registry import domain_of_state

@@ -708,6 +708,16 @@ def _extract_data_from_text(text: str) -> Dict[str, str]:
     if oppose_matches:
         updates['oppose_count'] = oppose_matches[0]
 
+    # 🔴 封面/扉页字段（项目单位/单位地址/联系人/电话/送审时间）复用**同一份**正则
+    #    （`front_matter_extract`）—— 本项目已经吃过两次「同一个坏正则抄两份、
+    #    修了一份漏一份」的亏（面积抽到「总建筑面积」那次）。
+    try:
+        from app.services.front_matter_extract import extract_front_matter_fields
+        for _k, _v in extract_front_matter_fields(text).items():
+            updates.setdefault(_k, _v)
+    except Exception:
+        pass
+
     return updates
 
 

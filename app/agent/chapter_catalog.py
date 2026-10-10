@@ -135,14 +135,39 @@ def has_review_table(domain: str | None) -> bool:
 
 
 def appendix_chapter_no(domain: str | None) -> Optional[int]:
-    """该域「附件章」的章号；没有附件章返回 None。
+    """该域「附件块」的章号；没有则 None。
 
-    稳评第 14 章 = 附件（附件清单 + 图片材料）。复垦 10 章无附件章。
+    稳评第 14 章 = 附件（附件清单 + 图片材料）。
+    复垦的附件在样本目录里也是**第 14 部分**（`10 保障措施 / 11 复垦方案报告表 /
+    12 请示 / 13 图件 / 14 附件`）—— 11/12/13 尚未实现，故目录会出现 10 → 14 的跳号，
+    这是刻意的（补上那三部分后跳号自然消失）。内容与稳评完全不同，
+    见 `appendix_kind`。
     """
     if domain == _RECLAMATION:
-        return None
+        from app.agent.reclamation_definitions import RECLAMATION_APPENDIX_CHAPTER_NO
+        return RECLAMATION_APPENDIX_CHAPTER_NO
     from app.agent.chapter_definitions import TOTAL_CHAPTERS
     return TOTAL_CHAPTERS
+
+
+def appendix_kind(domain: str | None) -> str:
+    """附件块由**哪套渲染器**产出。
+
+    两域的附件内容毫无重叠：稳评是「专家评审/拟征地公告/勘测定界摘要/现场调查图片」
+    四条图片分组（`_add_appendices`），复垦是样本目录里那张 **22 项**清单
+    （委托函/合同/资质证书/协议书…，`_add_reclamation_appendices`）。
+    装配器据此二选一，**不写**字面 `domain == "reclamation"`。
+    """
+    return "reclamation" if domain == _RECLAMATION else "stability"
+
+
+def uses_company_archive_images(domain: str | None) -> bool:
+    """该域的公司资质图是否取自**公司档案**（而非投标用的资产库）。
+
+    稳评与复垦都要（两份样本的前置/附件里都有「编制单位资质证书」）；
+    投标文档走另一条（`asset_images` 表）。
+    """
+    return domain != "bidding"
 
 
 def front_matter_labels(domain: str | None) -> Dict[str, str]:

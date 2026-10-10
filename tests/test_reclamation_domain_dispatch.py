@@ -27,7 +27,7 @@ def test_reclamation_catalog_values():
     assert cat.chapter_titles("reclamation")[1] == "前言"
     # 🔴 复垦没有评审表章、没有附件章 —— 这是「不塞评审表、不挂稳评附件」的判据
     assert cat.has_review_table("reclamation") is False
-    assert cat.appendix_chapter_no("reclamation") is None
+    assert cat.appendix_chapter_no("reclamation") == 14   # 样本目录里附件就是第14部分
     # 字数取自复垦定义里已有的 min/max
     assert cat.target_words("reclamation", 3) == (1500, 2450)
 
@@ -155,7 +155,9 @@ def test_reclamation_render_writes_ch3_and_has_no_review_table(tmp_path):
     assert "评审表" not in text                       # 没塞稳评评审表
     assert "社会稳定性风险评估" not in text           # 封面副标题不是稳评
     assert "社会稳定风险评估" not in text
-    assert "附件清单" not in text                     # 没有稳评第14章附件
+    # 🔴 复垦现在**有**自己的第14部分附件（22 项），但绝不能出现稳评那套逐项名
+    for _w in ("机构及人员资质材料", "拟征地公告", "专家评审", "稳评问卷调查表"):
+        assert _w not in text, _w
     assert "土地复垦方案" in out                      # 文件名按复垦
     assert "HDR:测试复垦项目土地复垦方案" in text
 
@@ -178,7 +180,7 @@ def test_reclamation_chapter_and_appendix_decisions_are_domain_gated():
     """决策点（不渲染）：装配器按域决定有无评审表路径、有无附件章。"""
     assert cat.has_review_table("reclamation") is False
     assert cat.has_review_table("stability") is True
-    assert cat.appendix_chapter_no("reclamation") is None
+    assert cat.appendix_chapter_no("reclamation") == 14   # 样本目录里附件就是第14部分
     assert cat.appendix_chapter_no("stability") == 14
 
 
@@ -538,3 +540,81 @@ def test_render_typography_stability_unchanged(tmp_path):
     assert _pick(doc, "第一章、编制说明") == ("黑体", 22.0)
     assert _pick(doc, "1.1 编制背景及过程") == ("宋体", 15.0)
     assert _pick(doc, "BODYBODYTEXT") == ("宋体", 12.0)
+
+
+# ════════════════════════════════════════════════════════════
+# H. 第14部分「附件」（复垦 22 项）
+#    样本目录：10 保障措施 / 11 复垦方案报告表 / 12 请示 / 13 图件 / 14 附件。
+#    本轮只实现 14；11/12/13 未做，故目录会出现 10 → 14 的跳号（刻意）。
+# ════════════════════════════════════════════════════════════
+
+def test_appendix_kind_per_domain():
+    """附件块由哪套渲染器产出：两域内容毫无重叠，装配器据此二选一。"""
+    assert cat.appendix_kind("reclamation") == "reclamation"
+    assert cat.appendix_kind("stability") == "stability"
+    assert cat.appendix_kind(None) == "stability"
+
+
+def test_uses_company_archive_images_per_domain():
+    """公司资质图：稳评与复垦都取公司档案；投标走另一条（asset_images 表）。"""
+    assert cat.uses_company_archive_images("reclamation") is True
+    assert cat.uses_company_archive_images("stability") is True
+    assert cat.uses_company_archive_images("bidding") is False
+
+
+def test_reclamation_post_body_chapter_titles():
+    """11–14 是正文之后的部分，标题取自另一张表（不污染 CHAPTER_DEFINITIONS）。"""
+    assert cat.chapter_title("reclamation", 14) == "附件"
+    assert cat.chapter_title("reclamation", 13) == "图件"
+    assert cat.chapter_title("reclamation", 11) == "复垦方案报告表"
+    assert cat.chapter_title("reclamation", 10) == "保障措施"      # 正文章不受影响
+    # 🔴 `RECLAMATION_CHAPTER_DEFINITIONS` 不能被塞进 11–14 ——
+    #    否则 `chapter_titles` / `target_words` 会凭空多出四章
+    from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
+    assert set(RECLAMATION_CHAPTER_DEFINITIONS) == set(range(1, 11))
+    assert 14 not in cat.chapter_titles("reclamation")
+
+
+def test_appendix_items_match_sample_list():
+    """22 项逐项抄自样本目录，不是编的。"""
+    from app.agent.reclamation_definitions import RECLAMATION_APPENDIX_ITEMS
+    assert [n for n, _ in RECLAMATION_APPENDIX_ITEMS] == list(range(1, 23))
+    _m = dict(RECLAMATION_APPENDIX_ITEMS)
+    assert _m[3] == "编制单位资质证书"
+    assert _m[12] == "现场照片、影像图"
+    assert _m[16] == "勘测报告"
+    assert _m[20] == "主体工程批复文件"
+    assert _m[22] == "其他"
+
+
+def test_appendix_matcher_prefers_specific_name():
+    """匹配表**专名优先** —— 顺序错了主体项目那份会被附件16 抢走。
+
+    实测文件名是「明远佳苑二期勘测定界报告主体项目---96413.pdf」，
+    「勘测定界报告」之后紧跟「主体项目」（词序与「主体项目勘测定界」相反），
+    所以 18 那一条必须用「主体项目」去匹配，且排在 16 前面。
+    """
+    from app.agent.reclamation_definitions import match_reclamation_appendix as M
+    assert M("明远佳苑二期勘测定界报告主体项目------------------96413.pdf") == 18
+    assert M("勘测定界报告_81e1aaf0.pdf") == 16
+    assert M("2.明远佳苑二期挂牌红线-------------------96413.pdf") == 17
+    assert M("3_环保局批准文件_扫描件_----.pdf") == 7
+    assert M("1.明远路以南地块商住项目核准的批复_明远佳苑.pdf") == 20
+    assert M("明远佳苑二期用地批准书_用地规划许可_----.pdf") == 20
+    assert M("临时工棚CH20220437 -功能分布图.DWG") == 13
+    assert M("随手拍的照片.jpg") == 0                     # 认不出 → 0（归附件22）
+
+
+def test_reclamation_render_has_appendices(tmp_path):
+    """复垦产物含第14部分附件：22 项清单 + 逐项标题；且不含稳评那套逐项名。"""
+    out, text = _render(tmp_path, "reclamation",
+                        {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"}},
+                        {"project_name": "测试复垦项目"})
+    assert "附件清单" in text
+    assert "附件3 编制单位资质证书" in text
+    assert "附件16 勘测报告" in text
+    assert "附件22 其他" in text
+    # 缺材料的项要显性标出来（业主口径：材料不要有漏的）
+    assert "附件1 土地复垦方案委托函（待补充）" in text
+    for _w in ("机构及人员资质材料", "拟征地公告", "专家评审", "稳评问卷调查表"):
+        assert _w not in text, _w

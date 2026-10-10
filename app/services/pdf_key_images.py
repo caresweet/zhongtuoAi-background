@@ -107,6 +107,78 @@ def _render_page(doc, page_no: int, out_path: Path) -> bool:
         return False
 
 
+# ── 整页渲染（附件用）─────────────────────────────────────────
+# 与 `extract_key_images` 的分工：那边是「只取报告正文要用的那一两张」，
+# 这里是「**整份**逐页出图」——附件的素材是原件扫描，一页都不能少。
+_APPENDIX_PAGE_DPI = 140
+_APPENDIX_MAX_SIDE = 2000
+_APPENDIX_MAX_BYTES = 900_000       # 单页上限，控 docx 体积
+
+
+def render_all_pages(pdf_path: str, out_dir: Optional[str] = None,
+                     max_pages: Optional[int] = None) -> List[str]:
+    """把一份 PDF **逐页**渲染成 JPEG，返回按页序的**绝对路径**。
+
+    用途：复垦附件的「勘测报告 / 红线图 / 批复文件…」要按原件整页顺排。
+
+    输出目录缺省 `storage/images/appendix/`；**文件已存在即跳过**（幂等 ——
+    重复生成不会反复渲染，也不会把 docx 撑大）。渲染失败/文件坏的页跳过，不中断。
+    """
+    if not pdf_path or not os.path.exists(pdf_path):
+        return []
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        logger.warning(f"打开 PDF 失败 {pdf_path}: {e}")
+        return []
+
+    base = (Path(out_dir) if out_dir
+            else Path(__file__).resolve().parents[2] / "storage" / "images" / "appendix")
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"创建附件图目录失败 {base}: {e}")
+        return []
+
+    stem = _safe_name(Path(pdf_path).stem)
+    out: List[str] = []
+    try:
+        n = doc.page_count if max_pages is None else min(doc.page_count, int(max_pages))
+        for i in range(n):
+            p = base / f"pdf_{stem}_page{i + 1}.jpg"
+            if not (p.exists() and p.stat().st_size > 3000):
+                if not _render_page_jpeg(doc, i, p):
+                    continue
+            out.append(str(p))
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    if out:
+        logger.info(f"[附件] 整页渲染 {Path(pdf_path).name}：{len(out)} 页")
+    return out
+
+
+def _render_page_jpeg(doc, page_no: int, out_path: Path) -> bool:
+    """整页渲染成 **JPEG**（PNG 太胖，整份 PDF 进附件会把 docx 撑到几百 MB）。"""
+    try:
+        from PIL import Image
+        pix = doc[page_no].get_pixmap(dpi=_APPENDIX_PAGE_DPI)
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        w, h = im.size
+        if max(w, h) > _APPENDIX_MAX_SIDE:
+            s = _APPENDIX_MAX_SIDE / float(max(w, h))
+            im = im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        im.save(out_path, format="JPEG", quality=82, optimize=True)
+        return out_path.exists() and out_path.stat().st_size > 3000
+    except Exception as e:
+        logger.warning(f"渲染第{page_no + 1}页失败: {e}")
+        return False
+
+
 def _find_page(doc, *keywords: str) -> Optional[int]:
     """找第一个正文含任一关键词的页；找不到返回 None。"""
     for i in range(doc.page_count):

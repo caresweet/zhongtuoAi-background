@@ -206,8 +206,12 @@ RECLAMATION_CARD_KEYS: List[str] = [
 
 
 def get_reclamation_chapter_title(chapter_number: int) -> str:
-    return RECLAMATION_CHAPTER_DEFINITIONS.get(
-        chapter_number, {}).get("title", f"第{chapter_number}章")
+    """章标题。11–14 是**正文之后**的部分（报告表/请示/图件/附件），在另一张表里。"""
+    _n = int(chapter_number)
+    d = RECLAMATION_CHAPTER_DEFINITIONS.get(_n)
+    if d:
+        return d.get("title", f"第{_n}章")
+    return RECLAMATION_POST_BODY_TITLES.get(_n, f"第{_n}章")
 
 
 def get_reclamation_chapter_kind(chapter_number: int) -> str:
@@ -346,6 +350,84 @@ def get_reclamation_chapter_rag_query(chapter_number: int) -> str:
         chapter_number,
         f"土地复垦方案 第{chapter_number}章",
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 正文之后的部分：11 报告表 / 12 请示 / 13 图件 / 14 附件
+# ═══════════════════════════════════════════════════════════════
+# 依据：样本《明远路以南地块商住项目…土地复垦方案报告书》（139 页）的目录——
+#     10 保障措施 51 / 11 复垦方案报告表 52 / 12 请示 56 / 13 图件 57 / 14 附件 57。
+# 🔴 章号**从 14 起算**（与样本一致），本轮只实现「14 附件」；11/12/13 尚未实现，
+#    故目录会出现 10 → 14 的跳号 —— 这是刻意的，补上那三部分后跳号自然消失。
+#    （备选做法是先把附件排 11 不跳号，但那样与样本编号不一致，将来补 11–13 还要重排。）
+RECLAMATION_APPENDIX_CHAPTER_NO = 14
+
+RECLAMATION_POST_BODY_TITLES: Dict[int, str] = {
+    11: "复垦方案报告表",
+    12: "建设单位申请自然资源部门审查的请示",
+    13: "图件",
+    RECLAMATION_APPENDIX_CHAPTER_NO: "附件",
+}
+
+# 附件 22 项 —— **逐项取自样本目录**（p4–p5），不是编的。
+RECLAMATION_APPENDIX_ITEMS: List[tuple] = [
+    (1, "土地复垦方案委托函"),
+    (2, "委托合同"),
+    (3, "编制单位资质证书"),
+    (4, "土地复垦承诺书"),
+    (5, "临时用地协议书"),
+    (6, "临时用地复垦协议"),
+    (7, "环境影响报告批复"),
+    (8, "不使用客土的情况说明"),
+    (9, "公众参与调查表"),
+    (10, "权利人意见"),
+    (11, "公示"),
+    (12, "现场照片、影像图"),
+    (13, "临时用地功能分布图"),
+    (14, "临时用地补偿到位说明"),
+    (15, "不建设永久性建筑的承诺"),
+    (16, "勘测报告"),
+    (17, "主体项目用地红线图"),
+    (18, "主体项目用地范围"),
+    (19, "建设材料近期价格"),
+    (20, "主体工程批复文件"),
+    (21, "公司名称更改材料"),
+    (22, "其他"),
+]
+
+# 材料名关键词 → 附件项号。**专名在前，命中即返回**。
+# 🔴 顺序与写法都是实测出来的，别想当然：
+#    「明远佳苑二期勘测定界报告主体项目------96413.pdf」里，「勘测定界报告」之后紧跟
+#    「主体项目」——写「主体项目勘测定界」是**匹配不到**的（词序反了），
+#    于是这份主体项目的勘测定界报告会被下一条 16「勘测报告」抢走。
+RECLAMATION_APPENDIX_RULES: List[tuple] = [
+    (18, ("主体项目", "主体项目用地范围")),
+    (17, ("挂牌红线", "红线图")),
+    (16, ("勘测定界报告", "勘测报告")),
+    (20, ("批复", "核准", "用地批准书", "规划许可证")),
+    (7, ("环保局", "环境影响", "环评")),
+    (13, ("功能分布图", "分布图")),
+    (12, ("现场照片", "现场影像", "影像图")),
+]
+
+
+def match_reclamation_appendix(name: str) -> int:
+    """材料名 → 附件项号；识别不出返回 0（调用方归到「附件22 其他」）。"""
+    _n = str(name or "")
+    if not _n:
+        return 0
+    for item_no, keywords in RECLAMATION_APPENDIX_RULES:
+        if any(k in _n for k in keywords):
+            return item_no
+    return 0
+
+
+def get_reclamation_appendix_title(item_no: int) -> str:
+    """附件项名（`附件3 编制单位资质证书` 里那半句）。查不到返回空串。"""
+    for n, title in RECLAMATION_APPENDIX_ITEMS:
+        if n == int(item_no):
+            return title
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════

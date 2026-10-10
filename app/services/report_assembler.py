@@ -18,7 +18,8 @@ from lxml import etree
 from app.agent.chapter_definitions import chapter_no_of_heading
 from app.agent.chapter_catalog import (
     all_chapters, total_chapters, chapter_title,
-    has_review_table, appendix_chapter_no,
+    has_review_table, appendix_chapter_no, appendix_kind,
+    uses_company_archive_images,
     report_kind_name, cover_type_line, cover_fallback_title,
     front_matter_labels,
     front_matter_order,
@@ -429,6 +430,9 @@ class ReportAssembler:
         #    空 dict 表示「这个账号没有公司信息」→ 报告里一律显示「待填写」，
         #    **绝不回落成江苏众拓**（那等于把别人的客户抬头印成我们的）。
         self._company = state.get("_company") or {}
+        # 🔴 已解析材料（含 source_name / text_content）—— 复垦附件按 `source_name` 把
+        #    「勘测定界报告.pdf」这类原件归到对应附件项，再整页渲染进附件区。
+        self._project_materials = state.get("_project_materials") or []
 
         # Debug: log chapter structure to find dict-in-string bugs
         for ch_num, ch_data in chapters.items():
@@ -657,18 +661,23 @@ class ReportAssembler:
         state["_image_placements"] = self._image_placements
         state["_unmatched_images"] = self._unmatched_image_markers
 
-        # ── 附件章（稳评第14章；按清单顺序挂载实际文件/图片；章标题由 _add_appendices 内部输出）──
-        #    （章标题由 _add_appendices 内部输出，避免与「附件清单」重复）
+        # ── 附件块（稳评第14章 / 复垦第14部分；章标题由渲染器内部输出）──
+        #    （章标题由渲染器内部输出，避免与「附件清单」重复）
         # 🔴 不再加分页：附件章标题页用「节分隔符(新页)」实现，重复分页会多出空白页
         # 🔴 附件区图号必须按**附件章**编：循环结束时 `_current_chapter` 被重置为 0，
         #    不设回去的话附件里全是「图0-26」这种编号，交付稿不能看。
-        # 🔴 附件章是稳评专有（复垦 10 章无附件章），按域取章号；无附件章则不挂附件 ——
+        # 🔴 两域的附件**内容毫无重叠**，按域取渲染器（不在装配器里写 `domain == …`）：
+        #    稳评 = 专家评审/拟征地公告/勘测定界摘要/现场调查图片 四条图片分组；
+        #    复垦 = 样本目录里那张 **22 项**清单（委托函/合同/资质证书/协议书…）。
         #    复垦报告里绝不能出现稳评的「附件1机构资质／附件2问卷／附件3评审…」。
         _appendix_no = appendix_chapter_no(self._domain)
         if _appendix_no is not None:
             self._current_chapter = _appendix_no
             self._chapter_image_counter[_appendix_no] = 0
-            self._add_appendices(doc, survey_stats, image_files, filled)
+            if appendix_kind(self._domain) == "reclamation":
+                self._add_reclamation_appendices(doc, filled)
+            else:
+                self._add_appendices(doc, survey_stats, image_files, filled)
             self._current_chapter = 0
 
         # ── Post-generation review: fix common issues ──
@@ -4331,6 +4340,129 @@ class ReportAssembler:
                         self._add_image(doc, p, "", numbered=False)
 
 
+    def _reclamation_appendix_pool(self) -> Dict[int, list]:
+        """复垦附件：把会话材料归到 22 个附件项 → `{项号: [{path, note}, …]}`。
+
+        三条来源，全部复用既有设施：
+          ① **PDF 整页渲染** —— 按 `source_name` 经 `match_reclamation_appendix` 归项；
+             命中不了的进附件22「其他」（与稳评的 `other_paths` 同一思路）。
+          ② **公司资质图** —— 附件3「编制单位资质证书」。
+             🔴 只取与复垦有关的（滤掉「稳评平台备案」那张 —— 那是稳评的东西，
+                贴进复垦报告就是拿稳评材料充数）。
+          ③ **图片类** —— 现场照片/影像 → 附件12；公示类 → 附件11。
+             正文已用过的按 `_img_already_used` 跳过（内容和指纹双重去重）。
+
+        总量受 `REPORT_MAX_APPENDIX_PAGES`（缺省 60）约束，防止整本 PDF 把 docx 撑爆。
+        """
+        from app.agent.reclamation_definitions import match_reclamation_appendix
+        from app.services.pdf_key_images import render_all_pages
+
+        try:
+            budget = int(os.environ.get("REPORT_MAX_APPENDIX_PAGES", "60"))
+        except Exception:
+            budget = 60
+
+        pool: Dict[int, list] = {}
+
+        def _add(item_no: int, path: str, note: str = ""):
+            nonlocal budget
+            if budget <= 0 or not path:
+                return
+            pool.setdefault(item_no, []).append({"path": path, "note": note})
+            budget -= 1
+
+        # ① PDF 原件 → 整页渲染
+        for m in (self._project_materials or []):
+            if not isinstance(m, dict):
+                continue
+            name = str(m.get("source_name") or "")
+            src = str(m.get("source_path") or "")
+            if not src or not src.lower().endswith(".pdf"):
+                continue
+            _p = self._resolve_image_path(src)
+            if not _p.exists():
+                continue
+            # 「勘测定界报告」在样本里同时供了附件16（勘测报告）与附件18（主体项目用地范围），
+            # 靠 match 表**专名优先**区分，这里不再二次判断。
+            _item = match_reclamation_appendix(name) or 22
+            for page in render_all_pages(str(_p), max_pages=max(0, budget)):
+                _add(_item, page, name)
+
+        # ② 公司资质 → 附件3
+        try:
+            _certs = self._load_company_certificate_images(domain=self._domain) or []
+        except Exception as _ce:
+            logger.warning(f"[复垦附件] 公司资质图加载失败: {_ce}")
+            _certs = []
+        for _cp, _cap in _certs:
+            if "稳评" in str(_cap):
+                continue                       # 稳评平台备案不进复垦
+            _add(3, str(_cp), str(_cap))
+
+        # ③ 图片类 → 附件11 公示 / 附件12 现场照片、影像图
+        for img in ((getattr(self, '_img_catalog_data', {}) or {}).get("catalog") or []):
+            if self._img_already_used(img):
+                continue
+            _p = str(img.get("path", ""))
+            _cat = str(img.get("category") or "")
+            if not _p or _cat not in ("photo", "announcement"):
+                continue
+            # 🔴 **PDF 派生的图不进这一类**（`pdf_*` 是 PDF 内嵌位图 / 整页渲染 / 关键图）：
+            #    那些 PDF 的原件已经在 ① 里整份进附件了。不排除的话，同一份「核准批复」
+            #    会以扫描页形式出现在附件20，又被 AI 判成 `announcement` 塞进附件11「公示」
+            #    —— 实测就是这样（批复的 3 页被贴成「公示照片」，与附件20 重复）。
+            if os.path.basename(_p).startswith("pdf_"):
+                continue
+            _add(11 if _cat == "announcement" else 12, _p,
+                 str(img.get("display_name") or ""))
+
+        return pool
+
+    def _add_reclamation_appendices(self, doc, filled):
+        """复垦第 14 部分「附件」—— 样本目录里那张 **22 项**清单。
+
+        与稳评 `_add_appendices` 的差别（两域附件内容毫无重叠，故各写各的）：
+          · 清单是**固定 22 项**（样本目录逐项抄下来的），不是「实际渲染了哪几节」；
+          · 没材料的项**照列并标「（待补充）」**，缺口显性（业主口径：材料不要有漏的）；
+          · 逐项版式 = 一项一行「附件N 名称」标题 + 该项原件整页顺排。
+            ⚠️ 样本的附件区**不印逐项标题**（只有扫描页，项名只在目录清单里）——
+               我们加标题是刻意的：件是程序按材料生成的，不标项就分不清哪几页属哪件。
+        """
+        from app.agent.reclamation_definitions import RECLAMATION_APPENDIX_ITEMS
+
+        _TOTAL = appendix_chapter_no(self._domain) or total_chapters(self._domain)
+        pool = self._reclamation_appendix_pool()
+
+        # 🔴 必须传 `chapter_number`：复垦的章标题形态是 `14 附件`（阿拉伯数字），
+        #    拼它要用章号；稳评那支只用中文序号 `cn`，不传也不变。
+        self._add_chapter_title_page(doc, _cn_num(_TOTAL), self._get_chapter_title(_TOTAL),
+                                     chapter_number=_TOTAL)
+
+        # ── 附件清单：22 项全列，缺的标「（待补充）」──
+        _p = doc.add_paragraph(); _p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        _r = _p.add_run('附件清单')
+        _r.font.name = FONT_SONGTI; _r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_SONGTI)
+        _r.font.size = Pt(14); _r.bold = True
+        for _no, _name in RECLAMATION_APPENDIX_ITEMS:
+            _mark = "" if pool.get(_no) else "（待补充）"
+            self._add_para(doc, f'附件{_no} {_name}{_mark}', indent=False, size=Pt(12))
+
+        # ── 逐项渲染 ──
+        for _no, _name in RECLAMATION_APPENDIX_ITEMS:
+            _files = pool.get(_no) or []
+            if not _files:
+                continue
+            doc.add_page_break()
+            self._add_heading(doc, f'附件{_no} {_name}', 1)
+            for _f in _files:
+                _fp = _f.get("path", "")
+                if not _fp:
+                    continue
+                self._inserted_images.add(str(_fp))
+                # 🔴 附件里的原件**不编图号**（`numbered=False`）—— 材料类型已由项标题给出，
+                #    再编「图14-1」反而像正文插图。
+                self._add_image(doc, _fp, "", numbered=False)
+
     def _fill_toc_cache(self, doc) -> int:
         """把目录域的**缓存结果**填成真实条目（供不刷新域的阅读器）。
 
@@ -4974,7 +5106,7 @@ class ReportAssembler:
 
         results = []
 
-        if domain == "stability":
+        if uses_company_archive_images(domain):
             # 🔴 这些 `stability_cert_*` 是**我们自己**的营业执照 / 稳评平台备案 / 资质图
             #    （固定文件，仓库里没有生产者）。**只有内部公司的报告才能用** ——
             #    否则外部用户出的报告会贴上我们的营业执照（实测就是只差这一步）。

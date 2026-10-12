@@ -4861,8 +4861,12 @@ class ReportAssembler:
             _people = []
 
         data = collect_form_data(filled or {}, self._company or {}, _people)
-        data["工作计划"] = self._excerpt(chapters, 8, 700)
-        data["保障措施"] = self._excerpt(chapters, 10, 700)
+        # 🔴 摘要栏要**够长**（样本这两节各占大半页）。早先卡 700 字，实测把
+        #    「…在其实施过程中必须进行工程」截在半句上，业主直接说「内容缺少很多」。
+        #    现在按章长度给（第8章 ~1300 字、第10章 ~3000 字，等于整章收进来），
+        #    超限时在**句末**断开并加省略号。
+        data["工作计划"] = self._excerpt(chapters, 8, 1400)
+        data["保障措施"] = self._excerpt(chapters, 10, 2800)
         data["测算依据"] = (
             "（1）《土地复垦方案编制规程——通则》（TD/T 1031.1~1031.7-2011）；"
             "（2）《江苏省土地综合整治项目预算定额标准》；"
@@ -4883,7 +4887,11 @@ class ReportAssembler:
 
     @staticmethod
     def _excerpt(chapters, ch_num, limit: int) -> str:
-        """取某章正文的纯文本摘录（去掉标题行与表格行），供报告表的摘要栏用。"""
+        """取某章正文的纯文本摘录（去掉标题行与表格行），供报告表的摘要栏用。
+
+        🔴 超限时**在句末断开**并加省略号 —— 硬切会把句子砍半
+        （实测截在「…在其实施过程中必须进行工程」，业主看出来了）。
+        """
         ch = (chapters or {}).get(ch_num) or (chapters or {}).get(str(ch_num)) or {}
         md = ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
         keep = []
@@ -4893,7 +4901,14 @@ class ReportAssembler:
                 continue
             s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
             keep.append(s)
-        return ("\n".join(keep))[:limit]
+        text = "\n".join(keep)
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        _m = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("\n"))
+        if _m > limit * 0.4:              # 断点太靠前就不折腾，宁可多带半句
+            cut = cut[:_m + 1]
+        return cut.rstrip() + "……"
 
     def _add_reclamation_appendices(self, doc, filled):
         """复垦第 14 部分「附件」—— 样本目录里那张 **22 项**清单。

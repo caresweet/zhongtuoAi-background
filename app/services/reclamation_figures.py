@@ -223,14 +223,34 @@ def ensure_reclamation_figures(materials: Sequence[dict],
     if not polys:
         return []
     _init_fonts()
-    name = "图3-1 工程位置示意图.png"
+    # 扩展名跟内容走：卫星底图出的是 JPEG；两条路径都用同一个名字，
+    # 保证「位置示意图」这个**绑定第3章的关键词**在图名里（见模块头注释）。
+    name = "图3-1 工程位置示意图.jpg"
     png = Path(storage_dir) / "images" / name
+
+    # 🔴 首选**卫星影像底图 + 红线**（样本就是这么做出来的，见 `satellite_map` 模块头）。
+    #    界址点可以确定性反算成经纬度，所以影像上的红线压得准，不用猜比例尺。
+    #    取不到（没网/服务故障）就退回下面的几何示意图 —— **绝不阻断出报告**。
+    _ok = False
     try:
-        if not _draw_location_map(polys, png, "工程位置示意图"):
+        from app.services.satellite_map import render_location_figure
+        _ok = render_location_figure(
+            polys[0]["points"], str(png),
+            cache_dir=str(Path(storage_dir) / "satellite_tiles"),
+            title="工程位置示意图")
+    except Exception as e:                       # pragma: no cover
+        logger.warning(f"[复垦图件] 卫星底图出图失败，退回几何示意图: {e}")
+        _ok = False
+
+    if not _ok:
+        try:
+            if not _draw_location_map(polys, png, "工程位置示意图"):
+                return []
+            logger.info("[复垦图件] 卫星底图不可用，已退回几何示意图")
+        except Exception as e:                   # pragma: no cover - 绘图失败不阻断出报告
+            logger.warning(f"[复垦图件] 位置示意图生成失败: {e}")
             return []
-    except Exception as e:                       # pragma: no cover - 绘图失败不阻断出报告
-        logger.warning(f"[复垦图件] 位置示意图生成失败: {e}")
-        return []
+
     logger.info(f"[复垦图件] 已生成 {name}（{len(polys)} 个界址点多边形，"
                 f"复垦范围 {polys[0]['area_m2']:.2f} ㎡）")
     return [{"path": f"images/{name}", "original_name": name}]

@@ -5088,7 +5088,12 @@ class ReportAssembler:
                 # 🔴 地图类（勘测定界图 / 红线图 / 规划图）**竖版扫描件**才旋转 90° 横放
                 #    （用户要求）；本来就是横版的图（如卫星位置示意图）再转一次就成了躺着的。
                 #    照片类（公示/座谈/现场）一律不旋转，否则人会躺着。
-                if (any(k in str(label) for k in ("位置示意图", "勘测定界图", "勘界图", "红线图", "规划图"))
+                # 🔴 **系统生成的图一概不转**：那条启发式是给「竖版**扫描件**」用的 ——
+                #    扫描件是横版地图印在竖版纸上，转过来才正；而我们自己画的图3-1
+                #    （卫星影像 + 红线）是**真的南北向竖图**，转 90° 之后正北就指向左边了。
+                #    实测 2026-10-12：临时用地是南北长条，出图 768×1761，被转躺。
+                if (os.path.basename(str(path)) not in getattr(self, '_no_rotate_names', set())
+                        and any(k in str(label) for k in ("位置示意图", "勘测定界图", "勘界图", "红线图", "规划图"))
                         and im.height > im.width):
                     im = im.transpose(PILImage.ROTATE_270)   # 顺时针 90°
                 ow, oh = im.size
@@ -5283,8 +5288,13 @@ class ReportAssembler:
             try:
                 from app.config import settings as _settings
                 from app.services.reclamation_figures import ensure_reclamation_figures
-                uploaded_items += ensure_reclamation_figures(
+                _gen = ensure_reclamation_figures(
                     state.get("_project_materials") or [], _settings.STORAGE_DIR)
+                uploaded_items += _gen
+                # 🔴 系统生成的图**不参与「竖版地图转 90° 横放」那条启发式**
+                #    （那是给竖版扫描件用的；我们的图3-1 是真南北向竖图）——见 `_prep`。
+                self._no_rotate_names = {os.path.basename(str(g.get("path") or ""))
+                                         for g in _gen if g.get("path")}
             except Exception as _fe:
                 logger.warning(f"[复垦图件] 生成失败，跳过（不影响出报告）: {_fe}")
 

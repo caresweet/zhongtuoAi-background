@@ -83,9 +83,15 @@ def test_no_geometry_means_no_figure(tmp_path):
                                       str(tmp_path)) == []
 
 
-def test_generates_landscape_figure(tmp_path):
-    """出图落盘，且**宽 > 高** —— 装配器有条「竖版地图转 90° 横放」的启发式，
-    自己的生成图若画成竖版会被一并转躺（连图题一起歪）。"""
+def test_generates_figure_and_is_exempt_from_rotation(tmp_path):
+    """出图落盘，且**被登记进「不参与竖版转横」名单**。
+
+    🔴 装配器有一条「竖版地图转 90° 横放」的启发式（那是给**竖版扫描件**用的：
+       横版地图印在竖版纸上，转过来才正）。我们自己的图3-1 是**真南北向竖图**
+       （临时用地南北长条 → 768×1761），转 90° 之后正北就指向左边了。
+       所以生成的图要登记进 `_no_rotate_names`，由装配器跳过旋转 —— 而不是
+       像早先那样把图画成横版去绕开（真地图没法横过来）。
+    """
     gen = ensure_reclamation_figures(
         [{"source_name": "勘测定界报告.pdf", "text_content": _TEMP}], str(tmp_path))
     assert len(gen) == 1
@@ -93,18 +99,15 @@ def test_generates_landscape_figure(tmp_path):
     #    `storage/images/<original_name>`，名字不符就会被当不存在丢掉。
     assert Path(gen[0]["original_name"]).name == gen[0]["original_name"]
     assert gen[0]["path"] == f"images/{gen[0]['original_name']}"
+    # 名字里带「位置示意图」—— 绑定正文第3章的关键词
+    assert "位置示意图" in gen[0]["original_name"]
     png = Path(tmp_path) / "images" / gen[0]["original_name"]
     assert png.exists() and png.stat().st_size > 0
 
-    PILImage = pytest.importorskip("PIL.Image")
-    w, h = PILImage.open(png).size
-    assert w > h
-
-
-def test_figure_name_carries_the_binding_keyword():
-    """图名里必须带「位置示意图」—— 图片目录按这个关键词把它绑到正文第3章
-    （见 `reclamation_definitions.RECLAMATION_IMAGE_SPECS[3]` 的 keywords）。"""
-    assert "位置示意图" in "图3-1 工程位置示意图.png"
+    from app.services import report_assembler as _ra
+    import inspect
+    _src = inspect.getsource(_ra.ReportAssembler._prepare_image_catalog)
+    assert "_no_rotate_names" in _src, "生成图必须登记进不旋转名单"
 
 
 def test_photo_folder_binds_to_ch4_via_alias(tmp_path):

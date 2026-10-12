@@ -270,16 +270,17 @@ def _merge_equal_runs(table, grid_col: int, first_row: int = 0) -> None:
 def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
                    widths_cm: Sequence[float], *, left_align_long: bool = True,
                    row_h_cm: float = 1.05, merge_run_cols: Sequence[int] = (),
-                   merge_from_row: int = 0, vmerge_cols: Sequence[int] = ()):
+                   merge_from_row: int = 0,
+                   vmerge_specs: Sequence[Tuple[int, int, int]] = ()):
     """一个分节：最左列竖排段名（跨该节所有行），右侧是 `(文本, 跨列数)` 的表单行。
 
     列数 = `len(widths_cm)`（首列是段名列，其余是表单列）。跨列数不足末尾的行，
     最后一格自动撑满。
 
     `merge_run_cols`：需要「合并同类项」的**栅格列号**（如主要编制人员的「单位」列）。
-    `vmerge_cols`：**表头第一行的格要竖向跨到第二行**的栅格列号
-        （样本 p58「类型」就是这样 —— 它占两行，右边「面积（公顷）」下面是
-        小计/已损毁或占用/拟损毁或占用 三个子列）。
+    `vmerge_specs`：需要**竖向合并**的 `(栅格列号, 起始行, 结束行)`
+        （样本 p58 那张表：`(1,0,1)` 把「类型」跨到表头第二行；`(1,2,4)` 把「损毁」
+        跨 挖损/压占/小计 三行）。
     """
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.shared import Cm
@@ -310,29 +311,37 @@ def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
             t.cell(ri, ci - 1).merge(t.cell(ri, ncols - 1))
     for _c in merge_run_cols:
         _merge_equal_runs(t, int(_c), first_row=merge_from_row)
-    # 🔴 表头格子竖向跨两行（要在横向合并**与填字之后**做，否则会被后续填充覆盖）
-    _merge_header_rows(t, vmerge_cols)
+    # 🔴 竖向合并（表头跨行 / 行标签跨行）——要在横向合并**与填字之后**做
+    _vmerge_cells(t, vmerge_specs)
     _set_row_heights(t, row_h_cm)
     _vertical_label(t.cell(0, 0), section)
     return t
 
 
-def _merge_header_rows(table, grid_cols: Sequence[int]) -> None:
-    """把第 0 行的格向下并到第 1 行（表头跨两行）。"""
-    for _c in grid_cols:
-        _c = int(_c)
+def _vmerge_cells(table, specs: Sequence[Tuple[int, int, int]]) -> None:
+    """把若干**栅格列上的连续行**竖向并成一格。
+
+    `specs` 每项 `(栅格列号, 起始行, 结束行)`。样本 p58 那张
+    「复垦责任范围内土地损毁及占用面积」就是靠它：
+      · 「类型」跨表头两行 (1, 0, 1)
+      · 「损毁」跨 挖损/压占/小计 三行 (1, 2, 4)
+
+    🔴 必须在**横向合并与填字之后**做，否则合并出来的格子会被后续 `_fill_cell` 覆盖。
+    """
+    for _c, _r0, _r1 in specs:
+        _c, _r0, _r1 = int(_c), int(_r0), int(_r1)
         try:
-            _a, _b = table.cell(0, _c), table.cell(1, _c)
+            _a, _b = table.cell(_r0, _c), table.cell(_r1, _c)
             if _a._tc is _b._tc:
                 continue
             _txt = _a.text.strip()
             _m = _a.merge(_b)
-            # `merge` 会把第二格的段落一并搬进来（哪怕它是空的），清掉多余的段
+            # `merge` 会把被并方的段落一并搬进来（哪怕它是空的），清掉多余的段
             for _p in list(_m.paragraphs)[1:]:
                 _p._p.getparent().remove(_p._p)
             _fill_cell(_m, _txt)
         except Exception as e:                       # pragma: no cover
-            logger.warning(f"[报告表] 表头跨行合并失败(列{_c}): {e}")
+            logger.warning(f"[报告表] 竖向合并失败(列{_c}, 行{_r0}-{_r1}): {e}")
 
 
 def _kv(lab: str, val: str) -> List[Tuple[str, int]]:
@@ -401,7 +410,9 @@ def _reclaim_area_rows(data: Dict[str, Any]) -> List[List[Tuple[str, int]]]:
                     ("", 1), (f"{_ha:.4f}", 1)])
     out.append([("合计", 2), ("", 1), (f"{_total:.4f}", 1)])
     _rate = 100 if _total > 0 else ""
-    out.append([("土地复垦率（%）", 3), (f"{_rate}", 1)])
+    # 样本 p58 下节末行：土地复垦率占 一级地类+二级地类 两格，100 占
+    # 已复垦+拟复垦 两格（业主 2026-10-12：「100应该占两列」）。
+    out.append([("土地复垦率（%）", 2), (f"{_rate}", 2)])
     return out
 
 
@@ -474,10 +485,15 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     _section_table(doc, "复垦责任范围内土地损毁及占用面积", [
         [("类型", 2), ("面积（公顷）", 3)],
         [("", 2), ("小计", 1), ("已损毁或占用", 1), ("拟损毁或占用", 1)],
-        [("损毁", 1), ("压占", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
+        # 「损毁」竖跨 挖损/压占/小计 三行（样本 p58：损毁 的纵向中心落在 挖损 与 小计
+        # 之间）；「占用」哪怕本项目没有，也**留一行占位**（业主要求表格结构完整）。
+        [("损毁", 1), ("挖损", 1), ("", 1), ("", 1), ("", 1)],
+        [("", 1), ("压占", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
         [("", 1), ("小计", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
+        [("占用", 2), ("", 1), ("", 1), ("", 1)],
         [("合计", 2), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
-    ], W_DAMAGE, row_h_cm=0.9, vmerge_cols=(1, 2))   # 「类型」竖跨表头两行（样本 p58）
+    ], W_DAMAGE, row_h_cm=0.9,
+        vmerge_specs=((1, 0, 1), (1, 2, 4)))
     _section_table(doc, "复垦土地面积", _reclaim_area_rows(d), W_AREA, row_h_cm=0.9)
 
     doc.add_page_break()

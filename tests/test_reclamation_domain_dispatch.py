@@ -1206,3 +1206,49 @@ def test_damage_table_type_header_spans_two_rows(tmp_path):
     # 表头第二行只剩三个子列（类型那格已被跨行合并吃掉）
     _sub = [c.text.strip() for c in tb.rows[1].cells]
     assert "小计" in _sub and "已损毁或占用" in _sub and "拟损毁或占用" in _sub
+
+
+def test_damage_table_full_sample_structure(tmp_path):
+    """表 B 逐行对齐样本 p58：损毁跨 3 行（挖损/压占/小计）+ 占用行 + 合计行。
+
+    业主 2026-10-12：「损毁占三行，而且类型上分别是挖损、压占、小计。
+    合计那一项上面还有一行是占用，虽然这些都没数据但是都要有占位」。
+    """
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    doc = _DD()
+    render_report_form(doc, collect_form_data(
+        {"project_name": "X", "area_m2": 8070.0}, {"name": "Y"}, []), {})
+    tb = next(t for t in doc.tables
+              if "复垦责任范围" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""))
+    rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
+    # 第 3 列（二级标签列）依次是 小计/挖损/压占/小计/·/·  —— 注意表头第二行也有个小计
+    _lvl2 = [r[2] for r in rows]
+    assert _lvl2[2:5] == ["挖损", "压占", "小计"], _lvl2
+    assert rows[5][1] == "占用", rows[5]          # 合计上面那行是「占用」（占位，无数据）
+    assert rows[6][1] == "合计", rows[6]
+    # 「损毁」竖跨 3 行
+    _xmls = [tc.xml for tr in tb._tbl.tr_lst for tc in tr.tc_lst]
+    assert len([x for x in _xmls if "<w:vMerge/>" in x]) >= 4   # 段名×6 + 类型×1 + 损毁×2
+
+
+def test_reclaim_area_rate_spans_two_columns(tmp_path):
+    """「土地复垦率（%）」的 100 要占**两列**（样本 p58 下节末行）。"""
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    doc = _DD()
+    render_report_form(doc, collect_form_data(
+        {"project_name": "X", "area_m2": 8070.0,
+         "land_classification": {"合计_m2": 8070.0, "rows": [
+             {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 478.0}]}},
+        {"name": "Y"}, []), {})
+    tb = next(t for t in doc.tables
+              if "复垦土地面积" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""))
+    _seen = []
+    for _c in tb.rows[-1].cells:
+        if not _seen or _seen[-1]._tc is not _c._tc:
+            _seen.append(_c)
+    assert _seen[0].text.replace("\n", "").strip() == "复垦土地面积"   # 竖排段名格
+    assert _seen[1].text.strip() == "土地复垦率（%）"
+    assert _seen[2].text.strip() == "100"
+    assert round(_seen[2].width.cm, 2) == round(1.61 + 2.20, 2), _seen[2].width.cm

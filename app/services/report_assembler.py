@@ -4701,6 +4701,33 @@ class ReportAssembler:
             _add(11 if _cat == "announcement" else 12, _p,
                  str(img.get("display_name") or ""))
 
+        # ④ **图片材料按名归项** —— 现状图 / 勘测定界图 / CAD 渲染图 / 功能分布图。
+        #    🔴 这条路是补的：原先附件池只认 `.pdf` + 公司资质 + `photo/announcement` 两类图，
+        #       用户传的图片材料**一份都进不了报告**。更隐蔽的是：上传的图按
+        #       `<原名>_<hash>.jpg` 落盘，而图片目录内部的回退找的是 `storage/images/<原名>`
+        #       —— 名字对不上就**整张丢掉**（`_prepare_image_catalog` 里已修成用真实路径）。
+        #    归属按样本的附件清单：
+        #       现状图 / 勘测定界图 → 附件16「勘测报告」的附图
+        #         （样本里它属**第13部分图件区**的图件②，图件区还没做，先挂勘测报告名下）
+        #       红线图（含 CAD 渲染出的 `<名>.cad.png`）→ 附件17「主体项目用地红线图」
+        #       功能分布图 → 附件13「临时用地功能分布图」
+        _NAME_RULES = (
+            (16, ("现状图", "勘测定界图", "勘界图")),
+            (17, ("红线",)),
+            (13, ("功能分布图", "分布图")),
+        )
+        for img in ((getattr(self, '_img_catalog_data', {}) or {}).get("catalog") or []):
+            _p = str(img.get("path", ""))
+            _nm = os.path.basename(_p)
+            if not _p or _nm.startswith("pdf_"):
+                continue
+            _it = next((n for n, kws in _NAME_RULES if any(k in _nm for k in kws)), 0)
+            if not _it:
+                continue
+            if any(f["path"] == _p for f in pool.get(_it, [])):
+                continue
+            _add(_it, _p, _nm)
+
         return pool
 
     def _add_reclamation_report_form(self, doc, chapters, filled):
@@ -5338,9 +5365,23 @@ class ReportAssembler:
         uploaded_items = []
         for item in (state.get("_uploaded_files", []) or []):
             if isinstance(item, str):
-                uploaded_items.append(item)
+                _p = item
+                _alt = Path(str(self.storage_dir)) / _p
+                uploaded_items.append(str(_alt) if _alt.exists() else _p)
             elif isinstance(item, dict) and item.get("path"):
-                uploaded_items.append({"path": item["path"],
+                # 🔴 **必须把相对路径解析成真实存在的绝对路径**：上传时文件按
+                #    `<原名>_<hash>.jpg` 落盘，而 `original_name` 是没带 hash 的原名 ——
+                #    图片目录内部的回退用的是 `storage/images/<原名>`，**永远对不上**，
+                #    于是**所有直接上传的图片被整张丢掉**（实测 2026-10-12：上传
+                #    「现状图.jpg」「勘测定界图_00.jpg」「主体项…红线_图纸.png」后重跑，
+                #    目录里一张都没有，media 数一个没变）。
+                #    PDF 抽图（`pdf_*`）恰好「存储名 == 原名」，所以一直没暴露。
+                _p = str(item["path"])
+                if not os.path.exists(_p):
+                    _alt = Path(str(self.storage_dir)) / _p
+                    if _alt.exists():
+                        _p = str(_alt)
+                uploaded_items.append({"path": _p,
                                        "original_name": item.get("original_name")
                                                         or os.path.basename(str(item["path"]))})
 

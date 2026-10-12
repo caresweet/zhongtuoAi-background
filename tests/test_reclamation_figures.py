@@ -148,3 +148,32 @@ def test_unclassified_scan_never_enters_body(tmp_path):
                               domain="reclamation")
     assert [c["category"] for c in cat["catalog"]] == ["other"]
     assert cat["by_chapter"].get(4, []) == []
+
+
+def test_uploaded_image_paths_resolve_to_real_files(tmp_path):
+    """**上传的图片必须解析到真实文件**，否则整张被丢掉。
+
+    上传时文件按 `<原名>_<hash>.jpg` 落盘，而 `original_name` 是没带 hash 的原名 ——
+    图片目录内部的回退找的是 `storage/images/<原名>`，**永远对不上**。
+    实测 2026-10-12：上传「现状图.jpg」「勘测定界图_00.jpg」「主体项…红线_图纸.png」
+    后重跑，目录里一张都没有、media 数一个没变（PDF 抽图恰好「存储名 == 原名」，
+    所以这个坑一直没暴露）。
+    """
+    from PIL import Image
+    PILImage = pytest.importorskip("PIL.Image")
+    store = tmp_path / "storage"
+    (store / "images").mkdir(parents=True)
+    real = store / "images" / "现状图_03582b4d.jpg"
+    Image.new("RGB", (40, 30), (200, 210, 200)).save(real)
+
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=store)
+    a._domain = "reclamation"
+    a.storage_dir = store
+    a.images_dir = store / "images"
+    a._img_catalog_data = {}
+    a._inserted_images = set()
+    pools = a._prepare_image_catalog({
+        "_uploaded_files": [{"path": "images/现状图_03582b4d.jpg", "original_name": "现状图.jpg"}],
+        "_project_materials": [], "_classified_images": {}})
+    assert any(pools.values()), f"上传的图应进目录，实际 {pools}"

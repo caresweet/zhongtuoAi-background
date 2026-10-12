@@ -150,6 +150,19 @@ def appendix_chapter_no(domain: str | None) -> Optional[int]:
     return TOTAL_CHAPTERS
 
 
+def report_form_chapter_no(domain: str | None) -> Optional[int]:
+    """该域「复垦方案报告表」的章号；没有则 None。
+
+    复垦第 11 部分 = 样本那种**制式表单**（项目概况/方案编制单位/复垦区土地利用现状/
+    损毁及占用/复垦土地面积/工作计划与保障措施/投资估算）。
+    稳评没有这一部分（它的第 11 章是「分析预测风险源」）。
+    """
+    if domain == _RECLAMATION:
+        from app.agent.reclamation_definitions import RECLAMATION_REPORT_FORM_CHAPTER_NO
+        return RECLAMATION_REPORT_FORM_CHAPTER_NO
+    return None
+
+
 def appendix_kind(domain: str | None) -> str:
     """附件块由**哪套渲染器**产出。
 

@@ -903,3 +903,62 @@ def test_ch3_land_use_table_is_dropped(tmp_path):
                             "land_classification": {"rows": [{"一级地类": "耕地", "二级地类": "水田",
                                                               "面积_m2": 478.0}], "合计_m2": 8070.0}})
     assert _table_by_header(doc, "一级地类") is None, "第3章不该出现土地利用现状表"
+
+
+# ════════════════════════════════════════════════════════════
+# K. 第11部分「复垦方案报告表」（样本 p57–p60 那种制式表单）
+# ════════════════════════════════════════════════════════════
+
+def test_report_form_chapter_per_domain():
+    """复垦有第11部分「复垦方案报告表」；稳评没有（它第11章是「分析预测风险源」）。"""
+    assert cat.report_form_chapter_no("reclamation") == 11
+    assert cat.report_form_chapter_no("stability") is None
+    assert cat.report_form_chapter_no(None) is None
+    assert cat.chapter_title("reclamation", 11) == "复垦方案报告表"
+
+
+def test_report_form_render(tmp_path):
+    """报告表渲染：竖排分节名 + 样本那几张表 + 主要编制人员子表。
+
+    样本（明远路 p57）是一整张带边框的大表，**最左列放竖排的分节名**
+    （「项/目/概/况」逐字竖排），右侧是「标签｜值｜标签｜值」的表单。
+    """
+    from docx import Document as _D
+    from docx.oxml.ns import qn as _q
+
+    # 用一个带完整事实的 filled，避免依赖外部公司/人员库
+    filled = {"project_name": "某复垦项目", "project_unit": "某某公司",
+              "location": "淮安市某区", "area_m2": 8070.0, "contact_phone": "13800000000",
+              "construction_nature": "新建", "project_investment": 9500,
+              "project_investment_unit": "万元",
+              "land_classification": {"rows": [
+                  {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 478.0}],
+                  "合计_m2": 8070.0}}
+    doc = _render_doc_full(tmp_path, {8: {"markdown": "# 工作计划\n\n正文甲\n"},
+                                      10: {"markdown": "# 保障措施\n\n正文乙\n"}},
+                           filled)
+    _titles = []
+    _tables = []
+    for el in doc.element.body.iterchildren():
+        if el.tag == _q('w:p'):
+            _titles.append(el)
+        elif el.tag == _q('w:tbl'):
+            _tables.append(__import__('docx').table.Table(el, doc))
+    _all_text = "\n".join(t.text for t in _titles)
+    assert "土地复垦方案报告表" in _all_text
+    # 四个竖排分节名（逐字换行）
+    _joined = "\n".join("".join(c.text for c in tb.rows[0].cells) for tb in _tables)
+    for _sec in ("项目概况", "方案编制单位", "复垦区土地利用现状", "复垦土地面积", "投资估算"):
+        assert _sec in _joined.replace("\n", ""), _sec
+    # 样本那几张表的关键列
+    _hdr = "\n".join(" | ".join(c.text for c in tb.rows[0].cells) for tb in _tables)
+    assert "临时用地" not in _hdr            # 报告表里没有拟损毁表（那是第1章）
+    assert "工程或费用名称" in _hdr or "主要编制人员" in _joined.replace(" ", "")
+
+
+def test_report_form_absent_for_stability(tmp_path):
+    """稳评护栏：不渲染报告表。"""
+    _out, text = _render(tmp_path, "stability",
+                         {4: {"markdown": "# 第4章\n\n## 4.1 合法性分析\n\nB"}},
+                         {"project_name": "测试稳评项目"})
+    assert "土地复垦方案报告表" not in text

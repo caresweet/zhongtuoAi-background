@@ -361,6 +361,8 @@ def get_reclamation_chapter_rag_query(chapter_number: int) -> str:
 #    故目录会出现 10 → 14 的跳号 —— 这是刻意的，补上那三部分后跳号自然消失。
 #    （备选做法是先把附件排 11 不跳号，但那样与样本编号不一致，将来补 11–13 还要重排。）
 RECLAMATION_APPENDIX_CHAPTER_NO = 14
+# 第11部分 = 复垦方案报告表（制式表单，样本 p57–p60）
+RECLAMATION_REPORT_FORM_CHAPTER_NO = 11
 
 RECLAMATION_POST_BODY_TITLES: Dict[int, str] = {
     11: "复垦方案报告表",

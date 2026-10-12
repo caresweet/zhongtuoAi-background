@@ -29,6 +29,7 @@ from app.agent.chapter_catalog import (
     front_matter_gap_pt,
     has_questionnaire_tables,
     injects_audit_comments,
+    report_form_chapter_no,
     body_image_anchor,
     typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
@@ -735,6 +736,14 @@ class ReportAssembler:
         #    稳评 = 专家评审/拟征地公告/勘测定界摘要/现场调查图片 四条图片分组；
         #    复垦 = 样本目录里那张 **22 项**清单（委托函/合同/资质证书/协议书…）。
         #    复垦报告里绝不能出现稳评的「附件1机构资质／附件2问卷／附件3评审…」。
+        # ── 第11部分「土地复垦方案报告表」（复垦专有；稳评无此部分）──
+        _form_no = report_form_chapter_no(self._domain)
+        if _form_no is not None:
+            try:
+                self._add_reclamation_report_form(doc, chapters, filled)
+            except Exception as _fe:
+                logger.warning(f"[报告表] 渲染失败，跳过（不影响出报告）: {_fe}")
+
         _appendix_no = appendix_chapter_no(self._domain)
         if _appendix_no is not None:
             self._current_chapter = _appendix_no
@@ -4693,6 +4702,61 @@ class ReportAssembler:
                  str(img.get("display_name") or ""))
 
         return pool
+
+    def _add_reclamation_report_form(self, doc, chapters, filled):
+        """第11部分「土地复垦方案报告表」—— 样本那种**制式表单**（`reclamation_report_form`）。
+
+        数据全部取自既有事实源（材料抽取 / 公司档案 / 人员库 / 勘测定界地类 /
+        第8章与第10章正文），**不另编**；抽不到的留空，不印占位符。
+        费用构成的**金额列先留空** —— `reclamation_cost_model` 要「分项工程量」做输入，
+        而「每项工程量取哪块面积、多厚」这个口径业主还没定（见 2026-10-12 会话），
+        定了之后 `build_cost_rows` 直接接上即可。
+        """
+        from app.services.reclamation_report_form import (
+            build_cost_rows, collect_form_data, render_report_form,
+        )
+        try:
+            from app.services.personnel_store import personnel_for
+            _people = personnel_for(getattr(self, "_selected_personnel", None) or None,
+                                    self._company_id())
+        except Exception as _pe:
+            logger.warning(f"[报告表] 人员库读取失败: {_pe}")
+            _people = []
+
+        data = collect_form_data(filled or {}, self._company or {}, _people)
+        data["工作计划"] = self._excerpt(chapters, 8, 700)
+        data["保障措施"] = self._excerpt(chapters, 10, 700)
+        data["测算依据"] = (
+            "（1）《土地复垦方案编制规程——通则》（TD/T 1031.1~1031.7-2011）；"
+            "（2）《江苏省土地综合整治项目预算定额标准》；"
+            "（3）《江苏省土地综合整治项目施工机械台班费预算定额标准》（苏财建〔2013〕469 号）；"
+            "（4）淮安市建设工程材料信息价；"
+            "（5）其他有关规定和标准。")
+        # 费用构成：有工程量口径后 `build_cost_rows(estimate)` 直接接上；现在先出空表
+        data["费用构成"] = [(no, name, "") for no, name, _v in
+                            build_cost_rows(type("_E", (), {
+                                "construction": 0, "equipment": 0, "other": 0,
+                                "monitor_care": 0, "reserve": 0, "static_total": 0,
+                                "dynamic_total": 0})())]
+
+        _no = report_form_chapter_no(self._domain)
+        self._add_chapter_title_page(doc, _cn_num(_no), self._get_chapter_title(_no),
+                                     chapter_number=_no)
+        render_report_form(doc, data, chapters, chapter_no=_no)
+
+    @staticmethod
+    def _excerpt(chapters, ch_num, limit: int) -> str:
+        """取某章正文的纯文本摘录（去掉标题行与表格行），供报告表的摘要栏用。"""
+        ch = (chapters or {}).get(ch_num) or (chapters or {}).get(str(ch_num)) or {}
+        md = ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
+        keep = []
+        for ln in str(md).splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#") or s.startswith("|") or s.startswith("!["):
+                continue
+            s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
+            keep.append(s)
+        return ("\n".join(keep))[:limit]
 
     def _add_reclamation_appendices(self, doc, filled):
         """复垦第 14 部分「附件」—— 样本目录里那张 **22 项**清单。

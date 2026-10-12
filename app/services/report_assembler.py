@@ -5453,7 +5453,15 @@ class ReportAssembler:
             borders = OxmlElement('w:tblBorders')
             for tag in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
                 borders.append(_bd(tag))
-            tblPr.append(borders)
+            # 🔴 必须**按 schema 顺序**插入：`w:tblBorders` 要排在
+            #    `shd / tblLayout / tblCellMar / tblLook` **之前**。
+            #    早先是 `tblPr.append(borders)` —— 挂到了 tblLook 后面，整个 tblPr
+            #    子元素顺序非法。宽松的渲染器照画边框，严格的一看就整块忽略 tblPr：
+            #    连表格里设好的**固定列宽（tblW/tblLayout）一起丢掉** → 报告表列宽
+            #    被 Word 按内容自动重排（业主：「报告表还是有问题」）。实测 2026-10-12。
+            tblPr.insert_element_before(
+                borders, 'w:shd', 'w:tblLayout', 'w:tblCellMar', 'w:tblLook',
+                'w:tblCaption', 'w:tblDescription')
             n += 1
         return n
 

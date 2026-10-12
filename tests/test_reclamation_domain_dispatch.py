@@ -1062,7 +1062,13 @@ def test_report_form_column_widths_follow_sample(tmp_path):
             break
     assert tb is not None, "报告表「项目概况」分节未渲染"
     _row = tb.rows[3]                     # 法人代表｜联系电话 —— 四个格全分列
-    got = [round(c.width.cm, 2) for c in _row.cells]
+    # 🔴 合并格在 `row.cells` 里会**按栅格逐格重复**（标签跨 c1+c2，就出现两次），
+    #    按底层 `<w:tc>` 去重后才是一次实际的列序列。
+    _seen = []
+    for _c in _row.cells:
+        if not _seen or _seen[-1]._tc is not _c._tc:
+            _seen.append(_c)
+    got = [round(c.width.cm, 2) for c in _seen]
     assert got == [2.00, 4.92, 3.86, 2.29, 2.57], got
 
 
@@ -1118,3 +1124,60 @@ def test_splice_supplements_without_markers_appends_instead_of_dropping():
     assert out != md
     assert "这一段是补充的论述" in out
     assert "好的，以下是" not in out
+
+
+def test_report_form_staff_is_rows_not_nested_table(tmp_path):
+    """主要编制人员是**方案编制单位的行**，不是内嵌子表。
+
+    业主义工 2026-10-12：「主要编制人员是方案编制单位的一个内置标题，占了一整行，
+    但不会看上去像是另起了一个表格」—— `cell.add_table()` 内嵌在 Word 里会多出
+    一圈独立边框，看着就是另一张表。
+    """
+    doc = _render_doc_full(
+        tmp_path, {10: {"markdown": "# 保障措施\n\n正文甲\n"}},
+        {"project_name": "测试复垦项目"})
+    tb = None
+    for t in doc.tables:
+        if "方案编制单位" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""):
+            tb = t
+            break
+    assert tb is not None
+    # 表内不得再有嵌套表格
+    from docx.oxml.ns import qn as _q
+    assert tb._tbl.findall(_q('w:tbl')) == []
+    _txts = [" | ".join(c.text.strip() for c in r.cells) for r in tb.rows]
+    assert any("主 要 编 制 人 员" in t for t in _txts)
+    assert any("姓名" in t and "签名" in t for t in _txts)
+
+
+def test_report_form_merges_same_unit_in_staff_rows(tmp_path):
+    """同一「单位」在同一列里合并同类项（竖向合并），不是每行都重复印一遍。"""
+    import re as _re
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    filled = {"project_name": "测试复垦项目", "area_m2": 8070.0}
+    d = collect_form_data(filled, {"name": "江苏众拓项目代理咨询有限公司"},
+                          [{"姓名": "陈春", "职称/职务": "高工", "专业": "土管"},
+                           {"姓名": "刘利伟", "职称/职务": "助工", "专业": "地信"}])
+    doc = _DD()
+    render_report_form(doc, d, {})
+    tb = doc.tables[1]
+    _xmls = [tc.xml for tr in tb._tbl.tr_lst for tc in tr.tc_lst]
+    assert any('vMerge w:val="restart"' in x for x in _xmls), "「单位」列应有竖向合并起点"
+    assert len([x for x in _xmls if "<w:vMerge/>" in x]) >= 2, "后续行应是合并续格"
+
+
+def test_report_form_labels_share_one_font_size(tmp_path):
+    """段名竖排的字号统一（早先按字数分 11/9/7.5 三档，一列里大小不一）。"""
+    import re as _re
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    doc = _DD()
+    render_report_form(doc, collect_form_data(
+        {"project_name": "X", "area_m2": 8070.0}, {"name": "Y"}, []), {})
+    _sizes = set()
+    for t in doc.tables:
+        _tc = t._tbl.tr_lst[0].tc_lst[0]
+        _sizes |= set(_re.findall(r'<w:sz w:val="(\d+)"', _tc.xml))
+        assert 'w:val="center"' in _tc.xml, "段名格要垂直居中"
+    assert _sizes == {"21"}, _sizes        # 21 half-points = 10.5pt，全篇一致

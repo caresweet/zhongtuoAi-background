@@ -16,7 +16,6 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from lxml import etree
-from app.agent.chapter_definitions import chapter_no_of_heading
 from app.agent.chapter_catalog import (
     all_chapters, total_chapters, chapter_title,
     has_review_table, appendix_chapter_no, appendix_kind,
@@ -985,8 +984,7 @@ class ReportAssembler:
                             self._set_cell(row.cells[2], '0')
                             self._set_cell(row.cells[3], '0.0%')
 
-    @staticmethod
-    def _dedup_table_titles(doc):
+    def _dedup_table_titles(self, doc):
         """Remove duplicate table titles, fix numbering, remove strays, and clean tables."""
         import re
 
@@ -1018,7 +1016,11 @@ class ReportAssembler:
             t = p.text.strip()
 
             # Track current chapter
-            _ch = chapter_no_of_heading(t)
+            # 🔴 按域取章号：这里原用稳评的 `chapter_no_of_heading`，复垦章标题
+            #    `4 土地复垦方向可行性分析` 解析出来是 0 → `current_ch > 0` 那道门
+            #    永远为假 → **表号重编对复垦从未生效**，LLM 写的表号原样留下，
+            #    于是出现两个「表4-2」（实测 2026-10-12）。
+            _ch = chapter_no_of_text(self._domain, t)
             if _ch:
                 current_ch = _ch
                 ch_table_counters[current_ch] = 0
@@ -1094,7 +1096,8 @@ class ReportAssembler:
         for child in body.iterchildren():
             if child.tag == qn('w:p'):
                 txt = ''.join(n.text or '' for n in child.iter(qn('w:t'))).strip()
-                _c = chapter_no_of_heading(txt)
+                # 同上：按域取章号，否则复垦所有表都被归到「第0章」一起判重
+                _c = chapter_no_of_text(self._domain, txt)
                 if _c:
                     ch = _c
             elif child.tag == qn('w:tbl'):

@@ -26,6 +26,8 @@ from app.agent.chapter_catalog import (
     front_matter_order,
     cover_org_value,
     cover_date_parts,
+    cover_bold,
+    front_matter_gap_pt,
     has_questionnaire_tables,
     injects_audit_comments,
     body_image_anchor,
@@ -2131,7 +2133,8 @@ class ReportAssembler:
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = _TITLE_TOP_PT
         p.paragraph_format.space_after = Pt(6)
-        _set_run_font(p.add_run(pn), _ct_font, size=Pt(_ct_pt), bold=True, ascii_font=FONT_ASCII)
+        _set_run_font(p.add_run(pn), _ct_font, size=Pt(_ct_pt),
+                      bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
 
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
@@ -2140,7 +2143,7 @@ class ReportAssembler:
         #    参照件《白马湖农场1号》是裸的「社会稳定风险评估」，业主明确要求改，
         #    以业主口径为准。该行是**报告类型**，按域取（复垦为《土地复垦方案》）。
         _set_run_font(p.add_run(cover_type_line(self._domain)), _ct_font, size=Pt(_ct_pt),
-                      bold=True, ascii_font=FONT_ASCII)
+                      bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
 
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
         # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「项目单位/编制单位」）。
@@ -2154,7 +2157,10 @@ class ReportAssembler:
             if not val:
                 continue
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = _SIGN_TOP_PT if i == 0 else Pt(0)
+            # 🔴 落款行间空档按域取：业主口径「项目单位/编制单位中间要隔一行」——
+            #    样本落款三行 y=590/646/700，行距 56pt（15pt 字）→ 空档约 36pt。
+            p.paragraph_format.space_before = (
+                _SIGN_TOP_PT if i == 0 else Pt(front_matter_gap_pt(self._domain, "cover_sign")))
             p.paragraph_format.space_after = Pt(0)
             _set_run_font(p.add_run(lab + val), _cs_font, size=Pt(_cs_pt),
                           ascii_font=FONT_ASCII)
@@ -2178,15 +2184,15 @@ class ReportAssembler:
         # ── 顶部：项目名 + 报告类型（与封面同款，居中）──
         if pn:
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(96)
+            p.paragraph_format.space_before = Pt(front_matter_gap_pt(self._domain, "title_page_head"))
             p.paragraph_format.space_after = Pt(6)
-            _set_run_font(p.add_run(pn), _th_font, size=Pt(_th_pt), bold=True,
-                          ascii_font=FONT_ASCII)
+            _set_run_font(p.add_run(pn), _th_font, size=Pt(_th_pt),
+                          bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(24)
         _set_run_font(p.add_run(cover_type_line(self._domain)), _th_font,
-                      size=Pt(_th_pt), bold=True, ascii_font=FONT_ASCII)
+                      size=Pt(_th_pt), bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
 
         # ── 信息块：**样本是 6 行填表**（每行值下面一条横线），值缺失也留着横线给手填 ──
         #    样本（明远路 第2页 实测）：
@@ -2205,8 +2211,11 @@ class ReportAssembler:
         for _i, (lab, val) in enumerate(_rows):
             v = str(val or "").strip()
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = Pt(72) if _i == 0 else Pt(22)
-            p.paragraph_format.space_after = Pt(6)
+            # 🔴 行距按域取：样本扉页六行 y=277…719 **均匀铺满整页**（跨 442pt / 版心 698pt），
+            #    以前写死 Pt(72)/Pt(22) 把整块挤在页面上半截（业主：「没有平均的占满一页」）。
+            _gap = front_matter_gap_pt(self._domain, "title_page_row")
+            p.paragraph_format.space_before = Pt(_gap * 1.6) if _i == 0 else Pt(_gap)
+            p.paragraph_format.space_after = Pt(0)
             if v:
                 _set_run_font(p.add_run(lab + v), _ti_font, size=Pt(_ti_pt),
                               ascii_font=FONT_ASCII)
@@ -2802,8 +2811,7 @@ class ReportAssembler:
         #    LLM 手写的那张实测只有一行「以耕地为主」，数据没法看。
         #    ⚠️ 钩子必须挂在这里（`_render_md_table` 入口）：markdown 表的 flush 有**四处**
         #       （表间分隔、遇到正文、章末），只挂章末那处根本不触发（实测）。
-        if self._render_reclamation_land_use_table(
-                doc, caption, ch_num, getattr(self, '_filled', None) or {}):
+        if self._render_reclamation_system_table(doc, caption, ch_num):
             return
         rows = []
         for line in table_lines:
@@ -3154,41 +3162,70 @@ class ReportAssembler:
         r.font.size = TABLE_SIZE
         r.bold = bold
 
-    def _render_reclamation_land_use_table(self, doc, caption, ch_num, filled) -> bool:
-        """复垦表4-2「临时用地土地利用现状统计表」——**按样本结构**就地渲染。
+    def _render_reclamation_system_table(self, doc, caption, ch_num) -> bool:
+        """复垦的**系统渲染表**（按样本逐表核对，不让 LLM 自己编）。
 
-        样本（明远路报告书 表4-4）的结构是**按地类逐项**：
+        样本（明远路报告书）里这三张表的归属是**唯一确定**的：
 
-            地类名称及编码          面积（公顷）  占比（%）
-            耕地（01）  水田（0101）   0.0478      5.92
-                        小计          0.0478      5.92
-            水域及水利设施用地（11）沟渠（1107） 0.0074  0.92
-                        小计          0.0074      0.92
-            …
-            合计                      0.8070      100
+            第1章  表1-1 临时用地拟损毁土地情况表
+                   临时用地名称 | 面积 | 地块个数 | 损毁方式 | 损毁程度 | 复垦情况
+                   施工用地 | 0.8070 | 1 | 压占 | 重度 | 待复垦
+                   合计     | 0.8070 | —— | —— | —— | ——
+           第3章  **没有任何表**
+           第4章  表4-4 临时用地土地利用现状统计表（按地类逐项 + 小计 + 合计）
 
-        数据来自勘测定界的「土地分类面积表」（`land_class_extract` 视觉读出，
-        落在 `filled_data["land_classification"]`）—— 那份 PDF 的文本层把单元格边界
-        丢了，解析器与 pdfplumber 都读不出，只能走视觉。
+        实测我们这一版：LLM 在第1章编了张「土地利用现状地类构成表」、第3章又编了张
+        「土地利用现状地类表」——**名不对、归属不对、两张还都重复第4章的数据**，
+        而且合计行写串列（`| 合计 | 8070.0 | — |` 把面积塞进了「二级地类」列）。
+        业主：「表1-1 跟应该做出来的样式不一样」「表3-1 合计的数据不对」。
 
-        🔴 用 `_render_table_from_dict`（与稳评系统表同一条路）：表题、边框、字号、
-            表号重编全部复用，不再另写一套。样本用合并单元格把「一级地类」并成一格，
-            这里拆成两列（一级地类 / 二级地类）—— 信息一样、不用合并，读起来更清楚。
+        所以按章收口（`表格由系统渲染` 的老办法，与稳评 SYS_TABLE 同一思路）：
+          第1章 + 表题含「损毁/土地利用现状/地类」 → 渲染样本的**拟损毁表**
+          第3章 + 表题含「土地利用现状/地类」      → **整张不渲染**（样本无此表）
+          第4章 + 表题是「临时用地土地利用现状统计表」→ 按地类渲染
 
-        返回 True = 已渲染（调用方不要再渲染 LLM 那张）。
+        返回 True = 已处理（调用方不要再用 markdown 渲染那张）。
         """
-        lc = (filled or {}).get("land_classification") or {}
+        filled = getattr(self, '_filled', None) or {}
+        cap = str(caption or "").strip()
+        _is_land = ("土地利用现状" in cap) or ("地类" in cap)
+
+        # ── 第3章：样本没有这张表 —— 整张丢掉（数据归第4章表4-4）──
+        if ch_num == 3 and _is_land:
+            logger.info(f"[表3-1] 第3章不设土地利用现状表（样本无此表），已丢弃 LLM 表：{cap}")
+            return True
+
+        # ── 第1章：换成样本的「临时用地拟损毁土地情况表」──
+        if ch_num == 1 and ("损毁" in cap or _is_land):
+            lc = (filled.get("land_classification") or {})
+            _total = float(lc.get("合计_m2") or 0)
+            if _total <= 0:
+                try:
+                    _total = float(str(filled.get("area_m2") or 0).replace(",", "")) or 0.0
+                except Exception:
+                    _total = 0.0
+            _ha = f"{_total / 10000.0:.4f}" if _total else "—"
+            _plots = str(filled.get("plot_count") or "").strip() or "1"
+            self._render_table_from_dict(
+                doc,
+                {"headers": ["临时用地名称", "面积（公顷）", "地块个数",
+                             "损毁方式", "损毁程度", "复垦情况"],
+                 "rows": [["施工用地", _ha, _plots, "压占", "重度", "待复垦"],
+                          ["合计", _ha, "——", "——", "——", "——"]]},
+                caption="表1-1 临时用地拟损毁土地情况表")
+            logger.info(f"[表1-1] 按样本渲染「临时用地拟损毁土地情况表」（{_ha} 公顷）")
+            return True
+
+        # ── 第4章：按地类逐项渲染（数据来自勘测定界的土地分类面积表）──
+        lc = (filled.get("land_classification") or {})
         rows = lc.get("rows") or []
-        if not rows:
-            return False
-        if "临时用地土地利用现状统计表" not in str(caption or ""):
+        if not rows or "临时用地土地利用现状统计表" not in cap:
             return False
 
         total = float(lc.get("合计_m2") or 0) or sum(float(r.get("面积_m2") or 0) for r in rows)
         if total <= 0:
             return False
 
-        # 按一级地类分组（保持原表顺序）
         groups, order = {}, []
         for r in rows:
             g = str(r.get("一级地类") or "").strip() or "—"
@@ -3214,7 +3251,7 @@ class ReportAssembler:
             doc,
             {"headers": ["一级地类", "二级地类", "面积（公顷）", "占比（%）"],
              "rows": out_rows},
-            caption=str(caption).strip())
+            caption=cap)
         logger.info(f"[表4-2] 按勘测定界地类渲染 {len(out_rows)} 行（合计 {total / 10000.0:.4f} 公顷）")
         return True
 

@@ -292,6 +292,33 @@ def typography(domain: str | None, slot: str) -> tuple:
     return _d.get(slot) or _TYPO["stability"].get(slot) or ("宋体", 12)
 
 
+def cover_bold(domain: str | None) -> bool:
+    """封面标题/落款、扉页标题是否**加粗**。
+
+    稳评：加粗（参照件口径，逐字等于改动前）。
+    复垦：**不加粗** —— 样本封面实测（明远路 p1）三行标题 26.1pt 黑体、
+    落款 15pt 黑体，`flags` 里**没有**粗体位；扉页标题 22pt 同样不加粗。
+    """
+    return domain != _RECLAMATION
+
+
+# 前置件各行之间的**空档**（pt）。业主口径：「中间都要隔一行」。
+#   复垦取值按样本逐行实测的间距反推：
+#     封面（明远路 p1）落款三行 y=590/646/700 → 行距 56pt，15pt 字 → 空档约 36pt；
+#     扉页（p2）六行 y=277/395/485/569/653/719 → 平均行距约 88pt，14pt 字 → 空档约 70pt，
+#       整块铺满版心（277→719 跨 442pt，版心 698pt）。
+_FRONT_MATTER_GAP_PT = {
+    "stability": {"cover_sign": 0.0, "title_page_head": 96.0, "title_page_row": 22.0},
+    "reclamation": {"cover_sign": 36.0, "title_page_head": 44.0, "title_page_row": 70.0},
+}
+
+
+def front_matter_gap_pt(domain: str | None, slot: str) -> float:
+    """前置件某个空档槽位的 pt。稳评逐字等于改动前写死的值。"""
+    _d = _FRONT_MATTER_GAP_PT.get(domain or "stability", _FRONT_MATTER_GAP_PT["stability"])
+    return float(_d.get(slot, _FRONT_MATTER_GAP_PT["stability"].get(slot, 0.0)))
+
+
 def front_matter_order(domain: str | None) -> List[str]:
     """前置件渲染顺序（token 列表）。稳评四件，逐字等于改动前的拼接顺序与分页点。"""
     return list(_FRONT_MATTER_ORDER.get(domain or "stability",

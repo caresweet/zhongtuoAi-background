@@ -826,3 +826,80 @@ def test_reclamation_has_no_word_audit_comments(tmp_path):
     _p = tmp_path / "generated" / out.split("/")[-1]
     assert "word/comments.xml" not in zipfile.ZipFile(str(_p)).namelist()
     assert "待补充/待核对" not in text
+
+
+# ════════════════════════════════════════════════════════════
+# J. 业主 2026-10-12 报的：封面/扉页字重与行距、表1-1/表3-1 归属
+# ════════════════════════════════════════════════════════════
+
+def test_cover_and_title_page_weights_and_gaps():
+    """封面/扉页**不加粗**，且行间留空档（业主：「中间都要隔一行」「没有平均占满一页」）。
+
+    样本实测（明远路 p1/p2）：
+      封面 三行标题 26.1pt 黑体不加粗、落款 15pt 黑体不加粗，行距 56pt（字 15pt）；
+      扉页 标题 22pt 不加粗、信息行 14.1pt 仿宋不加粗，六行均匀铺满整页。
+    稳评仍加粗、落款紧排（逐字等于改动前）。
+    """
+    assert cat.cover_bold("reclamation") is False
+    assert cat.cover_bold("stability") is True
+    assert cat.cover_bold(None) is True
+    assert cat.front_matter_gap_pt("reclamation", "cover_sign") > 20      # 隔一行
+    assert cat.front_matter_gap_pt("reclamation", "title_page_row") > 40  # 铺满
+    assert cat.front_matter_gap_pt("stability", "cover_sign") == 0.0      # 稳评不变
+    assert cat.front_matter_gap_pt("stability", "title_page_row") == 22.0
+
+
+def _table_by_header(doc, needle):
+    from docx.table import Table as _T
+    from docx.oxml.ns import qn as _q
+    for el in doc.element.body.iterchildren():
+        if el.tag == _q('w:tbl'):
+            tb = _T(el, doc)
+            if needle in " ".join(c.text for c in tb.rows[0].cells):
+                return tb
+    return None
+
+
+def _render_doc_full(tmp_path, chapters, filled):
+    import asyncio
+    from docx import Document as _D
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    out = a.assemble({"session_id": "t", "_domain": "reclamation",
+                      "chapters": chapters, "filled_data": filled})
+    return _D(str(tmp_path / "generated" / out.split("/")[-1]))
+
+
+def test_ch1_renders_sample_damage_table(tmp_path):
+    """第1章的表按样本换成「临时用地拟损毁土地情况表」（6 列 + 合计）。"""
+    md = ("# 前言\n\n## 1.2 复垦方案摘要\n\n"
+          "表1-1 临时用地土地利用现状地类构成表\n\n"
+          "| 一级地类 | 二级地类 | 面积() |\n| --- | --- | --- |\n"
+          "| 耕地 | 水田 | 478.0 |\n| 合计 | 8070.0 | — |\n")
+    doc = _render_doc_full(tmp_path, {1: {"markdown": md}},
+                           {"project_name": "测试复垦项目",
+                            "land_classification": {"rows": [{"一级地类": "耕地", "二级地类": "水田",
+                                                              "面积_m2": 478.0}], "合计_m2": 8070.0}})
+    tb = _table_by_header(doc, "临时用地名称")
+    assert tb is not None, "第1章应渲染「临时用地拟损毁土地情况表」"
+    _rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
+    assert _rows[0][1] == "面积（公顷）"
+    assert _rows[1] == ["施工用地", "0.8070", "1", "压占", "重度", "待复垦"]
+    assert _rows[2][0] == "合计" and _rows[2][1] == "0.8070"
+
+
+def test_ch3_land_use_table_is_dropped(tmp_path):
+    """第3章**不设**土地利用现状表（样本第3章无表；地类数据归第4章表4-4）。
+
+    实测 LLM 会在第1、第3章各编一张同名地类表，与第4章那张重复，
+    且合计行写串列（`| 合计 | 8070.0 | — |` 把面积塞进「二级地类」列）。
+    """
+    md = ("# 项目概况\n\n## 3.4 项目区土地利用状况\n\n"
+          "表3-1 临时用地土地利用现状地类表\n\n"
+          "| 一级地类 | 二级地类 | 面积() | 占比(%) |\n| --- | --- | --- | --- |\n"
+          "| 耕地 | 水田 | 478.0 | 5.9 |\n| 合计 | 8070.0 | 100.0 | — |\n")
+    doc = _render_doc_full(tmp_path, {3: {"markdown": md}},
+                           {"project_name": "测试复垦项目",
+                            "land_classification": {"rows": [{"一级地类": "耕地", "二级地类": "水田",
+                                                              "面积_m2": 478.0}], "合计_m2": 8070.0}})
+    assert _table_by_header(doc, "一级地类") is None, "第3章不该出现土地利用现状表"

@@ -134,7 +134,7 @@ def _vertical_label(cell, text: str) -> None:
 
 
 def _fill_cell(cell, text: str, *, bold: bool = False, size: float = 10.5,
-               align_center: bool = False) -> None:
+               align_center: bool = True) -> None:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
     from docx.oxml.ns import qn
@@ -151,7 +151,7 @@ def _fill_cell(cell, text: str, *, bold: bool = False, size: float = 10.5,
 
 
 def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
-                   widths_cm: Sequence[float]):
+                   widths_cm: Sequence[float], *, left_align_long: bool = True):
     """一个分节：最左列竖排段名（跨该节所有行），右侧是 `(文本, 跨列数)` 的表单行。
 
     列数固定 5：`[段名, …4 列表单…]`。跨列数不足 4 的行，最后一格自动撑满。
@@ -176,7 +176,8 @@ def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
             cell = t.cell(ri, ci)
             if span > 1:
                 cell = cell.merge(t.cell(ri, ci + span - 1))
-            _fill_cell(cell, text)
+            _fill_cell(cell, text,
+                       align_center=not (left_align_long and len(str(text)) > 40))
             ci += span
         if ci <= 4:                       # 尾格撑满，避免右边的空白格
             t.cell(ri, ci - 1).merge(t.cell(ri, 4))

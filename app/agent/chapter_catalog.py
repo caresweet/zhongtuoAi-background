@@ -322,7 +322,7 @@ def cover_bold(domain: str | None) -> bool:
 #       整块铺满版心（277→719 跨 442pt，版心 698pt）。
 _FRONT_MATTER_GAP_PT = {
     "stability": {"cover_sign": 0.0, "title_page_head": 96.0, "title_page_row": 22.0},
-    "reclamation": {"cover_sign": 36.0, "title_page_head": 44.0, "title_page_row": 70.0},
+    "reclamation": {"cover_sign": 36.0, "title_page_head": 36.0, "title_page_row": 62.0},
 }
 
 

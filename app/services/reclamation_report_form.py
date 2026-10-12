@@ -122,14 +122,20 @@ def collect_form_data(filled: dict, company: dict, personnel: Sequence[dict]) ->
 # ═══════════════════════════════════════════════════════════════
 
 def _vertical_label(cell, text: str) -> None:
-    """段名竖排：逐字一行（样本就是「项/目/概/况」这样排的）。"""
+    """段名竖排：逐字一行（样本就是「项/目/概/况」这样排的）。
+
+    长段名（如「复垦责任范围内土地损毁及占用面积」17 字）逐字一行会把整行撑得很高，
+    样本里那张表正是这么高的 —— 这里按字数**收一级字号**，避免整节被拉到一页。
+    """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
+    n = max(1, len(str(text or "")))
+    size = 11.0 if n <= 8 else (9.0 if n <= 12 else 7.5)
     p = cell.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for ch in text:
         r = p.add_run(ch + "\n")
-        r.font.size = Pt(11)
+        r.font.size = Pt(size)
         r.bold = False
 
 
@@ -154,12 +160,14 @@ def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
                    widths_cm: Sequence[float], *, left_align_long: bool = True):
     """一个分节：最左列竖排段名（跨该节所有行），右侧是 `(文本, 跨列数)` 的表单行。
 
-    列数固定 5：`[段名, …4 列表单…]`。跨列数不足 4 的行，最后一格自动撑满。
+    列数 = `len(widths_cm)`（首列是段名列，其余是表单列）。跨列数不足末尾的行，
+    最后一格自动撑满。
     """
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.shared import Cm
+    ncols = max(2, len(widths_cm))
     n = max(1, len(rows))
-    t = doc.add_table(rows=n, cols=5)
+    t = doc.add_table(rows=n, cols=ncols)
     t.style = 'Table Grid'
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
     for i, w in enumerate(widths_cm):
@@ -172,15 +180,15 @@ def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
     for ri, row in enumerate(rows):
         ci = 1
         for text, span in row:
-            span = max(1, min(int(span), 5 - ci))
+            span = max(1, min(int(span), ncols - ci))
             cell = t.cell(ri, ci)
             if span > 1:
                 cell = cell.merge(t.cell(ri, ci + span - 1))
             _fill_cell(cell, text,
                        align_center=not (left_align_long and len(str(text)) > 40))
             ci += span
-        if ci <= 4:                       # 尾格撑满，避免右边的空白格
-            t.cell(ri, ci - 1).merge(t.cell(ri, 4))
+        if ci <= ncols - 1:               # 尾格撑满，避免右边的空白格
+            t.cell(ri, ci - 1).merge(t.cell(ri, ncols - 1))
     return t
 
 
@@ -194,19 +202,42 @@ def _kv2(l1: str, v1: str, l2: str, v2: str) -> List[Tuple[str, int]]:
     return [(l1, 1), (v1, 1), (l2, 1), (v2, 1)]
 
 
-def _land_rows(data: Dict[str, Any], *, with_damage: bool) -> List[List[Tuple[str, int]]]:
-    """复垦区土地利用现状 / 复垦土地面积 —— 按地类逐项（一级｜二级｜面积｜…）。"""
-    out: List[List[Tuple[str, int]]] = [[("土地类型", 1), ("面积（公顷）", 3)]]
-    out.append([("一级地类", 1), ("二级地类", 1),
-                ("小计" if not with_damage else "已复垦", 1),
-                ("已损毁" if not with_damage else "拟复垦", 1)])
+def _land_rows(data: Dict[str, Any]) -> List[List[Tuple[str, int]]]:
+    """表A「复垦区土地利用现状」—— 样本 p58 的结构（一级｜二级｜小计｜已损毁｜拟损毁｜占用）。
+
+    样本里临时用地各行的值同时落在「小计」和「拟损毁」两列（0.0478 在两处），
+    已损毁 / 占用留空；合计行为 `合计 | 小计 | — | 拟损毁 | —`。
+    """
+    out: List[List[Tuple[str, int]]] = [
+        [("土地类型", 2), ("面积（公顷）", 4)],
+        [("一级地类", 1), ("二级地类", 1), ("小计", 1),
+         ("已损毁", 1), ("拟损毁", 1), ("占用", 1)],
+    ]
     _total = 0.0
     for r in (data.get("地类行") or []):
         _ha = float(r.get("面积_m2") or 0) / 10000.0
         _total += _ha
         out.append([(_txt(r.get("一级地类")), 1), (_txt(r.get("二级地类")), 1),
-                    (f"{_ha:.4f}", 1), ("—" if with_damage else f"{_ha:.4f}", 1)])
-    out.append([("合计", 2), (f"{_total:.4f}", 1), (f"{_total:.4f}", 1)])
+                    (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1), ("", 1)])
+    out.append([("合计", 2), (f"{_total:.4f}", 1), ("", 1), (f"{_total:.4f}", 1), ("", 1)])
+    return out
+
+
+def _reclaim_area_rows(data: Dict[str, Any]) -> List[List[Tuple[str, int]]]:
+    """表C「复垦土地面积」—— 样本 p58 下节（一级｜二级｜已复垦｜拟复垦 + 复垦率）。"""
+    out: List[List[Tuple[str, int]]] = [
+        [("土地类型", 2), ("面积（公顷）", 2)],
+        [("一级地类", 1), ("二级地类", 1), ("已复垦", 1), ("拟复垦", 1)],
+    ]
+    _total = 0.0
+    for r in (data.get("地类行") or []):
+        _ha = float(r.get("面积_m2") or 0) / 10000.0
+        _total += _ha
+        out.append([(_txt(r.get("一级地类")), 1), (_txt(r.get("二级地类")), 1),
+                    ("", 1), (f"{_ha:.4f}", 1)])
+    out.append([("合计", 2), ("", 1), (f"{_total:.4f}", 1)])
+    _rate = 100 if _total > 0 else ""
+    out.append([("土地复垦率（%）", 3), (f"{_rate}", 1)])
     return out
 
 
@@ -217,7 +248,16 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     四节对应样本四页；节与节之间**不分页**（样本是连续的表，靠表格自身跨页）。
     """
     from docx.shared import Pt
-    W = (0.9, 2.2, 4.3, 2.2, 6.0)      # 合计 15.6cm ≈ A4 版心
+    # 🔴 列宽**逐列量自样本 PDF 的表格线**（单位 cm，pt÷28.3465）：
+    #    · 主表单（样本 p57，竖线 83.1/139.7/187.5/279.1/388.5/453.5/526.3）——
+    #      `_kv`  = 标签跨前两格(4.92) + 值跨后三格(8.72)
+    #      `_kv2` = 4.92 | 3.86 | 2.29 | 2.57
+    #    · 复垦区土地利用现状 / 损毁占用面积（样本 p58，8 格）
+    #    · 复垦土地面积（样本 p58 下节，一级｜二级｜已复垦｜拟复垦）
+    W = (2.00, 4.92, 3.86, 2.29, 2.57)
+    W_LAND = (2.00, 3.98, 2.48, 1.87, 1.51, 1.61, 2.20)
+    W_AREA = (2.00, 1.69, 4.76, 3.38, 3.81)
+    W_DAMAGE = (2.00, 1.69, 4.76, 3.38, 1.61, 2.20)
 
     # 表头
     _p = doc.add_paragraph()
@@ -262,6 +302,11 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
         _rows = d.get("人员行") or []
         _inner = _cell.add_table(rows=1 + len(_rows), cols=5)
         _inner.style = 'Table Grid'
+        # 子表列宽 = 样本 p57 的 5 格实测值（姓名｜职称/职务｜专业｜单位｜签名）
+        from docx.shared import Cm as _Cm
+        for _i, _w in enumerate((1.69, 3.23, 3.86, 2.29, 2.57)):
+            for _r in _inner.rows:
+                _r.cells[_i].width = _Cm(_w)
         for i, h in enumerate(("姓名", "职称/职务", "专业", "单位", "签名")):
             _fill_cell(_inner.cell(0, i), h, align_center=True)
         for ri, r in enumerate(_rows, 1):
@@ -273,12 +318,16 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     doc.add_page_break()
 
     # ② 复垦区土地利用现状 / 损毁及占用 / 复垦土地面积
-    _section_table(doc, "复垦区土地利用现状", _land_rows(d, with_damage=False), W)
+    _section_table(doc, "复垦区土地利用现状", _land_rows(d), W_LAND)
+    _ha = d["area_m2"] / 10000.0
     _section_table(doc, "复垦责任范围内土地损毁及占用面积", [
-        [("类型", 1), ("面积（公顷）", 3)],
-        [("损毁", 1), ("压占", 1), ("小计", 1), (f"{d['area_m2'] / 10000.0:.4f}", 1)],
-    ], W)
-    _section_table(doc, "复垦土地面积", _land_rows(d, with_damage=True), W)
+        [("类型", 2), ("面积（公顷）", 3)],
+        [("", 2), ("小计", 1), ("已损毁或占用", 1), ("拟损毁或占用", 1)],
+        [("损毁", 1), ("压占", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
+        [("", 1), ("小计", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
+        [("合计", 2), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
+    ], W_DAMAGE)
+    _section_table(doc, "复垦土地面积", _reclaim_area_rows(d), W_AREA)
 
     doc.add_page_break()
 

@@ -450,6 +450,9 @@ class ChapterAgentBase(BaseAgent):
         #    属**第十二章 表12-4**。本章若也写一张，报告里就冒出两张同名表。
         if self.chapter_number in self.NO_TABLE_CHAPTERS:
             content = self._strip_markdown_tables(content)
+        # 🔴 字数不足 → 定向续写补足（复垦专开；稳评在 catalog 里恒 False）
+        content = await self._top_up_length(content, system_prompt)
+
         # 🔴 金湖模板：不注入系统表格，LLM生成markdown表格即可
         tables = self._extract_tables(content)
         sources = rag_context.get("sources", [])
@@ -910,6 +913,160 @@ class ChapterAgentBase(BaseAgent):
         if len(kept) == len(blocks):
             return md
         return (prefix + "".join(kept)).strip()
+
+    # ═══════════════════════════════════════════════════════════════
+    # 字数不足 → 续写补足（复垦专开，见 chapter_catalog.tops_up_short_chapters）
+    # ═══════════════════════════════════════════════════════════════
+    # 🔴 为什么要有这一步：提示词里写死了「本章必须达到 N 字以上」，实测复垦第4章
+    #    只写到下限的 53%（3951 / 7500 字），第1、7章同样低于下限。模型不照办时，
+    #    下游**没有任何地方**会拦：质量审查把「字数不足」记成 warning
+    #    （`severity="warning"`），而重写队列只收 `suggestion == "regenerate"`
+    #    的 **critical** 项 → 字数问题永远进不了重写、也没人补。
+    #    这里用一次**定向续写**把差额补上：不是整章重写（会丢内容、还可能再短），
+    #    而是挑出最薄的几个小节各补 1～2 段。
+    _TOPPABLE_MIN_RATIO = 0.98        # 达到下限的 98% 即视为达标（零头不追）
+    _MAX_TOPUP_ROUNDS = 2             # 最多补两轮（每轮一次 LLM 调用）
+
+    @staticmethod
+    def _plain_char_count(md: str) -> int:
+        """**去掉 markdown 记法**后的正文字数。
+
+        🔴 不能直接数 `len(md.replace("\\n","").replace(" ",""))` —— 那样把
+           `##`、`**`、表格的 `|` 与 `---` 全算成了字数。实测第3章按带记法数
+           是 1636 字（过线），落进 docx 后实际只有 1312 字（**不到下限**）。
+           判「够不够长」要看读者看到多少字，不是源文件多少字符。
+        """
+        s = re.sub(r'^\s*\|[\s\-:|]+\|\s*$', '', md, flags=re.MULTILINE)  # 表格分隔行
+        s = re.sub(r'[#*`>|\s]', '', s)
+        return len(s)
+
+    async def _top_up_length(self, content: str, system_prompt: str) -> str:
+        """正文短于本章字数下限时，定向续写补齐；补不动就原样返回。"""
+        try:
+            from app.agent import chapter_catalog
+            if not chapter_catalog.tops_up_short_chapters(self.domain):
+                return content
+            min_words = int(chapter_catalog.target_words(
+                self.domain, self.chapter_number)[0] or 0)
+        except Exception:
+            return content
+        if min_words <= 0 or not self._llm:
+            return content
+
+        for _round in range(self._MAX_TOPUP_ROUNDS):
+            wc = self._plain_char_count(content)
+            if wc >= min_words * self._TOPPABLE_MIN_RATIO:
+                break
+            _short = self._thinnest_sections(content, limit=3)
+            try:
+                await self._emit_thinking(
+                    f"第{self.chapter_number}章 {wc} 字 < 下限 {min_words} 字，"
+                    f"定向续写补足（第{_round + 1}轮）…")
+                _prompt = (
+                    f"以下是你刚写完的第{self.chapter_number}章「{self.chapter_title}」正文，"
+                    f"当前 {wc} 字，本章要求不少于 {min_words} 字。\n\n"
+                    f"请**只补充内容**：不要重写整章、不要复述已有段落、不要新增小节、"
+                    f"不要改动已有小节的标题与顺序。针对下面这些小节的薄弱处，"
+                    f"各补 1～2 段（每段 150～300 字），把论述做深 —— 写具体做法、"
+                    f"数量关系、先后次序、责任主体、依据的规范条款；"
+                    f"不得出现资料里没有的事实与数字。\n\n"
+                    f"严格按下面的格式输出（一个小节一段）：\n\n"
+                    f"[[小节号]]\n（补充的段落…）\n\n"
+                    f"需要补充的小节：{('、'.join(_short) if _short else '全章逐节')}\n\n"
+                    f"=== 正文 ===\n{content}"
+                )
+                _res = await asyncio.wait_for(
+                    self._llm.chat_with_reasoning(
+                        messages=[{"role": "user", "content": _prompt}],
+                        system=system_prompt,
+                        max_tokens=6000,
+                        temperature=0.4,
+                        disable_thinking=True,
+                    ), timeout=600.0)
+                _add = str(_res.get("content") or "").strip()
+            except Exception as _e:
+                logger.warning(f"Ch{self.chapter_number} 续写失败: {type(_e).__name__}: {_e}")
+                break
+            if len(_add) < 100:
+                logger.info(f"[TOPUP] 第{self.chapter_number}章 续写返回过短({len(_add)}字)，放弃")
+                break
+            _new = self._splice_supplements(content, _add)
+            if _new == content:
+                break
+            logger.info(
+                f"[TOPUP] 第{self.chapter_number}章 续写第{_round + 1}轮："
+                f"{self._plain_char_count(content)} → {self._plain_char_count(_new)} 字"
+                f"（下限 {min_words}）")
+            content = _new
+        return content
+
+    @staticmethod
+    def _thinnest_sections(md: str, limit: int = 3) -> List[str]:
+        """按字数列出最薄的几个二级小节号（`4.5` 这种）。取不到返回空表。"""
+        import re as _re
+        heads = list(_re.finditer(r'^##\s+(\d+\.\d+)\s+(\S.*)$', md, flags=_re.MULTILINE))
+        if not heads:
+            return []
+        got = []
+        for k, m in enumerate(heads):
+            end = heads[k + 1].start() if k + 1 < len(heads) else len(md)
+            body = md[m.end():end]
+            got.append((len(body.replace("\n", "").replace(" ", "")), m.group(1)))
+        got.sort()
+        return [n for _n, n in got[:max(1, int(limit))]]
+
+    @staticmethod
+    def _strip_meta_preamble(text: str) -> str:
+        """去掉模型爱加的「好的，以下是…」「=== 补充内容 ===」这类开场白。"""
+        import re as _re
+        _lines = []
+        _seen_body = False
+        for _ln in str(text or "").split("\n"):
+            _s = _ln.strip()
+            if not _seen_body:
+                if (not _s or _s.startswith("好的") or _s.startswith("以下")
+                        or _s.startswith("=== ") or _s.startswith("---")
+                        or _re.match(r'^\*{0,2}(补充内容|续写内容|补充段落)\*{0,2}$', _s)):
+                    continue
+                _seen_body = True
+            _lines.append(_ln)
+        return "\n".join(_lines).strip()
+
+    @staticmethod
+    def _splice_supplements(md: str, addition: str) -> str:
+        """把 `[[小节号]]\\n段落…` 的续写块**并入对应小节的末尾**。
+
+        🔴 模型没按 `[[小节号]]` 格式回复时（实测会发生），**整块挂到章末** ——
+           宁可位置靠后，也不能把补写的内容丢掉（`if not blocks: return md`
+           那种写法等于白花一次 LLM 调用，字数一点没涨）。
+        小节号在本章找不到（写错号 / 本章不按 X.Y 分节）→ 同样落章末。
+        返回未变化时调用方停止续写（防止死循环）。
+        """
+        import re as _re
+        blocks = list(_re.finditer(r'^\[\[\s*([\d.]+)\s*\]\]\s*$', addition, flags=_re.MULTILINE))
+        if not blocks:
+            _tail = ChapterAgentBase._strip_meta_preamble(addition)
+            return (md.rstrip() + "\n\n" + _tail) if _tail else md
+        heads = list(_re.finditer(r'^##\s+(\d+\.\d+)\s+(\S.*)$', md, flags=_re.MULTILINE))
+        tail = ""
+        for k, m in enumerate(blocks):
+            end = blocks[k + 1].start() if k + 1 < len(blocks) else len(addition)
+            seg = addition[m.end():end].strip()
+            if not seg:
+                continue
+            want = m.group(1)
+            h = next((h for h in heads if h.group(1) == want), None)
+            if h is None:
+                tail += "\n\n" + seg
+                continue
+            # 插到「本小节最后一行之后、下一个二级标题之前」
+            nxt = next((n for n in heads if n.start() > h.start()), None)
+            pos = nxt.start() if nxt else len(md)
+            md = md[:pos].rstrip() + "\n\n" + seg + "\n\n" + md[pos:].lstrip()
+            heads = list(_re.finditer(r'^##\s+(\d+\.\d+)\s+(\S.*)$', md, flags=_re.MULTILINE))
+        if tail:
+            md = md.rstrip() + tail
+        return md
 
     # 按参照件模板**通篇无表**的章节（第十一章 分析预测风险源）。
     # 🔴「风险因素初始风险等级表」按模板属**第十二章 表12-4**；第十一章再写一张，

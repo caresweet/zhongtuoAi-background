@@ -447,6 +447,13 @@ class ReportAssembler:
         self._chapter_image_counter = {}  # 🔴 图号统一计数器：章 → 已插入图数
         self._session_state = state  # 🔴 供系统标准表（表3-1/表3-3）渲染读取 survey_analysis
         self._system_rendered_tables = set()  # 🔴 系统渲染的标准表，_fill_table_data 不得覆盖
+        # 🔴 系统补渲表的**完整表题**（复垦第4章分析表）——`_dedup_table_titles`
+        #    对它们**不重编号**：那几张的表号是按样本定的（表4-8/4-11/4-12/4-13），
+        #    重编成 表4-1… 之后与样本对不上（复审的人按样本查表号）。稳评恒为空集。
+        self._system_caption_exact: set = set()
+        # 🔴 已被系统表**占号**的章号→表号（如 4 → {8, 11, 12, 13}）：LLM 手写表
+        #    重编号时跳过这些号，免得占掉样本表号。稳评恒为空字典。
+        self._system_caption_nums: dict = {}
         self._rendered_extracted_tbls = set()  # 🔴 已就地渲染的 PDF 提取表（表1-1/4-1），防重复
         # 🔴 这张计数器必须按次清零：界面走的是**全局单例** `report_assembler`，
         #    不清零的话**本进程内第二份报告**的表号会接着上一份往后排
@@ -1046,11 +1053,20 @@ class ReportAssembler:
                 if t in seen_titles:
                     p.clear()
                     p.text = ''
+                elif t in getattr(self, '_system_caption_exact', ()):
+                    # 🔴 系统补渲表的表号是**按样本定死**的（复垦表4-8/4-11/4-12/4-13），
+                    #    只登记不重编号。稳评该集恒为空 → 本条恒不触发。
+                    seen_titles.add(t)
                 else:
                     seen_titles.add(t)
                     # Renumber: sequential within chapter
                     ch_table_counters[current_ch] = ch_table_counters.get(current_ch, 0) + 1
                     new_num = ch_table_counters[current_ch]
+                    # 🔴 跳过系统表已占的号（复垦表4-8/4-11/4-12/4-13 按样本定死）
+                    _reserved = getattr(self, '_system_caption_nums', {}).get(current_ch, set())
+                    while new_num in _reserved:
+                        new_num += 1
+                    ch_table_counters[current_ch] = new_num
                     # Update table number: 表X-Y or 表X-Y-Z → 表X-new_num
                     new_title = re.sub(r'表\d+[-—]\d+([-—]\d+)?', f'表{current_ch}-{new_num}', t)
                     if new_title != t:
@@ -2361,6 +2377,11 @@ class ReportAssembler:
                 self._pending_section_imgs = {_anchor: list(_imgs_a)}
                 _cim_a[ch_num] = []
 
+        # 🔴 复垦第4章：登记待补渲的分析表（表4-8/4-11/4-12/4-13），
+        #    在小节边界处依次落下。稳评 / 其他章此调用是空操作。
+        if ch_num == 4:
+            self._init_ch4_tables(filled, markdown)
+
         for line in lines:
             s = line.strip()
             # 🔴 第8章子项到点插照片：认出「N.现场公示/实地勘察/走访/座谈会」时，
@@ -2552,6 +2573,7 @@ class ReportAssembler:
             if m:
                 heading_text = re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1))
                 self._maybe_flush_map_image(doc, heading_text, ch_num)  # 🔴 ch1 图1-1 插在 1.5 之后
+                self._flush_ch4_tables(doc, heading_text)   # 🔴 复垦表4-x 在小节边界落位
                 self._cur_section_name = heading_text.strip()
                 llm_invented_patterns = [
                     r'^(合法性|合理性|可行性|可控性)[（(]得分[：:]\s*\d+',
@@ -2621,6 +2643,10 @@ class ReportAssembler:
         #    问卷统计表仍必须落进报告 —— 宁可位置略靠后，也不能整张缺失。
         if ch_num == 9:
             self._ensure_ch9_survey_tables(doc)
+
+        # 🔴 第4章章末兜底：没等到后续小节的分析表在此落下（复垦；稳评空操作）
+        if ch_num == 4:
+            self._flush_ch4_tables_end(doc)
 
         # 🔴 固定表格 auto-inject 已移除——表格由章节 agent 根据实际数据动态设计
         # （用 markdown 语法写，有数据才写），不再由系统硬编码渲染固定表格。
@@ -3173,6 +3199,90 @@ class ReportAssembler:
         r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
         r.font.size = TABLE_SIZE
         r.bold = bold
+
+    # ── 复垦第4章：系统补渲的分析表（表4-8/4-11/4-12/4-13）────────────────
+    #    样本第4章有 13 张表，我们只渲染 3 张 → 这是「134 页 vs 67 页」的一处主因。
+    #    其中四张可由「勘测定界地类 + 规范标准值」确定性推导（见
+    #    `reclamation_ch4_tables`），落点按小节号（4.4 / 4.5 / 4.7）。
+    #    装配器在新小节标题出现时把**归属更早小节**的表先落下去，章末兜底其余。
+
+    def _init_ch4_tables(self, filled, markdown: str = "") -> None:
+        """登记第4章待补渲的分析表；模型已自己写了同题表的，不重复补。
+
+        🔴 去重按**表题关键词**：模型偶尔会自己写一张「复垦前后结构对比表」，
+           我们再补一张就是两张同题表（`_dedup_duplicate_tables` 只删逐字重复的）。
+        """
+        self._ch4_pending: list = []
+        from app.agent.chapter_catalog import has_analysis_tables_in_body
+        if not has_analysis_tables_in_body(self._domain):
+            return
+        try:
+            from app.services.reclamation_ch4_tables import build_ch4_tables
+            _md = str(markdown or "")
+            _KEY_OF = {"表4-8": ("等级标准", "限制因素"),
+                       "表4-11": ("表土资源平衡", "表土平衡"),
+                       "表4-12": ("水资源分析", "水资源平衡"),
+                       "表4-13": ("复垦前复垦后", "复垦前后结构", "结构对比")}
+            _built = build_ch4_tables(filled or getattr(self, '_filled', None) or {})
+            _kept = []
+            for _sec, _tbl in _built:
+                _cap = _tbl.get("caption", "")
+                _keys = next((v for k, v in _KEY_OF.items() if k in _cap), ())
+                if any(k in _md for k in _keys):
+                    logger.info(f"[表4-x] 模型已写同题表，跳过补渲：{_cap}")
+                    continue
+                _kept.append((_sec, _tbl))
+            self._ch4_pending = _kept
+            # 🔴 这几张的表号按样本定死（表4-8/4-11/4-12/4-13）——登记其完整表题，
+            #    `_dedup_table_titles` 不重编号（重编成 表4-1… 就与样本对不上了）。
+            self._system_caption_exact = {t.get("caption", "") for _, t in _kept}
+            _nums: set = set()
+            for _cap in self._system_caption_exact:
+                _m = re.match(r'^表\s*(\d+)\s*[-—]\s*(\d+)', str(_cap))
+                if _m:
+                    _nums.add((int(_m.group(1)), int(_m.group(2))))
+            self._system_caption_nums = {}
+            for _c, _n in _nums:
+                self._system_caption_nums.setdefault(_c, set()).add(_n)
+            if _kept:
+                logger.info(f"[表4-x] 第4章待补渲分析表 {len(_kept)} 张："
+                            f"{[t.get('caption','')[:9] for _, t in _kept]}")
+        except Exception as e:
+            logger.warning(f"[表4-x] 第4章分析表准备失败（不影响出报告）: {e}")
+
+    def _flush_ch4_tables(self, doc, heading_text: str) -> None:
+        """遇到新的 `## 4.N` 小节时，把**归属更早小节**的分析表先落下去。"""
+        pending = getattr(self, "_ch4_pending", None)
+        if not pending:
+            return
+        m = re.match(r'^\s*(\d+)\s*[.．]\s*(\d+)', str(heading_text or ""))
+        if not m:
+            return
+        try:
+            cur = float(f"{m.group(1)}.{m.group(2)}")
+        except Exception:
+            return
+        keep = []
+        for sec, tbl in pending:
+            try:
+                _s = float(sec)
+            except Exception:
+                _s = 0.0
+            (self._render_ch4_table(doc, tbl) if _s < cur else keep.append((sec, tbl)))
+        self._ch4_pending = keep
+
+    def _flush_ch4_tables_end(self, doc) -> None:
+        """章末兜底：没等到后续小节的分析表（含按 `###` 分节、或小节缺失的章）在此落下。"""
+        for _sec, tbl in getattr(self, "_ch4_pending", []) or []:
+            self._render_ch4_table(doc, tbl)
+        self._ch4_pending = []
+
+    def _render_ch4_table(self, doc, tbl: dict) -> None:
+        """引导语 + 表格（表题由 `_render_table_from_dict` 印在表格上方）。"""
+        _lead = str(tbl.get("lead") or "")
+        if _lead:
+            self._add_para(doc, _lead, indent=True)
+        self._render_table_from_dict(doc, tbl, caption=tbl.get("caption", ""))
 
     def _render_reclamation_system_table(self, doc, caption, ch_num) -> bool:
         """复垦的**系统渲染表**（按样本逐表核对，不让 LLM 自己编）。

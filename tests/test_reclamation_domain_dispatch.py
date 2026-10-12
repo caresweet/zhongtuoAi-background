@@ -962,3 +962,159 @@ def test_report_form_absent_for_stability(tmp_path):
                          {4: {"markdown": "# 第4章\n\n## 4.1 合法性分析\n\nB"}},
                          {"project_name": "测试稳评项目"})
     assert "土地复垦方案报告表" not in text
+
+
+# ════════════════════════════════════════════════════════════
+# D. 第4章补渲的分析表（表4-8/4-11/4-12/4-13）—— 确定性，逐格回验样本
+# ════════════════════════════════════════════════════════════
+
+_CH4_MD = ("# 土地复垦方向可行性分析\n\n"
+           "## 4.4 土地复垦适宜性评价\n\n本节论述适宜性。\n\n"
+           "## 4.5 水土资源平衡分析\n\n本节论述水土资源。\n\n"
+           "## 4.7 复垦的目标任务\n\n本节论述目标任务。\n")
+
+_CH4_FILLED = {
+    "project_name": "测试复垦项目", "area_m2": 8070.0,
+    "land_classification": {"合计_m2": 8070.0, "rows": [
+        {"一级地类": "耕地（01）", "二级地类": "水田（0101）", "面积_m2": 478.0},
+        {"一级地类": "水域及水利设施用地（11）", "二级地类": "沟渠（1107）", "面积_m2": 74.0},
+        {"一级地类": "林地（03）", "二级地类": "其他林地（0307）", "面积_m2": 2211.0},
+        {"一级地类": "住宅用地（07）", "二级地类": "农村宅基地（0702）", "面积_m2": 2580.0},
+        {"一级地类": "交通运输用地（10）", "二级地类": "公路用地（1003）", "面积_m2": 2727.0}]},
+}
+
+
+def test_ch4_analysis_tables_render(tmp_path):
+    """第4章补渲四张分析表（样本 13 张表里可确定性推导的那四张）。"""
+    doc = _render_doc_full(tmp_path, {4: {"markdown": _CH4_MD}}, _CH4_FILLED)
+    caps = "\n".join(p.text for p in doc.paragraphs)
+    for _c in ("表4-8 土地复垦主导限制因素", "表4-11 临时用地表土资源平衡分析表",
+               "表4-12 临时用地水资源分析表", "表4-13 临时用地复垦前复垦后结构对比表"):
+        assert _c in caps, _c
+
+
+def test_ch4_soil_balance_matches_sample_numbers(tmp_path):
+    """表4-11 逐格回验样本：0.2689 公顷 × 0.2 m = 537.8 m³（剥覆平衡）。"""
+    doc = _render_doc_full(tmp_path, {4: {"markdown": _CH4_MD}}, _CH4_FILLED)
+    tb = _table_by_header(doc, "可供土方量")
+    assert tb is not None
+    rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
+    assert rows[1][1] == "0.2689" and rows[1][2] == "0.2" and rows[1][3] == "537.8"
+    assert rows[2][6] == "537.8"
+    assert rows[3][3] == "537.8" and rows[3][6] == "537.8"
+
+
+def test_ch4_before_after_structure_uses_pct(tmp_path):
+    """表4-13 复垦前/后结构对比：占比按面积算（样本 5.92 / 27.4 / 33.79 …）。"""
+    doc = _render_doc_full(tmp_path, {4: {"markdown": _CH4_MD}}, _CH4_FILLED)
+    tb = _table_by_header(doc, "复垦前面积")
+    rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
+    assert rows[-1][1] == "0.8070" and rows[-1][2] == "100"
+    _pcts = {r[0]: r[2] for r in rows[1:-1]}
+    assert _pcts["耕地（01） 水田（0101）"] == "5.92"
+    assert _pcts["林地（03） 其他林地（0307）"] == "27.4"
+
+
+def test_ch4_tables_land_under_their_sections(tmp_path):
+    """表4-8 落在 4.5 之前、表4-13 落在 4.5 之后 —— 按小节号归位，不是全堆章末。"""
+    doc = _render_doc_full(tmp_path, {4: {"markdown": _CH4_MD}}, _CH4_FILLED)
+    order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    assert any(t.startswith("## 4.5") or t.endswith("水土资源平衡分析") for t in order)
+    i45 = next(i for i, t in enumerate(order) if "水土资源平衡分析" in t)
+    i48 = next(i for i, t in enumerate(order) if t.startswith("表4-8"))
+    i413 = next(i for i, t in enumerate(order) if t.startswith("表4-13"))
+    assert i48 < i45 < i413
+
+
+def test_ch4_tables_skipped_when_model_wrote_its_own(tmp_path):
+    """模型已自己写了同题表 → 系统不重复补（避免两张同题表）。"""
+    md = _CH4_MD + "\n表4-13 临时用地复垦前复垦后结构对比表\n\n| 地类 | 面积 |\n| --- | --- |\n| 耕地 | 0.0478 |\n"
+    doc = _render_doc_full(tmp_path, {4: {"markdown": md}}, _CH4_FILLED)
+    caps = [p.text for p in doc.paragraphs if p.text.startswith("表4-13")]
+    assert len(caps) <= 1, caps
+
+
+def test_ch4_tables_absent_for_stability(tmp_path):
+    """稳评护栏：第4章不补复垦的分析表。"""
+    _out, text = _render(tmp_path, "stability",
+                         {4: {"markdown": "# 第4章\n\n## 4.1 合法性分析\n\nB"}},
+                         {"project_name": "测试稳评项目"})
+    assert "表4-11 临时用地表土资源平衡分析表" not in text
+    assert "表4-13 临时用地复垦前复垦后结构对比表" not in text
+
+
+# ════════════════════════════════════════════════════════════
+# E. 报告表列宽（样本 p57 表格线逐列量取）
+# ════════════════════════════════════════════════════════════
+
+def test_report_form_column_widths_follow_sample(tmp_path):
+    """报告表列宽 = 样本 p57 的表格线（pt 83.1/139.7/187.5/279.1/388.5/453.5/526.3）。
+
+    主表单 5 格：段名 2.00 ｜ 标签 4.92 ｜ 值 3.86 ｜ 标签 2.29 ｜ 值 2.57（cm）。
+    """
+    doc = _render_doc_full(
+        tmp_path, {10: {"markdown": "# 保障措施\n\n正文甲\n"}},
+        {"project_name": "测试复垦项目"})
+    tb = None
+    for t in doc.tables:
+        if "项目概况" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""):
+            tb = t
+            break
+    assert tb is not None, "报告表「项目概况」分节未渲染"
+    _row = tb.rows[3]                     # 法人代表｜联系电话 —— 四个格全分列
+    got = [round(c.width.cm, 2) for c in _row.cells]
+    assert got == [2.00, 4.92, 3.86, 2.29, 2.57], got
+
+
+# ════════════════════════════════════════════════════════════
+# F. 字数不足 → 定向续写（复垦专开）
+# ════════════════════════════════════════════════════════════
+
+def test_splice_supplements_into_named_sections():
+    from app.agent.agents.chapters.chapter_base import ChapterAgentBase
+    md = "## 4.1 甲\n\n正文甲\n\n## 4.5 乙\n\n正文乙\n\n## 4.7 丙\n\n正文丙\n"
+    add = "[[4.5]]\n\n补充乙段。\n\n[[4.1]]\n\n补充甲段。\n"
+    out = ChapterAgentBase._splice_supplements(md, add)
+    assert out.index("补充甲段") < out.index("## 4.5")
+    assert out.index("## 4.5") < out.index("补充乙段") < out.index("## 4.7")
+
+
+def test_splice_supplements_unknown_section_goes_to_tail():
+    from app.agent.agents.chapters.chapter_base import ChapterAgentBase
+    md = "## 4.1 甲\n\n正文甲\n"
+    out = ChapterAgentBase._splice_supplements(md, "[[9.9]]\n\n补充段。\n")
+    assert out.rstrip().endswith("补充段。")
+
+
+def test_top_up_gate_is_reclamation_only():
+    from app.agent import chapter_catalog as cc
+    assert cc.tops_up_short_chapters("reclamation") is True
+    assert cc.tops_up_short_chapters("stability") is False
+    assert cc.has_analysis_tables_in_body("reclamation") is True
+    assert cc.has_analysis_tables_in_body("stability") is False
+
+
+def test_plain_char_count_ignores_markdown_syntax():
+    """字数按**读者看到的字**算：`##`/`**`/表格竖线与分隔行都不计。
+
+    实测第3章带记法 1636 字（过 1500 的下限）、落进 docx 只剩 1312 字（不到）。
+    """
+    from app.agent.agents.chapters.chapter_base import ChapterAgentBase as B
+    md = "## 3.1 项目简介\n\n**本项目**位于项目区。\n\n| 地类 | 面积 |\n| --- | --- |\n| 耕地 | 0.0478 |\n"
+    assert B._plain_char_count(md) == len("3.1项目简介本项目位于项目区。地类面积耕地0.0478")
+    assert B._plain_char_count("## 4.1 甲\n") < len("## 4.1 甲")
+
+
+def test_splice_supplements_without_markers_appends_instead_of_dropping():
+    """模型没按 `[[小节号]]` 回复时，**整块挂章末**，不丢内容。
+
+    早先 `if not blocks: return md` —— 一次 LLM 调用白花，字数一点没涨
+    （实测复垦第4章续写后仍是 4489 字，远低于下限 7500）。
+    """
+    from app.agent.agents.chapters.chapter_base import ChapterAgentBase
+    md = "## 4.5 水土资源平衡分析\n\n正文。\n"
+    add = "好的，以下是补充内容：\n\n这一段是补充的论述，没有小节号标记。\n"
+    out = ChapterAgentBase._splice_supplements(md, add)
+    assert out != md
+    assert "这一段是补充的论述" in out
+    assert "好的，以下是" not in out

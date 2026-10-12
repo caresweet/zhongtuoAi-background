@@ -206,6 +206,29 @@ def injects_audit_comments(domain: str | None) -> bool:
     return domain != _RECLAMATION
 
 
+def has_analysis_tables_in_body(domain: str | None) -> bool:
+    """该域的第4章是否有**装配器补渲的分析表**（`reclamation_ch4_tables`）。
+
+    复垦有：样本第4章 13 张表里，表4-8/4-11/4-12/4-13 四张可由
+    「勘测定界地类 + 规范标准值」确定性推导，交由装配器就地补渲（不经 LLM）。
+    稳评恒 False（它的第4章是「评估过程、方法和依据」，没有这套表）。
+    """
+    return domain == _RECLAMATION
+
+
+def tops_up_short_chapters(domain: str | None) -> bool:
+    """正文短于本章字数下限时，是否**续写补足**（`ChapterAgentBase._top_up_length`）。
+
+    只对复垦开：实测复垦第 4 章只写到下限的 53%（3951 / 7500 字），
+    而模型对提示词里的「必须达到 N 字」并不总是照办 —— 缺的那部分由
+    一次续写补齐（见 `_top_up_length` 的落章说明）。
+
+    🔴 稳评恒 False —— 它的字数由「目标字数 = 模板上限、下限 60%」那套管着，
+       追加续写会改变既有成稿长度（业主明确要求稳评行为不变）。
+    """
+    return domain == _RECLAMATION
+
+
 def front_matter_labels(domain: str | None) -> Dict[str, str]:
     """装配器「前置件 / 固定抬头 / 兜底文案」按域取的中文标注。
 

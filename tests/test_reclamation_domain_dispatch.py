@@ -1181,3 +1181,28 @@ def test_report_form_labels_share_one_font_size(tmp_path):
         _sizes |= set(_re.findall(r'<w:sz w:val="(\d+)"', _tc.xml))
         assert 'w:val="center"' in _tc.xml, "段名格要垂直居中"
     assert _sizes == {"21"}, _sizes        # 21 half-points = 10.5pt，全篇一致
+
+
+def test_damage_table_type_header_spans_two_rows(tmp_path):
+    """「复垦责任范围内土地损毁及占用面积」的**类型表头竖跨两行**（样本 p58）。
+
+    样本里「类型」占两行：右边「面积（公顷）」下面才是 小计 / 已损毁或占用 /
+    拟损毁或占用 三个子列。业主 2026-10-12 点名：「类型标题应该占两行的」。
+    """
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    doc = _DD()
+    render_report_form(doc, collect_form_data(
+        {"project_name": "X", "area_m2": 8070.0}, {"name": "Y"}, []), {})
+    tb = None
+    for t in doc.tables:
+        if "复垦责任范围" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""):
+            tb = t
+            break
+    assert tb is not None
+    _xmls = [tc.xml for tr in tb._tbl.tr_lst for tc in tr.tc_lst]
+    assert any('vMerge w:val="restart"' in x for x in _xmls), "类型表头应有竖向合并起点"
+    assert len([x for x in _xmls if "<w:vMerge/>" in x]) >= 2   # 段名列 + 类型列
+    # 表头第二行只剩三个子列（类型那格已被跨行合并吃掉）
+    _sub = [c.text.strip() for c in tb.rows[1].cells]
+    assert "小计" in _sub and "已损毁或占用" in _sub and "拟损毁或占用" in _sub

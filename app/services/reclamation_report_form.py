@@ -270,13 +270,16 @@ def _merge_equal_runs(table, grid_col: int, first_row: int = 0) -> None:
 def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
                    widths_cm: Sequence[float], *, left_align_long: bool = True,
                    row_h_cm: float = 1.05, merge_run_cols: Sequence[int] = (),
-                   merge_from_row: int = 0):
+                   merge_from_row: int = 0, vmerge_cols: Sequence[int] = ()):
     """一个分节：最左列竖排段名（跨该节所有行），右侧是 `(文本, 跨列数)` 的表单行。
 
     列数 = `len(widths_cm)`（首列是段名列，其余是表单列）。跨列数不足末尾的行，
     最后一格自动撑满。
 
     `merge_run_cols`：需要「合并同类项」的**栅格列号**（如主要编制人员的「单位」列）。
+    `vmerge_cols`：**表头第一行的格要竖向跨到第二行**的栅格列号
+        （样本 p58「类型」就是这样 —— 它占两行，右边「面积（公顷）」下面是
+        小计/已损毁或占用/拟损毁或占用 三个子列）。
     """
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.shared import Cm
@@ -307,9 +310,29 @@ def _section_table(doc, section: str, rows: List[List[Tuple[str, int]]],
             t.cell(ri, ci - 1).merge(t.cell(ri, ncols - 1))
     for _c in merge_run_cols:
         _merge_equal_runs(t, int(_c), first_row=merge_from_row)
+    # 🔴 表头格子竖向跨两行（要在横向合并**与填字之后**做，否则会被后续填充覆盖）
+    _merge_header_rows(t, vmerge_cols)
     _set_row_heights(t, row_h_cm)
     _vertical_label(t.cell(0, 0), section)
     return t
+
+
+def _merge_header_rows(table, grid_cols: Sequence[int]) -> None:
+    """把第 0 行的格向下并到第 1 行（表头跨两行）。"""
+    for _c in grid_cols:
+        _c = int(_c)
+        try:
+            _a, _b = table.cell(0, _c), table.cell(1, _c)
+            if _a._tc is _b._tc:
+                continue
+            _txt = _a.text.strip()
+            _m = _a.merge(_b)
+            # `merge` 会把第二格的段落一并搬进来（哪怕它是空的），清掉多余的段
+            for _p in list(_m.paragraphs)[1:]:
+                _p._p.getparent().remove(_p._p)
+            _fill_cell(_m, _txt)
+        except Exception as e:                       # pragma: no cover
+            logger.warning(f"[报告表] 表头跨行合并失败(列{_c}): {e}")
 
 
 def _kv(lab: str, val: str) -> List[Tuple[str, int]]:
@@ -399,7 +422,7 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     #    · 投资估算费用构成（样本 p60 下节：段名｜序号｜名称｜金额，按 15.64cm 等比缩过）
     W6 = (2.00, 1.69, 3.23, 3.86, 2.29, 2.57)
     W_LAND = (2.00, 3.98, 2.48, 1.87, 1.51, 1.61, 2.20)
-    W_AREA = (2.00, 1.69, 4.76, 3.38, 3.81)
+    W_AREA = (2.00, 3.98, 5.86, 1.61, 2.20)
     W_DAMAGE = (2.00, 1.69, 4.76, 3.38, 1.61, 2.20)
     W_COST = (2.00, 4.53, 4.88, 4.23)
 
@@ -454,7 +477,7 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
         [("损毁", 1), ("压占", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
         [("", 1), ("小计", 1), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
         [("合计", 2), (f"{_ha:.4f}", 1), ("", 1), (f"{_ha:.4f}", 1)],
-    ], W_DAMAGE, row_h_cm=0.9)
+    ], W_DAMAGE, row_h_cm=0.9, vmerge_cols=(1, 2))   # 「类型」竖跨表头两行（样本 p58）
     _section_table(doc, "复垦土地面积", _reclaim_area_rows(d), W_AREA, row_h_cm=0.9)
 
     doc.add_page_break()

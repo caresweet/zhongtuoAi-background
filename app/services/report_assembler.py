@@ -2376,6 +2376,15 @@ class ReportAssembler:
             _cim_a = getattr(self, '_chapter_image_map', {})
             _imgs_a = _cim_a.get(ch_num, [])
             if _imgs_a:
+                # 🔴 复垦第3章的图序按样本：**位置示意图在前**、土地利用现状图在后
+                #    （图3-1 位置、图3-2 现状）。用户上传的图排在系统图前面，
+                #    不排序的话现状图会抢到图3-1。
+                if self._domain == "reclamation":
+                    _imgs_a = sorted(
+                        _imgs_a,
+                        key=lambda it: 0 if "位置示意图" in str(
+                            (it or {}).get("label") or (it or {}).get("name")
+                            or (it or {}).get("original_name") or "") else 1)
                 self._pending_section_imgs = {_anchor: list(_imgs_a)}
                 _cim_a[ch_num] = []
 

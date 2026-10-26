@@ -255,6 +255,35 @@ def _font(size: int):
     return f
 
 
+def _wide_bbox(lonlat: Sequence[Tuple[float, float]],
+               target_ar: float = 4.0 / 3.0,
+               pad: float = 0.0006) -> List[Tuple[float, float]]:
+    """把经纬度外接框撑成**横版** `target_ar`，返回四个角点（只扩、不裁）。
+
+    用途：`fetch_basemap` 的瓦片范围是按传入点的外接框算的。南北向长条地块
+    只按本身范围取图只有 3 列瓦片，横版根本补不出来 —— 先把外接框撑成 4:3
+    再取图，画布才有足够宽度。
+    """
+    if not lonlat:
+        return []
+    lons = [p[0] for p in lonlat]
+    lats = [p[1] for p in lonlat]
+    lon0, lon1 = min(lons) - pad, max(lons) + pad
+    lat0, lat1 = min(lats) - pad, max(lats) + pad
+    m_lon = 111320.0 * math.cos(math.radians((lat0 + lat1) / 2.0))
+    m_lat = 110540.0
+    w_m, h_m = (lon1 - lon0) * m_lon, (lat1 - lat0) * m_lat
+    if w_m <= 0 or h_m <= 0:
+        return list(lonlat)
+    if w_m / h_m < target_ar:                    # 太窄 → 左右扩
+        extra = (h_m * target_ar - w_m) / m_lon / 2.0
+        lon0, lon1 = lon0 - extra, lon1 + extra
+    else:                                        # 太扁 → 上下扩
+        extra = (w_m / target_ar - h_m) / m_lat / 2.0
+        lat0, lat1 = lat0 - extra, lat1 + extra
+    return [(lon0, lat0), (lon1, lat0), (lon1, lat1), (lon0, lat1)]
+
+
 def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
                            cache_dir: str, title: str = "工程位置示意图") -> bool:
     """出「工程位置示意图」：卫星影像 + 红线 + 比例尺 + 指北针 + 面积标注。
@@ -265,7 +294,10 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     lonlat = points_to_lonlat(points)
     if len(lonlat) < 3:
         return False
-    got = fetch_basemap(lonlat, cache_dir)
+    # 🔴 先按 4:3 把**取图范围**左右撑开再抓瓦片：地块南北向长条时，只按本身范围
+    #    抓出来的画布只有 3 列瓦片（768px 宽 × 1792px 高），后面无论怎么补白都凑不出
+    #    横版 —— 实测出图 768×1761，插进正文就是一张竖条。
+    got = fetch_basemap(_wide_bbox(lonlat), cache_dir)
     if got is None:
         return False
     canvas, tx0, ty0, z = got

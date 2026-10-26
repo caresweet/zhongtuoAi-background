@@ -205,12 +205,61 @@ def _draw_location_map(polygons: List[dict], out_png: Path, title: str) -> bool:
     return True
 
 
+def _draw_area_chart(filled: dict, out_png: Path, title: str) -> bool:
+    """画「各类土地面积关系图」：按勘测定界地类出**横版柱状图**（第1章用）。
+
+    数与第4章 表4-4 / 第1章 表1-1 同源（`land_classification`），不另算。
+    样本里只有「污水处理厂」那份有这张图（图1-1），属可选图；取不到地类就不出。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lc = (filled or {}).get("land_classification") or {}
+    rows = [r for r in (lc.get("rows") or []) if isinstance(r, dict)]
+    if not rows:
+        return False
+    _labels, _areas = [], []
+    for r in rows:
+        try:
+            _m2 = float(str(r.get("面积_m2") or 0).replace(",", ""))
+        except Exception:
+            _m2 = 0.0
+        if _m2 <= 0:
+            continue
+        _n = f"{r.get('一级地类') or ''}" + (f"\n{r.get('二级地类')}" if r.get("二级地类") else "")
+        _labels.append(_n)
+        _areas.append(_m2 / 10000.0)
+    if not _areas:
+        return False
+
+    _init_fonts()
+    fig, ax = plt.subplots(figsize=(10.0, 5.6))       # 🔴 横版：宽 > 高
+    bars = ax.bar(range(len(_areas)), _areas, color="#2E75B6", width=0.62)
+    ax.set_xticks(range(len(_labels)))
+    ax.set_xticklabels(_labels, fontsize=11)
+    ax.set_ylabel("面积（公顷）", fontsize=11)
+    ax.set_title(title, fontsize=15)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    for b, v in zip(bars, _areas):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}",
+                ha="center", va="bottom", fontsize=10)
+    ax.set_ylim(0, max(_areas) * 1.18)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200)
+    plt.close(fig)
+    return True
+
+
 # ═══════════════════════════════════════════════════════════════
 # 对外入口
 # ═══════════════════════════════════════════════════════════════
 
 def ensure_reclamation_figures(materials: Sequence[dict],
                                storage_dir: str,
+                               filled: Optional[dict] = None,
                                ) -> List[Dict[str, str]]:
     """从材料生成复垦正文配图 → `[{"path", "original_name"}]`（找不到几何就返回空表）。
 
@@ -219,10 +268,22 @@ def ensure_reclamation_figures(materials: Sequence[dict],
        **文件名必须等于 `original_name`**，否则 `os.path.exists` 全不成立、图被丢弃。
        图名里带「位置示意图」是**绑定第3章的关键词**（见 `RECLAMATION_IMAGE_SPECS[3]`）。
     """
+    out: List[Dict[str, str]] = []
     polys = collect_survey_polygons(materials)
-    if not polys:
-        return []
     _init_fonts()
+
+    # ① 第1章「各类土地面积关系图」（有地类数据就出，与界址点无关）
+    _chart = "图1-1 各类土地面积关系图.jpg"
+    try:
+        if _draw_area_chart(filled or {}, Path(storage_dir) / "images" / _chart,
+                            "各类土地面积关系图"):
+            out.append({"path": f"images/{_chart}", "original_name": _chart})
+            logger.info(f"[复垦图件] 已生成 {_chart}")
+    except Exception as e:                       # pragma: no cover - 绘图失败不阻断
+        logger.warning(f"[复垦图件] 面积关系图生成失败: {e}")
+
+    if not polys:
+        return out
     # 扩展名跟内容走：卫星底图出的是 JPEG；两条路径都用同一个名字，
     # 保证「位置示意图」这个**绑定第3章的关键词**在图名里（见模块头注释）。
     name = "图3-1 工程位置示意图.jpg"
@@ -245,12 +306,12 @@ def ensure_reclamation_figures(materials: Sequence[dict],
     if not _ok:
         try:
             if not _draw_location_map(polys, png, "工程位置示意图"):
-                return []
+                return out
             logger.info("[复垦图件] 卫星底图不可用，已退回几何示意图")
         except Exception as e:                   # pragma: no cover - 绘图失败不阻断出报告
             logger.warning(f"[复垦图件] 位置示意图生成失败: {e}")
-            return []
+            return out
 
     logger.info(f"[复垦图件] 已生成 {name}（{len(polys)} 个界址点多边形，"
                 f"复垦范围 {polys[0]['area_m2']:.2f} ㎡）")
-    return [{"path": f"images/{name}", "original_name": name}]
+    return out + [{"path": f"images/{name}", "original_name": name}]

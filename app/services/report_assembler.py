@@ -4272,17 +4272,26 @@ class ReportAssembler:
                 use_path = tmp_path
 
             aspect = orig_w / orig_h if orig_h > 0 else 1.0
-            # 🔴 图片尺寸规范（淮安市稳评格式，单位cm）：按图注匹配
-            spec_size = self._match_image_size(clean_caption)
+            # 🔴 复垦**正文**插图一律按「横版小图」收口（宽 ≤12.5cm、高 ≤9.5cm）。
+            #    业主 2026-10-26：「3-1 的项目地理位置示意图 尺寸不要太大，而且
+            #    还是竖向排列的，放在文章中不合适」。两处病根：
+            #      ① `IMAGE_SIZE_SPECS` 是**稳评案卷**的尺寸表（位置示意图 10.91×15.5
+            #         竖版），套到复垦正文上就是一大张竖图 —— 复垦不查这张表；
+            #      ② 竖版源图按宽度铺满版心后高度超一页。
+            #    附件页（`numbered=False`，整页扫描件）不受此限，仍按版心宽度。
+            _body_fig = bool(numbered) and self._domain == "reclamation"
+            spec_size = None if _body_fig else self._match_image_size(clean_caption)
             if spec_size:
                 target_w = Cm(spec_size[0])
                 target_h = Cm(spec_size[1])
             else:
                 # 参照件：正文/附件单张图宽 15cm（版心 14.66cm，故取 14.6cm 收口）
-                target_w = min(max_width, Cm(MAX_IMAGE_W_CM))
+                _cap_w = Cm(12.5) if _body_fig else min(max_width, Cm(MAX_IMAGE_W_CM))
+                _cap_h = Cm(9.5) if _body_fig else max_height
+                target_w = _cap_w
                 target_h = target_w / aspect
-                if target_h > max_height:
-                    target_h = max_height
+                if target_h > _cap_h:
+                    target_h = _cap_h
                     target_w = target_h * aspect
 
             run_img = p_img.add_run()
@@ -5406,7 +5415,13 @@ class ReportAssembler:
             if _p:
                 _pairs.append((_p, _l))
         if _pairs:
-            self._add_image_row_pair(doc, _pairs)
+            if self._domain == "reclamation":
+                # 🔴 复垦正文是**地图类**（位置图/现状图/勘测定界图），两张并排各 7cm
+                #    看不清 —— 逐张独占一行（宽 12.5cm）。照片类才需要并排。
+                for _p, _l in _pairs:
+                    self._add_image(doc, _p, _l or "", numbered=True)
+            else:
+                self._add_image_row_pair(doc, _pairs)
 
     def _next_caption(self, label):
         """按当前章生成「图X-N 描述」图注（章内序号自动递增）。"""
@@ -5454,10 +5469,14 @@ class ReportAssembler:
                 _fd, tmp = _tmp.mkstemp(suffix='.jpg'); os.close(_fd)
                 im.save(tmp, 'JPEG', quality=80, optimize=True)
             # 旋转后高度可能很大 → 按「可用高度」再约束一次宽
-            w = (max_w_cm if len(pairs) > 1 else 14.0)
+            # 🔴 复垦正文图按小图收口（宽 ≤12.5cm、高 ≤9.5cm）—— 与 `_add_image`
+            #    同一口径；附件页不走这里（附件用的是 `_add_image`）。
+            _body = self._domain == "reclamation"
+            _max_h = 9.5 if _body else 19.0
+            w = (max_w_cm if len(pairs) > 1 else (12.5 if _body else 14.0))
             h = (w * oh / ow) if ow else w
-            if h > 19.0 and oh:            # A4 纵向可用高度约 24cm，留出图注位置
-                h = 19.0
+            if h > _max_h and oh:
+                h = _max_h
                 w = h * ow / oh
             return tmp, w, h
 
@@ -5662,7 +5681,8 @@ class ReportAssembler:
                 from app.config import settings as _settings
                 from app.services.reclamation_figures import ensure_reclamation_figures
                 _gen = ensure_reclamation_figures(
-                    state.get("_project_materials") or [], _settings.STORAGE_DIR)
+                    state.get("_project_materials") or [], _settings.STORAGE_DIR,
+                    filled=state.get("filled_data") or {})
                 uploaded_items += _gen
                 # 🔴 系统生成的图**不参与「竖版地图转 90° 横放」那条启发式**
                 #    （那是给竖版扫描件用的；我们的图3-1 是真南北向竖图）——见 `_prep`。

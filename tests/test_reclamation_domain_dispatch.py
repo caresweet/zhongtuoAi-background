@@ -319,7 +319,7 @@ def test_body_image_anchor_per_domain():
         assert cat.body_image_anchor(None, ch) is None
     assert cat.body_image_anchor("reclamation", 3) == "项目简介"
     assert cat.body_image_anchor("reclamation", 4) == "土地损毁分析与评定"
-    assert cat.body_image_anchor("reclamation", 1) is None
+    assert cat.body_image_anchor("reclamation", 1) == "复垦方案摘要"   # 图1-1 面积关系图
     assert cat.body_image_anchor("reclamation", 10) is None
 
 
@@ -1526,3 +1526,61 @@ def test_budget_estimate_roundtrips_through_dict():
     back = BudgetEstimate.from_dict(d)
     assert back.cost_rows == est.cost_rows
     assert back.dynamic_total == 8.35
+
+
+# ════════════════════════════════════════════════════════════
+# K. 正文配图：尺寸收口（业主 2026-10-26）
+# ════════════════════════════════════════════════════════════
+
+def test_reclamation_body_image_is_capped(tmp_path):
+    """复垦正文图 ≤12.5×9.5cm —— 竖版源图不许铺成整页竖图。
+
+    实测病根：`IMAGE_SIZE_SPECS`（稳评案卷表）里「位置示意图」是 10.91×15.5 **竖版**，
+    套到复垦正文就是一大张竖图；竖版源图按宽度铺满又会高过一页。
+    """
+    from docx import Document
+    from docx.oxml.ns import qn
+    from PIL import Image as PILImage
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    a._domain = "reclamation"
+    a._current_chapter = 3
+    a._chapter_image_counter = {}
+    a._inserted_images = set()
+    p = tmp_path / "tall.jpg"
+    PILImage.new("RGB", (600, 1600), "white").save(p)   # 竖版 0.375
+    doc = Document()
+    a._add_image(doc, str(p), "工程位置示意图")
+    ext = next(doc.element.body.iter(qn('wp:extent')))
+    w, h = int(ext.get('cx')) / 360000, int(ext.get('cy')) / 360000
+    assert w <= 12.6 and h <= 9.6, (w, h)
+    assert abs(w / h - 600 / 1600) < 0.02          # 等比，没被拉变形
+
+
+def test_appendix_image_keeps_full_width(tmp_path):
+    """附件页（`numbered=False` 的整页扫描件）不受正文小图限制，仍按版心宽度。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from PIL import Image as PILImage
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    a._domain = "reclamation"
+    a._chapter_image_counter = {}
+    a._inserted_images = set()
+    p = tmp_path / "page.jpg"
+    PILImage.new("RGB", (600, 1600), "white").save(p)
+    doc = Document()
+    a._add_image(doc, str(p), "", numbered=False)
+    ext = next(doc.element.body.iter(qn('wp:extent')))
+    assert int(ext.get('cy')) / 360000 > 10, "附件页应保持大图"
+
+
+def test_area_chart_is_landscape(tmp_path):
+    """第1章「各类土地面积关系图」：横版出图（宽 > 高），数据取自地类面积。"""
+    from PIL import Image as PILImage
+    from app.services.reclamation_figures import _draw_area_chart
+    out = tmp_path / "chart.jpg"
+    ok = _draw_area_chart({"land_classification": _MY_LC}, out, "各类土地面积关系图")
+    assert ok is True
+    with PILImage.open(out) as im:
+        assert im.width > im.height * 1.3

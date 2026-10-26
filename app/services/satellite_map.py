@@ -276,9 +276,24 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     xs = [p[0] for p in px]; ys = [p[1] for p in px]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
     m = int(max(60, span * 0.45))
-    box = (max(0, int(min(xs)) - m), max(0, int(min(ys)) - m),
-           min(canvas.width, int(max(xs)) + m), min(canvas.height, int(max(ys)) + m))
-    img = canvas.crop(box)
+    box = [max(0, int(min(xs)) - m), max(0, int(min(ys)) - m),
+           min(canvas.width, int(max(xs)) + m), min(canvas.height, int(max(ys)) + m)]
+    # 🔴 裁出来的必须是**横版 4:3**：地块南北向时原样裁会给出一张竖图
+    #    （实测 768×1761，插进正文就是一整页竖排，业主直接说「放在文章中不合适」）。
+    #    只**扩大短边**、绝不裁掉内容；扩到画布边界还不够就让底图循环平铺。
+    _AR = 4.0 / 3.0
+    w, h = box[2] - box[0], box[3] - box[1]
+    if w / h < _AR:                              # 太窄 → 左右扩
+        need = int(round(h * _AR))
+        extra = need - w
+        left = max(0, box[0] - extra // 2)
+        box[0], box[2] = left, min(canvas.width, left + need)
+    elif w / h > _AR:                            # 太扁 → 上下扩
+        need = int(round(w / _AR))
+        extra = need - h
+        top = max(0, box[1] - extra // 2)
+        box[1], box[3] = top, min(canvas.height, top + need)
+    img = canvas.crop(tuple(box))
     px = [(x - box[0], y - box[1]) for x, y in px]
 
     dr = ImageDraw.Draw(img)

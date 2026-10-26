@@ -1177,6 +1177,7 @@ def chapter_image_specs(domain: str | None) -> Dict[int, List[Dict[str, Any]]]:
 #    复垦按两份样本的图位定：第3章的「位置示意图」落在 3.1 项目简介 之后；
 #    第4章的「现场影像资料及临时用地平面布置图」落在 4.1 土地损毁分析与评定 之后。
 _RECLAMATION_BODY_IMAGE_ANCHOR: Dict[int, str] = {
+    1: "复垦方案摘要",
     3: "项目简介",
     4: "土地损毁分析与评定",
 }

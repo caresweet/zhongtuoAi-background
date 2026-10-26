@@ -366,6 +366,16 @@ class BudgetEstimate:
                  _f(self.dynamic_total) if self.dynamic_total else ""]
         return [(no, name, v) for (no, name), v in zip(COST_ROW_NAMES, _vals)]
 
+    def to_dict(self) -> dict:
+        """存进 `filled_data` 用 —— 那份要 JSON 序列化落库，dataclass 不行。"""
+        from dataclasses import asdict
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BudgetEstimate":
+        return cls(**{k: v for k, v in (d or {}).items()
+                      if k in cls.__dataclass_fields__})
+
 
 def to_estimate(data: dict) -> Optional[BudgetEstimate]:
     """接口返回 → `BudgetEstimate`（任何一项缺失都**按缺失处理**，不补 0 冒充）。"""

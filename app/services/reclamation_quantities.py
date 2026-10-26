@@ -273,7 +273,7 @@ def enrich_filled_data(filled: dict, *, endpoint: str = "") -> bool:
             rows, area_ha=_ha, service_months=float(_m.group(0)) if _m else 0.0,
             project_name=str(filled.get("project_name") or ""), endpoint=endpoint)
         if est:
-            filled[BUDGET_KEY] = est
+            filled[BUDGET_KEY] = est.to_dict()      # 落库要 JSON，存 dict 不存 dataclass
             filled["construction_cost"] = f"{est.construction:.2f} 万元"
             filled["other_cost"] = f"{est.other:.2f} 万元"
             filled["dynamic_total_investment"] = (

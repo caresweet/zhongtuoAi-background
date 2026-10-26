@@ -3316,6 +3316,12 @@ class ReportAssembler:
             return getattr(self, "_budget_est", None)
         self._budget_done = True
         self._budget_est = (getattr(self, "_filled", None) or {}).get("_budget_estimate")
+        if isinstance(self._budget_est, dict):          # 预计算那份落库时是 dict
+            try:
+                from app.services.reclamation_budget_bridge import BudgetEstimate
+                self._budget_est = BudgetEstimate.from_dict(self._budget_est)
+            except Exception:
+                self._budget_est = None
         if self._budget_est is not None:
             return self._budget_est
         from app.agent.chapter_catalog import uses_budget_bridge

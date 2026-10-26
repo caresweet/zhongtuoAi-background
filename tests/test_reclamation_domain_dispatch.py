@@ -1514,3 +1514,14 @@ def test_ch6_quantity_table_is_system_rendered(tmp_path):
     assert _qty["表土剥离"] == "5.378"        # 系统算的
     assert "999.9" not in "\n".join("|".join(r) for r in rows)   # 模型那张已丢
     assert any(r[1] == "土壤培肥（有机肥）" for r in rows)
+
+
+def test_budget_estimate_roundtrips_through_dict():
+    """预计算那份要存进 filled_data（JSON 落库）→ dataclass 必须能转 dict 再转回来。"""
+    from app.services.reclamation_budget_bridge import BudgetEstimate
+    est = _fake_estimate()
+    d = est.to_dict()
+    assert isinstance(d, dict) and d["construction"] == 5.76
+    back = BudgetEstimate.from_dict(d)
+    assert back.cost_rows == est.cost_rows
+    assert back.dynamic_total == 8.35

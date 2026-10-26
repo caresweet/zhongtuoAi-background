@@ -1252,3 +1252,182 @@ def test_reclaim_area_rate_spans_two_columns(tmp_path):
     assert _seen[1].text.strip() == "土地复垦率（%）"
     assert _seen[2].text.strip() == "100"
     assert round(_seen[2].width.cm, 2) == round(1.61 + 2.20, 2), _seen[2].width.cm
+
+
+# ════════════════════════════════════════════════════════════
+# I. 投资估算取数桥（budget-maker / 127.0.0.1:8765）
+# ════════════════════════════════════════════════════════════
+
+_QTY_MD = ("# 土地复垦工程设计及工程量测算\n\n## 6.2 工程量测算\n\n"
+           "表6-1 项目复垦工程量汇总表\n\n"
+           "| 序号 | 工程或费用名称 | 单位 | 数量 |\n"
+           "| --- | --- | --- | --- |\n"
+           "| 一 | 土壤重构工程 | — | — |\n"
+           "| （一） | 清理工程 | — | — |\n"
+           "| 1 | 表土剥离 | 100m³ | 1.4 |\n"
+           "| 2 | 混凝土面层拆除 | 100m³ | 2.4 |\n"
+           "| （二） | 生物化学工程 | — | — |\n"
+           "| 1 | 土壤培肥（有机肥） | 吨 | 0.7 |\n"
+           "| 合计 | — | — | — |\n")
+
+_CH7_MD = ("# 土地复垦投资估算\n\n## 7.1 估算说明\n\n### 7.1.1 编制依据\n\n依据甲。\n\n"
+           "## 7.2 估算成果\n\n### 7.2.1 工程施工费\n\n如下表：\n\n"
+           "### 7.2.2 设备购置费\n\n本项目不涉及。\n\n"
+           "### 7.2.6 技术经济指标\n\n静态与动态总投资如下。\n")
+
+
+def _fake_estimate():
+    """桩：与真桥 `POST /api/ext/report-values` 的输出同形（照 5.76/7.95/8.35 实测）。"""
+    from app.services.reclamation_budget_bridge import BudgetEstimate
+    return BudgetEstimate(
+        construction=5.76, equipment=0.0, other=0.94, monitor_care=0.69,
+        reserve=0.96, static_total=7.95, dynamic_total=8.35, per_mu=0.6898,
+        source="2026-10-26T09:20:00",
+        items=[{"name": "表土剥离 — 74kW III类土", "unit": "100m³", "qty": 1.4,
+                "price": 586.94, "amount_wan": 0.08},
+               {"name": "混凝土面层拆除", "unit": "100m³", "qty": 2.4,
+                "price": 14755.59, "amount_wan": 3.54}],
+        direct_items=[{"name": "土壤培肥（有机肥）", "unit": "吨", "qty": 0.7,
+                       "price": 2500.0, "amount_wan": 0.175}])
+
+
+def test_budget_bridge_seam_is_reclamation_only():
+    """取数桥只对复垦开；稳评/投标恒 False（它们的造价不走这套定额）。"""
+    assert cat.uses_budget_bridge("reclamation") is True
+    assert cat.uses_budget_bridge("stability") is False
+    assert cat.uses_budget_bridge(None) is False
+
+
+def test_parse_quantity_rows_from_ch6_table():
+    """第6章 表6-1 → 工程量行（分部名带上、合计/空行丢掉）。"""
+    from app.services.reclamation_budget_bridge import parse_quantity_rows
+    rows = parse_quantity_rows(_QTY_MD)
+    assert [r["name"] for r in rows] == ["表土剥离", "混凝土面层拆除", "土壤培肥（有机肥）"]
+    assert rows[0] == {"section": "清理工程", "name": "表土剥离", "unit": "100m³", "qty": 1.4}
+    assert rows[2]["section"] == "生物化学工程"
+
+
+def test_parse_quantity_rows_returns_empty_when_no_table():
+    from app.services.reclamation_budget_bridge import parse_quantity_rows
+    assert parse_quantity_rows("## 6.2 工程量测算\n\n只有正文，没有表。\n") == []
+
+
+def test_build_payload_maps_quota_and_direct_items():
+    """有定额的换编号送过去；没定额的（有机肥）按样本单价折成「直接计价项」。"""
+    from app.services.reclamation_budget_bridge import build_payload, parse_quantity_rows
+    payload, direct = build_payload(parse_quantity_rows(_QTY_MD), area_ha=0.807,
+                                    project_name="某复垦项目")
+    codes = {it["name"]: it["code"] for it in payload["items"]}
+    assert codes["表土剥离"] == "10374"          # 推土机推土（金湖项目同款）
+    assert codes["混凝土面层拆除"] == "40171"    # 混凝土拆除 风镐 有钢筋
+    assert "土壤培肥（有机肥）" not in codes
+    assert direct and direct[0]["name"] == "土壤培肥（有机肥）"
+    # 0.7 t × 2500 元/t = 1750 元 = 0.175 万元
+    assert payload["extra_engineering_wan"] == 0.175
+    assert payload["area_ha"] == 0.807
+
+
+def test_engineering_table_total_matches_construction():
+    """表7-3 的分项**含直接计价项**，合计必须等于工程施工费（业主会逐行对账）。"""
+    from app.services.reclamation_budget_bridge import engineering_table
+    rows = engineering_table(_fake_estimate())["rows"]
+    assert rows[0][0].startswith("表土剥离")
+    assert any(r[0] == "土壤培肥（有机肥）" for r in rows)
+    _total_row = rows[-1]
+    assert _total_row[0] == "合计"
+    _sum = sum(float(r[4].replace(",", "")) for r in rows[:-1])
+    assert abs(_sum - float(_total_row[4].replace(",", ""))) < 0.005
+
+
+def test_cost_rows_leave_dynamic_blank_when_not_computed():
+    """没给分年投资 → 价差预备费与动态总投资不计，**留空而不是写 0.00**。"""
+    from app.services.reclamation_budget_bridge import BudgetEstimate
+    est = BudgetEstimate(construction=5.76, static_total=7.95, dynamic_total=None)
+    assert est.cost_rows[-1] == ("七", "动态总投资", "")
+
+
+def test_bridge_unreachable_returns_none():
+    """桥连不上 → None（报告照常出，金额留空），不抛异常。"""
+    from app.services.reclamation_budget_bridge import (
+        build_payload, fetch_estimate, parse_quantity_rows)
+    payload, _ = build_payload(parse_quantity_rows(_QTY_MD))
+    assert fetch_estimate(payload, endpoint="http://127.0.0.1:1", timeout=1.5) is None
+
+
+def test_ch7_tables_render_from_budget_estimate(tmp_path, monkeypatch):
+    """第7章补 表7-3（工程施工费）与 表7-4（投资估算），表7-3 落在 7.2.2 之前。"""
+    import app.services.reclamation_budget_bridge as bb
+    monkeypatch.setattr(bb, "estimate_for_report", lambda *a, **k: _fake_estimate())
+    doc = _render_doc_full(tmp_path, {6: {"markdown": _QTY_MD},
+                                      7: {"markdown": _CH7_MD}},
+                           {"project_name": "测试复垦项目", "area_m2": 8070.0})
+    order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-3"))
+    i74 = next(i for i, t in enumerate(order) if t.startswith("表7-4"))
+    i722 = next(i for i, t in enumerate(order) if t.startswith("7.2.2"))
+    assert i73 < i722 < i74, (i73, i722, i74)
+    tb3 = _table_by_header(doc, "综合单价")
+    rows = [[c.text.strip() for c in r.cells] for r in tb3.rows]
+    assert rows[0] == ["工程或费用名称", "单位", "工程量", "综合单价（元）", "合计（万元）"]
+    tb4 = _table_by_header(doc, "金额（万元）")
+    rows4 = [[c.text.strip() for c in r.cells] for r in tb4.rows]
+    assert ["六", "静态总投资", "7.95"] in rows4
+    assert ["七", "动态总投资", "8.35"] in rows4
+
+
+def test_ch7_tables_absent_when_bridge_fails(tmp_path, monkeypatch):
+    """桥挂了 → 第7章一张系统表都不补（不拿 0 冒充）。"""
+    import app.services.reclamation_budget_bridge as bb
+    monkeypatch.setattr(bb, "estimate_for_report", lambda *a, **k: None)
+    doc = _render_doc_full(tmp_path, {6: {"markdown": _QTY_MD},
+                                      7: {"markdown": _CH7_MD}},
+                           {"project_name": "测试复垦项目", "area_m2": 8070.0})
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert "表7-3" not in text and "表7-4" not in text
+
+
+def test_ch7_tables_absent_for_stability(tmp_path):
+    """稳评护栏：第7章不补复垦的投资估算表。"""
+    _out, text = _render(tmp_path, "stability",
+                         {7: {"markdown": "# 第七章\n\n## 7.1 概述\n\nB"}},
+                         {"project_name": "测试稳评项目"})
+    assert "表7-3 工程施工费估算表" not in text
+    assert "表7-4 土地复垦投资估算表" not in text
+
+
+def test_report_form_cost_rows_use_budget_estimate(tmp_path, monkeypatch):
+    """报告表「投资估算费用构成」的七行金额来自同一份估算（不再是空表）。"""
+    import app.services.reclamation_budget_bridge as bb
+    monkeypatch.setattr(bb, "estimate_for_report", lambda *a, **k: _fake_estimate())
+    filled = {"project_name": "某复垦项目", "area_m2": 8070.0}
+    doc = _render_doc_full(tmp_path, {6: {"markdown": _QTY_MD},
+                                      8: {"markdown": "# 工作计划\n\n正文甲\n"},
+                                      10: {"markdown": "# 保障措施\n\n正文乙\n"}}, filled)
+    tb = _table_by_header(doc, "费用（万元）")
+
+    def _uniq(row):                       # 竖向合并会把同一格重复吐出来，按 _tc 去重
+        out, seen = [], set()
+        for c in row.cells:
+            if id(c._tc) in seen:
+                continue
+            seen.add(id(c._tc))
+            out.append(c.text.strip())
+        return out
+
+    _by_no = {r[1]: r[3] for r in map(_uniq, tb.rows) if len(r) > 3 and r[1]}
+    assert _by_no["一"] == "5.76"      # 工程措施费 = 工程施工费
+    assert _by_no["六"] == "7.95"      # 静态总投资
+    assert _by_no["七"] == "8.35"      # 动态总投资
+
+
+def test_ch7_tables_flush_on_four_level_headings(tmp_path, monkeypatch):
+    """小节写成 `#### 7.2.2` 时表7-3 也要归位在 7.2.2 之前（实测模型就是这么写的）。"""
+    import app.services.reclamation_budget_bridge as bb
+    monkeypatch.setattr(bb, "estimate_for_report", lambda *a, **k: _fake_estimate())
+    md = _CH7_MD.replace("### 7.2.", "#### 7.2.").replace("### 7.1.", "#### 7.1.")
+    doc = _render_doc_full(tmp_path, {6: {"markdown": _QTY_MD}, 7: {"markdown": md}},
+                           {"project_name": "测试复垦项目", "area_m2": 8070.0})
+    order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-3"))
+    i722 = next(i for i, t in enumerate(order) if t.startswith("7.2.2"))
+    assert i73 < i722, (i73, i722)

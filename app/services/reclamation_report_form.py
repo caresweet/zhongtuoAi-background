@@ -22,7 +22,7 @@
 | 编制单位名称/法人代表/资质/联系人 | 公司档案（`_company`） |
 | 主要编制人员 | 人员库（`personnel_for`） |
 | 复垦区土地利用现状 / 复垦土地面积 | `filled_data["land_classification"]`（勘测定界地类，视觉读出） |
-| 投资估算费用构成 | `reclamation_cost_model`（样本回验过） |
+| 投资估算费用构成 | `reclamation_budget_bridge` → budget-maker（127.0.0.1:8765）按第6章工程量现算 |
 | 工作计划 / 保障措施 | 第8章、第10章正文（摘录，不另编） |
 
 **抽不到的**一律留空、不印「待填写」这类占位符（业主硬约束）。
@@ -520,21 +520,3 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     for _no, _name, _val in _cost:
         _cost_rows.append([(str(_no), 1), (str(_name), 1), (str(_val), 1)])
     _section_table(doc, "投资估算费用构成", _cost_rows, W_COST)
-
-
-def build_cost_rows(estimate) -> List[Tuple[str, str, str]]:
-    """`CostEstimate` → 报告表「投资估算费用构成」的行（样本表的就是这七项口径）。"""
-    def _w(v):
-        try:
-            return f"{float(v):.2f}"
-        except Exception:
-            return ""
-    return [
-        ("一", "工程措施费", _w(estimate.construction)),
-        ("二", "设备费", _w(estimate.equipment)),
-        ("三", "其他费用", _w(estimate.other)),
-        ("四", "监测与管护费", _w(estimate.monitor_care)),
-        ("五", "预备费", _w(estimate.reserve)),
-        ("六", "静态总投资", _w(estimate.static_total)),
-        ("七", "动态总投资", _w(estimate.dynamic_total)),
-    ]

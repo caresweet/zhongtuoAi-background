@@ -216,6 +216,15 @@ def has_analysis_tables_in_body(domain: str | None) -> bool:
     return domain == _RECLAMATION
 
 
+def uses_budget_bridge(domain: str | None) -> bool:
+    """第7章投资估算是否**向 budget-maker 现取数**（`reclamation_budget_bridge`）。
+
+    复垦有：第6章 表6-1 的工程量按定额算价，报告表费用构成与表7-3/7-4 同一份结果。
+    稳评 / 投标恒 False（它们的造价不在那套定额体系里）。
+    """
+    return domain == _RECLAMATION
+
+
 def tops_up_short_chapters(domain: str | None) -> bool:
     """正文短于本章字数下限时，是否**续写补足**（`ChapterAgentBase._top_up_length`）。
 

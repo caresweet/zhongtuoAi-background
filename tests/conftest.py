@@ -14,6 +14,17 @@ collect_ignore = ["test_fill"]
 from app.agent.state import create_initial_state
 
 
+@pytest.fixture(autouse=True)
+def _disable_budget_bridge(monkeypatch):
+    """单测**不打本地服务**：复垦投资估算的 budget-maker 取数默认关掉。
+
+    这条链路是 `http://127.0.0.1:8765` 的真实 HTTP 调用，开着会让用例
+    依赖「本机有没有起那个软件」。需要验证链路的用例自己 monkeypatch
+    `estimate_for_report` 或显式传 endpoint。
+    """
+    monkeypatch.setenv("RECLAMATION_BUDGET_ENDPOINT", "")
+
+
 # ---- Paths ----
 
 @pytest.fixture

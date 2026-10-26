@@ -472,6 +472,8 @@ class ReportAssembler:
         filled = state.get("filled_data", {})
         # `_render_md_table` 要按域改渲染（复垦表4-2）时用它取事实卡数据
         self._filled = filled
+        # 第7章投资估算要回头读**第6章**的工程量表，所以整份章节也留一份
+        self._chapters = chapters
 
         # 🔴 报告域：决定本报告按哪个域的章节目录装配（章号/标题/是否有评审表章/
         #    是否有附件章）。缺省回落稳评 —— 老调用点（脚本）不传 `_domain` 时
@@ -2381,6 +2383,10 @@ class ReportAssembler:
         #    在小节边界处依次落下。稳评 / 其他章此调用是空操作。
         if ch_num == 4:
             self._init_ch4_tables(filled, markdown)
+        # 🔴 复垦第7章：由 budget-maker 现算投资估算，补 表7-3/表7-4。
+        #    稳评 / 其他章此调用是空操作。
+        if ch_num == 7:
+            self._init_ch7_tables()
 
         for line in lines:
             s = line.strip()
@@ -2573,7 +2579,7 @@ class ReportAssembler:
             if m:
                 heading_text = re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1))
                 self._maybe_flush_map_image(doc, heading_text, ch_num)  # 🔴 ch1 图1-1 插在 1.5 之后
-                self._flush_ch4_tables(doc, heading_text)   # 🔴 复垦表4-x 在小节边界落位
+                self._flush_dyn_tables(doc, ch_num, heading_text)  # 🔴 系统补渲表在小节边界落位
                 self._cur_section_name = heading_text.strip()
                 llm_invented_patterns = [
                     r'^(合法性|合理性|可行性|可控性)[（(]得分[：:]\s*\d+',
@@ -2600,6 +2606,7 @@ class ReportAssembler:
             if m:
                 heading_text = re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1))
                 self._maybe_flush_map_image(doc, heading_text, ch_num)  # 🔴 ch1 图1-1 插在 1.5 之后
+                self._flush_dyn_tables(doc, ch_num, heading_text)      # 🔴 表7-3 落在 7.2.2 之前
                 self._add_heading(doc, heading_text, 3)
                 continue
 
@@ -2608,8 +2615,10 @@ class ReportAssembler:
                 # 🔴 四级标题也要过「到点插图」钩子：第6章的小节是
                 #    `### （一）项目概况` → `#### 3.项目地理位置`，只挂在三级标题上
                 #    会让位置示意图永远等不到落点，一路飘到章末。
-                self._maybe_flush_map_image(doc, re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1)), ch_num)
-                self._add_heading(doc, re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1)), 3)
+                _ht = re.sub(r'\*\*(.+?)\*\*', r'\1', m.group(1))
+                self._maybe_flush_map_image(doc, _ht, ch_num)
+                self._flush_dyn_tables(doc, ch_num, _ht)   # 🔴 表7-3 落在 7.2.2 之前
+                self._add_heading(doc, _ht, 3)
                 continue
 
             # 🔴 先识别整行加粗（**（一）子点标题** / **加粗结论**），
@@ -2644,9 +2653,8 @@ class ReportAssembler:
         if ch_num == 9:
             self._ensure_ch9_survey_tables(doc)
 
-        # 🔴 第4章章末兜底：没等到后续小节的分析表在此落下（复垦；稳评空操作）
-        if ch_num == 4:
-            self._flush_ch4_tables_end(doc)
+        # 🔴 章末兜底：没等到后续小节标题的系统补渲表在此落下（复垦表4-x/表7-x；稳评空操作）
+        self._flush_dyn_tables_end(doc, ch_num)
 
         # 🔴 固定表格 auto-inject 已移除——表格由章节 agent 根据实际数据动态设计
         # （用 markdown 语法写，有数据才写），不再由系统硬编码渲染固定表格。
@@ -3206,13 +3214,65 @@ class ReportAssembler:
     #    `reclamation_ch4_tables`），落点按小节号（4.4 / 4.5 / 4.7）。
     #    装配器在新小节标题出现时把**归属更早小节**的表先落下去，章末兜底其余。
 
+    # ═══════════════════════════════════════════════════════════
+    # 系统补渲表：按章登记、在小节边界落位（ch4 分析表 / ch7 投资估算表共用）
+    # ═══════════════════════════════════════════════════════════
+    @staticmethod
+    def _sec_key(text) -> Optional[tuple]:
+        """「7.2.1 工程施工费」→ (7, 2, 1)；「4.5 水土资源平衡」→ (4, 5, 0)。"""
+        m = re.match(r'^\s*(\d+)(?:[.．](\d+))?(?:[.．](\d+))?', str(text or ""))
+        if not m:
+            return None
+        return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
+
+    def _register_dyn_tables(self, ch_num: int, items) -> None:
+        """登记某章的待落位表：`items = [(小节号, {caption, headers, rows, lead})]`。"""
+        store = getattr(self, "_dyn_pending", None)
+        if store is None:
+            store = self._dyn_pending = {}
+        store[ch_num] = list(items or [])
+        # 表号按样本定死（表4-8/7-3…），`_dedup_table_titles` 不重编号、且新表跳号
+        for _sec, _tbl in store[ch_num]:
+            _cap = str(_tbl.get("caption") or "")
+            if not _cap:
+                continue
+            self._system_caption_exact.add(_cap)
+            _m = re.match(r'^表\s*(\d+)\s*[-—]\s*(\d+)', _cap)
+            if _m:
+                self._system_caption_nums.setdefault(int(_m.group(1)), set()).add(int(_m.group(2)))
+
+    def _flush_dyn_tables(self, doc, ch_num: int, heading_text: str) -> None:
+        """遇到新的小节标题时，把**归属更早小节**的待落位表先落下去。"""
+        pending = (getattr(self, "_dyn_pending", {}) or {}).get(ch_num) or []
+        if not pending:
+            return
+        cur = self._sec_key(heading_text)
+        if not cur:
+            return
+        keep = []
+        for sec, tbl in pending:
+            _s = self._sec_key(sec) or (0, 0, 0)
+            (self._render_dyn_table(doc, tbl) if _s < cur else keep.append((sec, tbl)))
+        self._dyn_pending[ch_num] = keep
+
+    def _flush_dyn_tables_end(self, doc, ch_num: int) -> None:
+        """章末兜底：没等到后续小节标题的表（含按 `###` 分节或小节缺失）在此落下。"""
+        for _sec, tbl in (getattr(self, "_dyn_pending", {}) or {}).pop(ch_num, []):
+            self._render_dyn_table(doc, tbl)
+
+    def _render_dyn_table(self, doc, tbl: dict) -> None:
+        """引导语 + 表格（表题由 `_render_table_from_dict` 印在表格上方）。"""
+        _lead = str(tbl.get("lead") or "")
+        if _lead:
+            self._add_para(doc, _lead, indent=True)
+        self._render_table_from_dict(doc, tbl, caption=tbl.get("caption", ""))
+
     def _init_ch4_tables(self, filled, markdown: str = "") -> None:
         """登记第4章待补渲的分析表；模型已自己写了同题表的，不重复补。
 
         🔴 去重按**表题关键词**：模型偶尔会自己写一张「复垦前后结构对比表」，
            我们再补一张就是两张同题表（`_dedup_duplicate_tables` 只删逐字重复的）。
         """
-        self._ch4_pending: list = []
         from app.agent.chapter_catalog import has_analysis_tables_in_body
         if not has_analysis_tables_in_body(self._domain):
             return
@@ -3232,57 +3292,81 @@ class ReportAssembler:
                     logger.info(f"[表4-x] 模型已写同题表，跳过补渲：{_cap}")
                     continue
                 _kept.append((_sec, _tbl))
-            self._ch4_pending = _kept
-            # 🔴 这几张的表号按样本定死（表4-8/4-11/4-12/4-13）——登记其完整表题，
-            #    `_dedup_table_titles` 不重编号（重编成 表4-1… 就与样本对不上了）。
-            self._system_caption_exact = {t.get("caption", "") for _, t in _kept}
-            _nums: set = set()
-            for _cap in self._system_caption_exact:
-                _m = re.match(r'^表\s*(\d+)\s*[-—]\s*(\d+)', str(_cap))
-                if _m:
-                    _nums.add((int(_m.group(1)), int(_m.group(2))))
-            self._system_caption_nums = {}
-            for _c, _n in _nums:
-                self._system_caption_nums.setdefault(_c, set()).add(_n)
+            self._register_dyn_tables(4, _kept)
             if _kept:
                 logger.info(f"[表4-x] 第4章待补渲分析表 {len(_kept)} 张："
                             f"{[t.get('caption','')[:9] for _, t in _kept]}")
         except Exception as e:
             logger.warning(f"[表4-x] 第4章分析表准备失败（不影响出报告）: {e}")
 
-    def _flush_ch4_tables(self, doc, heading_text: str) -> None:
-        """遇到新的 `## 4.N` 小节时，把**归属更早小节**的分析表先落下去。"""
-        pending = getattr(self, "_ch4_pending", None)
-        if not pending:
-            return
-        m = re.match(r'^\s*(\d+)\s*[.．]\s*(\d+)', str(heading_text or ""))
-        if not m:
+    def _budget_estimate(self):
+        """复垦投资估算（第7章表与报告表共用，**只连一次桥**）。
+
+        数据链路：第6章 表6-1 的工程量 → 换定额编号 → budget-maker
+        `POST /api/ext/report-values` → 工程施工费/其他费用/预备费/静态·动态总投资。
+        桥不可用或表解析不出 → None（调用方保持原样，金额不编）。
+        """
+        if getattr(self, "_budget_done", False):
+            return getattr(self, "_budget_est", None)
+        self._budget_done = True
+        self._budget_est = None
+        from app.agent.chapter_catalog import uses_budget_bridge
+        if not uses_budget_bridge(self._domain):
+            return None
+        try:
+            from app.services.reclamation_budget_bridge import (
+                estimate_for_report, parse_quantity_rows,
+            )
+            fd = getattr(self, "_filled", None) or {}
+            ch6 = (getattr(self, "_chapters", {}) or {}).get(6) or {}
+            md6 = ch6.get("markdown", "") if isinstance(ch6, dict) else str(ch6)
+            rows = parse_quantity_rows(md6)
+            if not rows:
+                logger.info("[表7-x] 第6章没解析出工程量表，跳过投资估算")
+                return None
+            try:
+                _ha = float(str(fd.get("area_m2") or 0).replace(",", "")) / 10000.0
+            except Exception:
+                _ha = 0.0
+            try:
+                _months = float(str(fd.get("service_years") or 0))
+            except Exception:
+                _months = 0.0
+            self._budget_est = estimate_for_report(
+                rows, area_ha=_ha, service_months=_months,
+                project_name=str(fd.get("project_name") or ""))
+        except Exception as e:
+            logger.warning(f"[表7-x] 投资估算取数失败（不影响出报告）: {e}")
+        return self._budget_est
+
+    def _init_ch7_tables(self) -> None:
+        """第7章「投资估算」的 表7-3/表7-4 —— 数从 budget-maker 现算。
+
+        🔴 桥连不上、表6-1 解析不出、或没有任何可计价项 → **整块不补**，
+           第7章保持模型原文（金额不编）。
+        """
+        from app.agent.chapter_catalog import uses_budget_bridge
+        if not uses_budget_bridge(self._domain):
             return
         try:
-            cur = float(f"{m.group(1)}.{m.group(2)}")
-        except Exception:
-            return
-        keep = []
-        for sec, tbl in pending:
-            try:
-                _s = float(sec)
-            except Exception:
-                _s = 0.0
-            (self._render_ch4_table(doc, tbl) if _s < cur else keep.append((sec, tbl)))
-        self._ch4_pending = keep
-
-    def _flush_ch4_tables_end(self, doc) -> None:
-        """章末兜底：没等到后续小节的分析表（含按 `###` 分节、或小节缺失的章）在此落下。"""
-        for _sec, tbl in getattr(self, "_ch4_pending", []) or []:
-            self._render_ch4_table(doc, tbl)
-        self._ch4_pending = []
-
-    def _render_ch4_table(self, doc, tbl: dict) -> None:
-        """引导语 + 表格（表题由 `_render_table_from_dict` 印在表格上方）。"""
-        _lead = str(tbl.get("lead") or "")
-        if _lead:
-            self._add_para(doc, _lead, indent=True)
-        self._render_table_from_dict(doc, tbl, caption=tbl.get("caption", ""))
+            from app.services.reclamation_budget_bridge import (
+                engineering_table, investment_table,
+            )
+            est = self._budget_estimate()
+            if not est:
+                return
+            _tbls = []
+            for _sec, _t in (("7.2.1", engineering_table(est)),
+                             ("7.2.6", investment_table(est))):
+                if _t:
+                    _t = dict(_t)
+                    _t["lead"] = ""
+                    _tbls.append((_sec, _t))
+            self._register_dyn_tables(7, _tbls)
+            logger.info(f"[表7-x] 第7章待补渲 {len(_tbls)} 张（工程施工费 "
+                        f"{est.construction:.2f} 万元、静态总投资 {est.static_total:.2f} 万元）")
+        except Exception as e:
+            logger.warning(f"[表7-x] 第7章投资估算表准备失败（不影响出报告）: {e}")
 
     def _render_reclamation_system_table(self, doc, caption, ch_num) -> bool:
         """复垦的**系统渲染表**（按样本逐表核对，不让 LLM 自己编）。
@@ -4844,14 +4928,10 @@ class ReportAssembler:
         """第11部分「土地复垦方案报告表」—— 样本那种**制式表单**（`reclamation_report_form`）。
 
         数据全部取自既有事实源（材料抽取 / 公司档案 / 人员库 / 勘测定界地类 /
-        第8章与第10章正文），**不另编**；抽不到的留空，不印占位符。
-        费用构成的**金额列先留空** —— `reclamation_cost_model` 要「分项工程量」做输入，
-        而「每项工程量取哪块面积、多厚」这个口径业主还没定（见 2026-10-12 会话），
-        定了之后 `build_cost_rows` 直接接上即可。
+        第8章与第10章正文 / budget-maker 现算的投资估算），**不另编**；抽不到的留空。
         """
-        from app.services.reclamation_report_form import (
-            build_cost_rows, collect_form_data, render_report_form,
-        )
+        from app.services.reclamation_report_form import collect_form_data, render_report_form
+        from app.services.reclamation_budget_bridge import empty_cost_rows
         try:
             from app.services.personnel_store import personnel_for
             _people = personnel_for(getattr(self, "_selected_personnel", None) or None,
@@ -4873,12 +4953,9 @@ class ReportAssembler:
             "（3）《江苏省土地综合整治项目施工机械台班费预算定额标准》（苏财建〔2013〕469 号）；"
             "（4）淮安市建设工程材料信息价；"
             "（5）其他有关规定和标准。")
-        # 费用构成：有工程量口径后 `build_cost_rows(estimate)` 直接接上；现在先出空表
-        data["费用构成"] = [(no, name, "") for no, name, _v in
-                            build_cost_rows(type("_E", (), {
-                                "construction": 0, "equipment": 0, "other": 0,
-                                "monitor_care": 0, "reserve": 0, "static_total": 0,
-                                "dynamic_total": 0})())]
+        # 费用构成：第7章的同一份估算（budget-maker 现算）；取不到数就留空，不印 0
+        _est = self._budget_estimate()
+        data["费用构成"] = _est.cost_rows if _est else empty_cost_rows()
 
         _no = report_form_chapter_no(self._domain)
         self._add_chapter_title_page(doc, _cn_num(_no), self._get_chapter_title(_no),

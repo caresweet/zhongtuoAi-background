@@ -3257,7 +3257,10 @@ class ReportAssembler:
 
     def _flush_dyn_tables_end(self, doc, ch_num: int) -> None:
         """章末兜底：没等到后续小节标题的表（含按 `###` 分节或小节缺失）在此落下。"""
-        for _sec, tbl in (getattr(self, "_dyn_pending", {}) or {}).pop(ch_num, []):
+        _store = getattr(self, "_dyn_pending", None)
+        if not _store:
+            return
+        for _sec, tbl in _store.pop(ch_num, []):
             self._render_dyn_table(doc, tbl)
 
     def _render_dyn_table(self, doc, tbl: dict) -> None:

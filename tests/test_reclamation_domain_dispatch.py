@@ -1492,8 +1492,8 @@ def test_enrich_writes_service_years_and_earthwork():
     assert enrich_filled_data(fd) is True
     assert fd[QUANTITY_ROWS_KEY] and len(fd[QUANTITY_ROWS_KEY]) == 10
     # 材料里没有年限 → 按模板口径（占用 24 + 复垦 1 + 管护 6 = 30 个月）
-    assert fd["service_years"] == "30"
-    assert fd["construct_period"] == "24"
+    assert fd["service_years"] == "30 个月"      # 必须带单位（否则模型写成「30 年」）
+    assert fd["construct_period"] == "24 个月"
     assert "表土剥离 537.8 m³" in fd["earthwork_volume"]
     assert fd["topsoil_thickness"] == "0.20"
 

@@ -48,6 +48,14 @@ def _txt(v: Any) -> str:
     return "" if s in ("None", "nan", "—") else s
 
 
+def _months(v: Any) -> str:
+    """年限值 → 「N 个月」；已带单位（个月/年）的原样返回，不重复加。"""
+    s = _txt(v)
+    if not s:
+        return ""
+    return s if ("个月" in s or "年" in s) else f"{s} 个月"
+
+
 def _person_rows(personnel: Sequence[dict], unit_name: str, limit: int = 8) -> List[List[str]]:
     """主要编制人员**数据行**（姓名｜职称/职务｜专业｜单位｜签名，签名留给手签）。"""
     out: List[List[str]] = []
@@ -98,10 +106,8 @@ def collect_form_data(filled: dict, company: dict, personnel: Sequence[dict]) ->
         "项目区面积": f"{_ha} 公顷" if _ha else "",
         "投资规模": f"{_invest} {_invest_u}".strip() if _invest else "",
         "图幅号": _sheet,
-        "生产年限": (f"{_txt(fd['construct_period'])} 个月"
-                     if _txt(fd.get("construct_period")) else ""),
-        "服务年限": (f"{_txt(fd['service_years'])} 个月"
-                     if _txt(fd.get("service_years")) else ""),
+        "生产年限": _months(fd.get("construct_period")),
+        "服务年限": _months(fd.get("service_years")),
         # 编制单位
         "编制单位名称": _txt(co.get("name")),
         "编制单位法人": _txt(co.get("leader_name")),

@@ -256,12 +256,12 @@ def enrich_filled_data(filled: dict, *, endpoint: str = "") -> bool:
     filled["topsoil_thickness"] = f"{STRIP_THICKNESS_M:.2f}"
 
     # 服务年限：材料里没有就按样本口径（占用 + 复垦 1 个月 + 管护 6 个月 = 30 个月）
-    # 存纯数字（单位由各处格式化时补），避免报告表写成「30 个月 个月」
+    # 🔴 必须带单位 —— 事实卡只印「30」时，模型写成「服务年限为 30 年」（实测踩过）。
     if not str(filled.get("service_years") or "").strip():
-        filled["service_years"] = str(DEFAULT_SERVICE_MONTHS)
+        filled["service_years"] = f"{DEFAULT_SERVICE_MONTHS} 个月"
         filled.setdefault("_service_years_source", "模板口径（占用期+复垦期1个月+管护期6个月）")
     if not str(filled.get("construct_period") or "").strip():
-        filled["construct_period"] = str(DEFAULT_CONSTRUCT_MONTHS)
+        filled["construct_period"] = f"{DEFAULT_CONSTRUCT_MONTHS} 个月"
 
     try:
         from app.services.reclamation_budget_bridge import estimate_for_report

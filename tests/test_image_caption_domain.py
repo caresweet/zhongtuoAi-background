@@ -115,13 +115,19 @@ def test_chapter_image_specs_reclamation_from_samples():
             assert set(s) >= {"type", "label", "min", "max", "keywords"}
             assert s["min"] == 0 and s["max"] >= 1
             assert s["keywords"]
-    # 第3章：单一位置图，正名 + 变体关键词
-    (loc,) = rec[3]
+    # 第3章：位置图（正名 + 变体关键词）+ 用户上传的「现状图」
+    loc = rec[3][0]
     assert loc["label"] == "项目地理位置示意图"
     assert "位置示意图" in loc["keywords"] and "工程位置" in loc["keywords"]
+    assert any(s["label"] == "项目区土地利用现状图" and "现状图" in s["keywords"]
+               for s in rec[3])
     # 第4章：三类图（损毁分析 / 占用情况 / 措施）
     labels4 = {s["label"] for s in rec[4]}
     assert {"临时用地现场照片", "临时用地占用永久基本农田示意图",
-            "表土堆放区位置示意图"} <= labels4
+            "表土堆放区位置示意图", "临时用地位置关系图"} <= labels4
+    # 🔴 界址/红线图认「勘测定界图」三个字，**不能只认「勘测定界」** ——
+    #    否则 PDF 抽出来的「pdf_勘测定界报告_p3_img0.jpeg」会被当图印进正文
+    _rel = next(s for s in rec[4] if s["label"] == "临时用地位置关系图")
+    assert "勘测定界图" in _rel["keywords"] and "勘测定界" not in _rel["keywords"]
     # 稳评仍是原表（同一对象，逐字不变）
     assert set(catalog.chapter_image_specs("stability")) == {6, 7, 8, 9}

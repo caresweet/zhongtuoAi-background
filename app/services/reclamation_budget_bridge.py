@@ -164,7 +164,7 @@ def parse_quantity_rows(markdown: str) -> List[dict]:
     表题含「工程量」的表优先（`表6-1 项目复垦工程量汇总表`）。
     解析不出返回 `[]` —— 调用方据此**整块跳过**投资估算，不硬编。
     """
-    best: Optional[Tuple[int, str, List[List[str]]]] = None
+    best: Optional[Tuple[int, str, Tuple[int, int, int], List[List[str]]]] = None
     for caption, rows in _md_tables(markdown):
         head = [re.sub(r'[（(].*?[)）]', '', c).strip() for c in rows[0]]
         i_name = next((i for i, h in enumerate(head)
@@ -176,13 +176,11 @@ def parse_quantity_rows(markdown: str) -> List[dict]:
             continue
         score = 2 if "工程量" in caption else (1 if "工程" in caption else 0)
         if best is None or score > best[0]:
-            best = (score, caption, [(i_name, i_unit, i_qty), *rows[1:]])   # type: ignore[list-item]
+            best = (score, caption, (i_name, i_unit, i_qty), rows[1:])
     if not best:
         return []
 
-    _, _cap, data = best
-    idx, body = data[0], data[1:]
-    i_name, i_unit, i_qty = idx                     # type: ignore[misc]
+    _, _cap, (i_name, i_unit, i_qty), body = best
     out: List[dict] = []
     section = ""
     for cells in body:
@@ -208,12 +206,20 @@ def parse_quantity_rows(markdown: str) -> List[dict]:
 # 组包 + 取数
 # ═══════════════════════════════════════════════════════════════
 def _direct_price(name: str, unit: str) -> Optional[float]:
-    """直接计价项单价（元 / UNIT_PRICES 里那个单位）。"""
+    """直接计价项单价（元 / UNIT_PRICES 里那个单位）。
+
+    先精确匹配；再做包含匹配（样本表里叫「垃圾外运工程」，工程量表里写「垃圾外运」）。
+    🔴 包含匹配要求短的一方 ≥4 个字 —— 太短的名字（「土方」「平整」）会误配到别的项，
+       宁可匹配不上（该项不计价并告警）也不按错单价算钱。
+    """
     from app.services.reclamation_cost_model import UNIT_PRICES
     if name in UNIT_PRICES:
         return UNIT_PRICES[name][0]
     for k, v in UNIT_PRICES.items():
-        if k and (k in name or name in k):
+        if not k:
+            continue
+        short, long_ = (k, name) if len(k) <= len(name) else (name, k)
+        if len(short) >= 4 and short in long_:
             return v[0]
     return None
 

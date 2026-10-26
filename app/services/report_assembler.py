@@ -3329,7 +3329,8 @@ class ReportAssembler:
             except Exception:
                 _ha = 0.0
             try:
-                _months = float(str(fd.get("service_years") or 0))
+                _m = re.search(r'\d+(?:\.\d+)?', str(fd.get("service_years") or ""))
+                _months = float(_m.group(0)) if _m else 0.0
             except Exception:
                 _months = 0.0
             self._budget_est = estimate_for_report(

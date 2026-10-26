@@ -329,37 +329,61 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     px = [(x - box[0], y - box[1]) for x, y in px]
 
     dr = ImageDraw.Draw(img)
-    dr.line(px + [px[0]], fill=(230, 0, 0), width=4, joint="curve")
+    dr.line(px + [px[0]], fill=(230, 0, 0), width=max(3, img.width // 500), joint="curve")
+    _dot = max(3, img.width // 500)
     for x, y in px:
-        dr.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(230, 0, 0))
-    # 复垦责任范围注记
+        dr.ellipse([x - _dot, y - _dot, x + _dot, y + _dot], fill=(230, 0, 0))
+    # 🔴 字号随图宽走：图从 768px 撑到 2304px 后，原来的 19px 字印到 12.5cm 宽
+    #    只有 3pt，等于看不见。按宽度取 1/55 与 1/75。
+    _fb, _fs = max(22, img.width // 55), max(18, img.width // 75)
+    f_big, f_sm = _font(_fb), _font(_fs)
+    # 复垦责任范围注记（白底黑字 + 红框：叠在影像上不比红字压白边难认）
     cx = sum(p[0] for p in px) / len(px); cy = sum(p[1] for p in px) / len(px)
-    f_big, f_sm = _font(26), _font(19)
     _area = _polygon_area(points)
     lines = [f"复垦责任范围 {_area:.2f} ㎡",
              f"合 {_area / 666.6667:.2f} 亩    界址点 {len(points)} 个"]
+    _tx, _ty = cx + img.width // 40, cy - _fs
+    _pad = max(8, img.width // 200)
+    _w_max = 0
     for i, s in enumerate(lines):
-        dr.text((cx + 40, cy - 20 + i * 30), s, fill=(255, 255, 255), font=f_sm,
-                stroke_width=3, stroke_fill=(120, 0, 0))
+        bb = dr.textbbox((0, 0), s, font=f_sm)
+        _w_max = max(_w_max, bb[2] - bb[0])
+        dr.text((_tx + _pad, _ty + i * int(_fs * 1.5) + _pad), s,
+                fill=(150, 0, 0), font=f_sm)
+    _h_all = int(_fs * 1.5) * (len(lines) - 1) + (dr.textbbox((0, 0), "测", font=f_sm)[3]) + 2 * _pad
+    dr.rectangle([_tx, _ty, _tx + _w_max + 2 * _pad, _ty + _h_all],
+                 fill=(255, 255, 255), outline=(190, 0, 0), width=max(2, img.width // 900))
+    for i, s in enumerate(lines):                    # 底上再写一遍，压住边框
+        dr.text((_tx + _pad, _ty + i * int(_fs * 1.5) + _pad), s,
+                fill=(150, 0, 0), font=f_sm)
     # 比例尺（按像元分辨率换算，不猜）
     mpp = meters_per_pixel(lonlat[0][1], z)
     bar_m = 50.0
     bar_px = int(bar_m / mpp)
-    bx, by = 24, img.height - 46
-    dr.rectangle([bx - 6, by - 26, bx + bar_px + 6, by + 26], fill=(255, 255, 255))
-    dr.line([bx, by, bx + bar_px, by], fill=(0, 0, 0), width=4)
-    dr.text((bx, by + 4), f"{bar_m:.0f} m", fill=(0, 0, 0), font=f_sm)
+    bx, by = img.width // 30, img.height - int(_fs * 2.2)
+    dr.rectangle([bx - _pad, by - int(_fs * 1.4), bx + bar_px + _pad, by + int(_fs * 1.4)],
+                 fill=(255, 255, 255))
+    dr.line([bx, by, bx + bar_px, by], fill=(0, 0, 0), width=max(3, img.width // 700))
+    dr.text((bx, by + int(_fs * 0.15)), f"{bar_m:.0f} m", fill=(0, 0, 0), font=f_sm)
     # 指北针
-    ax, ay = img.width - 60, 40
-    dr.rectangle([ax - 26, ay - 26, ax + 26, ay + 62], fill=(255, 255, 255))
-    dr.line([ax, ay + 50, ax, ay + 6], fill=(0, 0, 0), width=4)
-    dr.polygon([(ax, ay - 6), (ax - 9, ay + 12), (ax + 9, ay + 12)], fill=(0, 0, 0))
-    dr.text((ax - 8, ay + 26), "北", fill=(0, 0, 0), font=f_sm)
-    # 图题 + 底图来源
-    dr.rectangle([0, 0, img.width, 44], fill=(255, 255, 255))
-    dr.text((14, 9), title, fill=(0, 0, 0), font=f_big)
-    dr.text((14, img.height - 22), "底图：Esri World Imagery（卫星影像）",
-            fill=(255, 255, 255), font=_font(15), stroke_width=2, stroke_fill=(60, 60, 60))
+    _n = max(26, img.width // 45)
+    ax, ay = img.width - _n * 2, _n
+    dr.rectangle([ax - _n, ay - _n, ax + _n, ay + int(_n * 2.4)], fill=(255, 255, 255))
+    dr.line([ax, ay + int(_n * 1.9), ax, ay + int(_n * 0.2)], fill=(0, 0, 0), width=max(3, img.width // 700))
+    dr.polygon([(ax, ay - int(_n * 0.2)), (ax - _n // 3, ay + int(_n * 0.45)),
+                (ax + _n // 3, ay + int(_n * 0.45))], fill=(0, 0, 0))
+    dr.text((ax - _n // 5, ay + int(_n * 1.0)), "北", fill=(0, 0, 0), font=f_sm)
+    # 图题 + 底图来源（标题条高度随字号走）
+    _tb = int(_fb * 1.7)
+    dr.rectangle([0, 0, img.width, _tb], fill=(255, 255, 255))
+    dr.text((img.width // 40, int(_fb * 0.3)), title, fill=(0, 0, 0), font=f_big)
+    _fa = max(14, img.width // 110)
+    _f_attr = _font(_fa)
+    _attr = "底图：Esri World Imagery（卫星影像）"
+    _abb = dr.textbbox((0, 0), _attr, font=_f_attr)      # 🔴 靠右排，避开左下角比例尺
+    dr.text((img.width - (_abb[2] - _abb[0]) - img.width // 40, img.height - int(_fa * 1.6)),
+            _attr, fill=(255, 255, 255), font=_f_attr,
+            stroke_width=2, stroke_fill=(60, 60, 60))
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     # 🔴 存 JPEG 不存 PNG：这类卫星影像 PNG 要 2.3MB，JPEG(85) 只要 ~400KB，

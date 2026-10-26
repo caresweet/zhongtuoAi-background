@@ -1431,3 +1431,86 @@ def test_ch7_tables_flush_on_four_level_headings(tmp_path, monkeypatch):
     i73 = next(i for i, t in enumerate(order) if t.startswith("表7-3"))
     i722 = next(i for i, t in enumerate(order) if t.startswith("7.2.2"))
     assert i73 < i722, (i73, i722)
+
+
+# ════════════════════════════════════════════════════════════
+# J. 工程量 = 确定性模型（业主 2026-10-26：每次生成的数字必须一样）
+# ════════════════════════════════════════════════════════════
+
+_MY_LC = {"合计_m2": 8070.0, "rows": [
+    {"一级地类": "交通运输用地", "二级地类": "公路用地", "面积_m2": 2727.0},
+    {"一级地类": "工矿及居民点用地", "二级地类": "村庄", "面积_m2": 2580.0},
+    {"一级地类": "林地", "二级地类": "其他林地", "面积_m2": 2211.0},
+    {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 478.0},
+    {"一级地类": "水域及水利设施用地", "二级地类": "沟渠", "面积_m2": 74.0},
+]}
+
+
+def test_quantity_model_matches_sample_numbers():
+    """工程量按「地类面积 × 设计厚度」算，与明远样本表7-3 反算值同口径。
+
+    样本（明远 p44–p45）反算：剥离 537.8 m³ / 面层 ≈414 m³ / 垫层 ≈276 m³ /
+    有机物 4.04 t / 翻耕 0.266 ha。本项目地类算出来应当落在同一量级。
+    """
+    from app.services.reclamation_quantities import build_quantity_rows
+    q = {r["name"]: r["qty"] for r in build_quantity_rows({"land_classification": _MY_LC})}
+    assert q["表土剥离"] == 5.378          # 2689 m² × 0.20 m
+    assert q["表土回填"] == 5.378
+    assert q["混凝土面层拆除"] == 4.0905   # 2727 m² × 0.15 m
+    assert q["垫层清除"] == 2.727          # 2727 m² × 0.10 m
+    assert q["垃圾外运"] == 6.8175         # 面层 + 垫层
+    assert q["土地翻耕"] == 0.2689
+    assert q["田面平整"] == 80.7           # 8070 m² / 100
+    assert q["沟渠疏通"] == 1.11           # 74 m² × 1.5 / 100
+    assert q["土壤培肥（有机肥）"] == 4.0335   # 0.2689 ha × 15 t/ha
+    assert q["土壤培肥（复合肥）"] == 0.2017   # 0.2689 ha × 0.75 t/ha
+
+
+def test_quantity_model_is_deterministic():
+    """同一份地类数据，算多少次都是同一组数（生成两次报告数字必须一致）。"""
+    from app.services.reclamation_quantities import build_quantity_table
+    a = build_quantity_table({"land_classification": _MY_LC})
+    b = build_quantity_table({"land_classification": _MY_LC})
+    assert a == b
+    assert [r[3] for r in a["rows"]] == [r[3] for r in b["rows"]]
+
+
+def test_quantity_model_without_land_data_is_empty():
+    from app.services.reclamation_quantities import (
+        build_quantity_rows, build_quantity_table, build_summary)
+    assert build_quantity_rows({"area_m2": 8070.0}) == []
+    assert build_quantity_table({"area_m2": 8070.0}) is None
+    assert build_summary({"area_m2": 8070.0}) == ""
+
+
+def test_enrich_writes_service_years_and_earthwork():
+    """生成前把工程量/年限写进 filled_data（事实卡与表6-1 共用）。"""
+    from app.services.reclamation_quantities import (
+        QUANTITY_ROWS_KEY, enrich_filled_data)
+    fd = {"project_name": "某复垦项目", "area_m2": 8070.0, "land_classification": _MY_LC}
+    assert enrich_filled_data(fd) is True
+    assert fd[QUANTITY_ROWS_KEY] and len(fd[QUANTITY_ROWS_KEY]) == 10
+    # 材料里没有年限 → 按模板口径（占用 24 + 复垦 1 + 管护 6 = 30 个月）
+    assert fd["service_years"] == "30"
+    assert fd["construct_period"] == "24"
+    assert "表土剥离 537.8 m³" in fd["earthwork_volume"]
+    assert fd["topsoil_thickness"] == "0.20"
+
+
+def test_ch6_quantity_table_is_system_rendered(tmp_path):
+    """第6章：模型写的工程量表被丢掉，换成系统按地类算的 表6-1。"""
+    _md = ("# 土地复垦工程设计及工程量测算\n\n## 6.2 工程量测算\n\n"
+           "各项工程量见表6-1。\n\n"
+           "表6-1 项目复垦工程量汇总表\n\n"
+           "| 序号 | 工程或费用名称 | 单位 | 数量 |\n| --- | --- | --- | --- |\n"
+           "| 1 | 表土剥离 | 100m³ | 999.9 |\n")
+    from app.services.reclamation_quantities import QUANTITY_ROWS_KEY, build_quantity_rows
+    filled = {"project_name": "某复垦项目", "land_classification": _MY_LC}
+    filled[QUANTITY_ROWS_KEY] = build_quantity_rows(filled)
+    doc = _render_doc_full(tmp_path, {6: {"markdown": _md}}, filled)
+    tb = _table_by_header(doc, "工程或费用名称")
+    rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
+    _qty = {r[1]: r[3] for r in rows if len(r) > 3 and r[1] and r[3]}
+    assert _qty["表土剥离"] == "5.378"        # 系统算的
+    assert "999.9" not in "\n".join("|".join(r) for r in rows)   # 模型那张已丢
+    assert any(r[1] == "土壤培肥（有机肥）" for r in rows)

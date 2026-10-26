@@ -248,6 +248,18 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
             import logging as _lg
             _lg.getLogger(__name__).warning(f"[地类] 勘测定界地类抽取跳过: {_lce}")
 
+    # 🔴 复垦：工程量与投资估算**在生成前**就算好并写回 filled_data。
+    #    第6章正文、表6-1、表7-3/7-4、报告表「费用构成」全部读这一份 ——
+    #    业主 2026-10-26：「每次生成的报告计算出来的数字都应该是一样的」，
+    #    数字不能由模型每次重算。取不到地类 → 不算（第6/7章保持模型原文）。
+    if (state.get("_domain") or "stability") == "reclamation":
+        try:
+            from app.services.reclamation_quantities import enrich_filled_data
+            _ok = enrich_filled_data(state.setdefault("filled_data", {}))
+            logger.info(f"[工程量] 预计算{'完成' if _ok else '跳过（无地类数据）'}")
+        except Exception as _qe:
+            logger.warning(f"[工程量] 预计算失败（不影响出报告）: {_qe}")
+
     # 🔴 Extract authoritative data from PDF OCR text (user-provided data ALWAYS wins)
     # 🔴 预公告解析要**跨材料挑最好的那一份**，不能「先到先得」：
     #    勘测定界报告/座谈会记录里也常出现「根据《中华人民共和国…」这类残缺引用，

@@ -2383,6 +2383,9 @@ class ReportAssembler:
         #    在小节边界处依次落下。稳评 / 其他章此调用是空操作。
         if ch_num == 4:
             self._init_ch4_tables(filled, markdown)
+        # 🔴 复垦第6章：表6-1 工程量汇总表由系统按地类算（模型写的同题表会被丢掉）
+        if ch_num == 6:
+            self._init_ch6_tables()
         # 🔴 复垦第7章：由 budget-maker 现算投资估算，补 表7-3/表7-4。
         #    稳评 / 其他章此调用是空操作。
         if ch_num == 7:
@@ -3303,16 +3306,18 @@ class ReportAssembler:
             logger.warning(f"[表4-x] 第4章分析表准备失败（不影响出报告）: {e}")
 
     def _budget_estimate(self):
-        """复垦投资估算（第7章表与报告表共用，**只连一次桥**）。
+        """复垦投资估算（第7章表与报告表共用，**只算一次**）。
 
-        数据链路：第6章 表6-1 的工程量 → 换定额编号 → budget-maker
-        `POST /api/ext/report-values` → 工程施工费/其他费用/预备费/静态·动态总投资。
-        桥不可用或表解析不出 → None（调用方保持原样，金额不编）。
+        优先用生成前预计算好的那份（`filled_data["_budget_estimate"]`，见
+        `reclamation_quantities.enrich_filled_data`）—— 第6/7章正文读的也是它，
+        报告表与附表才对得上。没有预计算（脚本路径 / 老会话）时才现连桥。
         """
         if getattr(self, "_budget_done", False):
             return getattr(self, "_budget_est", None)
         self._budget_done = True
-        self._budget_est = None
+        self._budget_est = (getattr(self, "_filled", None) or {}).get("_budget_estimate")
+        if self._budget_est is not None:
+            return self._budget_est
         from app.agent.chapter_catalog import uses_budget_bridge
         if not uses_budget_bridge(self._domain):
             return None
@@ -3320,12 +3325,13 @@ class ReportAssembler:
             from app.services.reclamation_budget_bridge import (
                 estimate_for_report, parse_quantity_rows,
             )
+            from app.services.reclamation_quantities import QUANTITY_ROWS_KEY
             fd = getattr(self, "_filled", None) or {}
-            ch6 = (getattr(self, "_chapters", {}) or {}).get(6) or {}
-            md6 = ch6.get("markdown", "") if isinstance(ch6, dict) else str(ch6)
-            rows = parse_quantity_rows(md6)
+            rows = (fd.get(QUANTITY_ROWS_KEY)
+                    or parse_quantity_rows(
+                        ((getattr(self, "_chapters", {}) or {}).get(6) or {}).get("markdown", "")))
             if not rows:
-                logger.info("[表7-x] 第6章没解析出工程量表，跳过投资估算")
+                logger.info("[表7-x] 没有工程量数据，跳过投资估算")
                 return None
             try:
                 _ha = float(str(fd.get("area_m2") or 0).replace(",", "")) / 10000.0
@@ -3342,6 +3348,32 @@ class ReportAssembler:
         except Exception as e:
             logger.warning(f"[表7-x] 投资估算取数失败（不影响出报告）: {e}")
         return self._budget_est
+
+    def _init_ch6_tables(self) -> None:
+        """第6章 表6-1「项目复垦工程量汇总表」—— 系统按勘测定界地类算，不由模型写。
+
+        模型自己写的那张表在 `_render_reclamation_system_table` 里被丢掉
+        （否则两张同题表、数字还打架）。
+        """
+        from app.agent.chapter_catalog import has_analysis_tables_in_body
+        if not has_analysis_tables_in_body(self._domain):
+            return
+        try:
+            from app.services.reclamation_quantities import (
+                QUANTITY_ROWS_KEY, build_quantity_table,
+            )
+            fd = getattr(self, "_filled", None) or {}
+            if not fd.get(QUANTITY_ROWS_KEY):
+                return
+            _t = build_quantity_table(fd)
+            if not _t:
+                return
+            _t = dict(_t)
+            _t["lead"] = ""
+            self._register_dyn_tables(6, [("6.2", _t)])
+            logger.info(f"[表6-1] 第6章工程量汇总表由系统渲染（{len(_t['rows'])} 行）")
+        except Exception as e:
+            logger.warning(f"[表6-1] 工程量表准备失败（不影响出报告）: {e}")
 
     def _init_ch7_tables(self) -> None:
         """第7章「投资估算」的 表7-3/表7-4 —— 数从 budget-maker 现算。
@@ -3399,6 +3431,22 @@ class ReportAssembler:
         filled = getattr(self, '_filled', None) or {}
         cap = str(caption or "").strip()
         _is_land = ("土地利用现状" in cap) or ("地类" in cap)
+
+        # ── 第6章：工程量汇总表**由系统算**（同一会话两次生成必须同数）──
+        #    模型那张表丢掉，**就地**换成系统表 —— 模型写「见表6-1」时表就在它原位置；
+        #    若模型压根没写这张表，则由 `_init_ch6_tables` 登记的那张在小节边界兜底。
+        if ch_num == 6 and ("工程量" in cap or "工程数量" in cap):
+            if filled.get("_quantity_rows"):
+                try:
+                    from app.services.reclamation_quantities import build_quantity_table
+                    _t = build_quantity_table(filled)
+                    if _t:
+                        self._render_dyn_table(doc, dict(_t, lead=""))
+                        (getattr(self, "_dyn_pending", {}) or {}).pop(6, None)
+                        logger.info(f"[表6-1] 丢弃模型写的工程量表，就地换成系统表：{cap}")
+                        return True
+                except Exception as e:                     # pragma: no cover
+                    logger.warning(f"[表6-1] 系统工程量表渲染失败，保留模型表: {e}")
 
         # ── 第3章：样本没有这张表 —— 整张丢掉（数据归第4章表4-4）──
         if ch_num == 3 and _is_land:

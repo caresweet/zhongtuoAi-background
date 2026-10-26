@@ -75,12 +75,15 @@ QUOTA_MAP: Dict[str, Dict[str, Any]] = {
         basis="定额 4-22「混凝土拆除 — 机械拆除 风镐 有钢筋」；算得综合单价 14755.59 元/100m³，"
               "与样本（盐业井神表7-3）实测 14294.34 元/100m³ 相差 3.2%，口径吻合"),
     "垫层清除": dict(
-        code="30063",
-        basis="定额 3-12「砌体拆除 — 机械拆除 干砌石」——垫层为碎石/干砌石类，定额无专项子目，取最近子目"),
+        code="40172", mpick={"液压挖掘机": "1.0m³"},
+        basis="定额 4-22「混凝土拆除 — 机械拆除 液压挖掘机」：垫层是碎石/素混凝土，"
+              "定额库无专项清除子目；算得 9534.56 元/100m³，与样本（明远表7-3）"
+              "实测 9444.21 元/100m³ 相差 1.0%，口径吻合"),
     "垃圾外运": dict(
-        code="20161", mpick={"自卸汽车": "自卸汽车 5t"},
-        basis="定额 2-18「1.0m³挖掘机装石渣自卸汽车运输 — 运距5km」；建筑垃圾按石渣外运，"
-              "自卸汽车取 5t（与金湖项目一致）"),
+        code="20157", mpick={"自卸汽车": "自卸汽车 5t"},
+        basis="定额 2-18「1.0m³挖掘机装石渣自卸汽车运输 — 运距1km」；建筑垃圾按石渣外运，"
+              "自卸汽车取 5t（与金湖项目一致），运距取定额最短档 1km"
+              "（样本 981.08/1840.84 元/100m³ 均低于书本任何运输档，按业主口径以书本为准）"),
     "土地翻耕": dict(
         code="10103",
         basis="定额 1-11「土地翻耕」，单位 hm²，与报告同单位，无需折算"),
@@ -401,10 +404,21 @@ def estimate_for_report(quantity_rows: Sequence[dict], *, area_ha: float = 0.0,
                         **chain_opts) -> Optional[BudgetEstimate]:
     """一步到位：表6-1 行 → 投资估算。桥不可用 / 没有可计价项 → None。
 
-    `service_months`（复垦服务年限，月）≤ 12 时，第二次带
-    `annual_static_investment=[静态总投资]` 复算一次，把价差预备费与动态总投资算出来
-    —— 依据是样本 表7-5 的 Wi = ai×((1+i)^ni−1)，单年度 ni=1。
-    超过 12 个月又没有分年投资安排时**不硬拆年度**，动态总投资留空。
+    ## 价差预备费怎么定（决定「动态总投资」）
+
+    书本公式 Wi = ai×((1+i)^ni − 1)，i = 5%，ai = 第 ni 年静态投资额。
+    `ni` 取**几年**要看复垦工作排在编制后第几年：
+
+      · 服务年限 ≤ 12 个月 → 当年完成，ni = 1 → 价差 = 静态 × 5%
+      · 服务年限 > 12 个月 → 复垦在第二年起实施，ni = 2 → 价差 = 静态 × 10.25%
+
+    依据：样本《盐业井神》表7-5 的价差 2.03 万 / 静态 19.85 万 = 10.22% = (1.05²−1)，
+    即 ni = 2。（明远样本那份 0.72 万 = 3.5%，套不上任何档，业主已说明样本
+    未按书本强对准，以书本算式为准。）
+
+    实现上不另造公式：把「第 ni 年一次投完」表达成 `annual_static_investment`
+    （前面各年为 0），桥端照原公式算即可。第一次调用拿静态总投资，第二次带年度
+    安排复算 —— 两次的工程量与费率完全相同，只有价差那一项变化。
     """
     if not quantity_rows:
         return None
@@ -421,10 +435,12 @@ def estimate_for_report(quantity_rows: Sequence[dict], *, area_ha: float = 0.0,
     if not est:
         return None
 
-    if est.dynamic_total is None and est.static_total > 0 and 0 < service_months <= 12:
+    if est.dynamic_total is None and est.static_total > 0:
+        _ni = 1 if 0 < service_months <= 12 else 2
+        _annual = [0.0] * (_ni - 1) + [est.static_total]
         p2, _ = build_payload(quantity_rows, area_ha=area_ha, project_name=project_name,
-                              dev_wan=dev_wan,
-                              annual_static_investment=[est.static_total], **chain_opts)
+                              dev_wan=dev_wan, annual_static_investment=_annual,
+                              **chain_opts)
         d2 = fetch_estimate(p2, endpoint=endpoint, timeout=timeout)
         est2 = to_estimate(d2) if d2 else None
         if est2 and est2.dynamic_total:

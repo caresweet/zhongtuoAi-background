@@ -1328,15 +1328,16 @@ def test_build_payload_maps_quota_and_direct_items():
 
 
 def test_engineering_table_total_matches_construction():
-    """表7-3 的分项**含直接计价项**，合计必须等于工程施工费（业主会逐行对账）。"""
+    """表7-3 的分项**含直接计价项**；合计取工程施工费，与表7-4「一」一分不差。"""
     from app.services.reclamation_budget_bridge import engineering_table
-    rows = engineering_table(_fake_estimate())["rows"]
+    est = _fake_estimate()
+    rows = engineering_table(est)["rows"]
     assert rows[0][0].startswith("表土剥离")
     assert any(r[0] == "土壤培肥（有机肥）" for r in rows)
-    _total_row = rows[-1]
-    assert _total_row[0] == "合计"
-    _sum = sum(float(r[4].replace(",", "")) for r in rows[:-1])
-    assert abs(_sum - float(_total_row[4].replace(",", ""))) < 0.005
+    assert rows[-1][0] == "合计"
+    assert rows[-1][4] == "5.7600"          # = est.construction，不是各行两位小数之和
+    # 行金额按「单价 × 工程量」现算：14755.59 × 2.4 / 10000 = 3.5413
+    assert rows[1][4] == "3.5413"
 
 
 def test_cost_rows_leave_dynamic_blank_when_not_computed():

@@ -471,24 +471,19 @@ def estimate_for_report(quantity_rows: Sequence[dict], *, area_ha: float = 0.0,
 def engineering_table(est: BudgetEstimate) -> Optional[dict]:
     """表7-3 工程施工费估算表：逐定额项 单位｜工程量｜综合单价｜合计。
 
-    直接计价项（定额库没有子目的材料类）单列在末尾 —— 否则分项之和 ≠ 工程施工费，
-    业主一对账就看出来了。
+    🔴 每行金额用 **单价 × 工程量** 现算（桥返回的 `amount_wan` 只到两位小数，
+       直接相加会比工程施工费多出几分 —— 业主逐行对账会看出来）。合计取
+       `est.construction`，保证与表7-4「一 工程施工费」一分不差。
+    直接计价项（定额库没有子目的材料类）单列在末尾，否则分项之和 ≠ 工程施工费。
     """
     if not est.items and not est.direct_items:
         return None
     rows = []
-    total = 0.0
-    for it in est.items:
-        amt = float(it.get("amount_wan") or 0.0)
-        total += amt
+    for it in (est.items or []) + (est.direct_items or []):
+        _amt = float(it.get("price") or 0.0) * float(it.get("qty") or 0.0) / 10000.0
         rows.append([str(it.get("name") or ""), str(it.get("unit") or ""),
-                     _f(it.get("qty"), 2), _f(it.get("price")), _f(amt, 4)])
-    for d in est.direct_items:
-        amt = float(d.get("amount_wan") or 0.0)
-        total += amt
-        rows.append([str(d.get("name") or ""), str(d.get("unit") or ""),
-                     _f(d.get("qty"), 2), _f(d.get("price")), _f(amt, 4)])
-    rows.append(["合计", "", "", "", _f(total, 4)])
+                     _f(it.get("qty"), 4), _f(it.get("price")), _f(_amt, 4)])
+    rows.append(["合计", "", "", "", _f(est.construction, 4)])
     return {"caption": "表7-3 工程施工费估算表",
             "headers": ["工程或费用名称", "单位", "工程量", "综合单价（元）", "合计（万元）"],
             "rows": rows}

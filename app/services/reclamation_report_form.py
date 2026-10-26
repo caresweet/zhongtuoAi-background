@@ -98,7 +98,8 @@ def collect_form_data(filled: dict, company: dict, personnel: Sequence[dict]) ->
         "项目区面积": f"{_ha} 公顷" if _ha else "",
         "投资规模": f"{_invest} {_invest_u}".strip() if _invest else "",
         "图幅号": _sheet,
-        "生产年限": _txt(fd.get("construct_period")),
+        "生产年限": (f"{_txt(fd['construct_period'])} 个月"
+                     if _txt(fd.get("construct_period")) else ""),
         "服务年限": (f"{_txt(fd['service_years'])} 个月"
                      if _txt(fd.get("service_years")) else ""),
         # 编制单位

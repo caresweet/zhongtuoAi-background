@@ -78,6 +78,24 @@ REPORT_MATERIAL_GUIDE = {
             {"name": "补偿标准文件", "format": "PDF", "note": "征地区片综合地价标准"},
         ],
     },
+    "reclamation": {
+        "title": "土地复垦方案",
+        "description": "用于临时用地（施工便道、材料堆场等）的土地复垦方案编制",
+        "required": [
+            {"name": "临时用地勘测定界报告", "format": "PDF",
+             "note": "含勘测定界图、界址点数据、土地分类面积表（工程量与投资的唯一数据源）"},
+            {"name": "主体项目批复文件", "format": "PDF",
+             "note": "立项核准 / 用地批准书 / 规划许可证（任一份即可）"},
+            {"name": "环境影响报告批复", "format": "PDF", "note": "环保部门批复文件"},
+            {"name": "土地利用现状图", "format": "图片/PDF", "note": "临时用地范围的土地利用现状图"},
+        ],
+        "optional": [
+            {"name": "现场照片", "format": "图片", "note": "临时用地现状、硬化层、堆场照片"},
+            {"name": "红线图 / 功能分布图", "format": "CAD/图片", "note": "主体用地红线、临时用地功能分区"},
+            {"name": "委托函 / 委托合同 / 临时用地协议", "format": "PDF", "note": "附件 1/2/5/6 项"},
+            {"name": "建设材料近期价格", "format": "PDF/Excel", "note": "附件 19 项，用于投资估算"},
+        ],
+    },
     "bidding": {
         "title": "投标文件",
         "description": "用于招投标项目的技术文件编制",
@@ -640,7 +658,11 @@ async def analyze_intent(request: dict):
 
     # 判断领域
     primary = intent.get("primary_intent", "")
-    if primary == "bidding_generation" or any(kw in user_input for kw in ["招标", "投标", "评标", "中标"]):
+    # 🔴 复垦优先判：「土地复垦方案」「临时用地复垦」这类表述里也可能出现"征地"，
+    #    不先判复垦就会被下面的 bidding/默认稳评分支吞掉（2026-10-28）。
+    if any(kw in user_input for kw in ["复垦", "土地复垦方案", "临时用地复垦"]):
+        domain = "reclamation"
+    elif primary == "bidding_generation" or any(kw in user_input for kw in ["招标", "投标", "评标", "中标"]):
         domain = "bidding"
     else:
         domain = "stability"

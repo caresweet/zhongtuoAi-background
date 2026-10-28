@@ -743,6 +743,19 @@ def apply_analysis_to_state(state: dict, analysis_result: Dict[str, Any]) -> Non
     # 2. Filled data updates
     updates = analysis_result.get("filled_data_updates", {})
     filled = state.setdefault("filled_data", {})
+    # 🔴 **视觉/AI 分析不得影响用户填的与材料识别出来的信息**（业主 2026-10-28 明确）。
+    #    记录过来源为 `user` / `material` 的键，这里一律不碰 —— 哪怕当前值是空的：
+    #    空值也应交给「解析值核对」去问，而不是让一张图的猜测顶上。
+    _preserve: set = set()
+    try:
+        from app.services.field_sources import MATERIAL, USER, source_of
+        _preserve = {str(k) for k in (updates or {})
+                     if source_of(filled, str(k)) in (USER, MATERIAL)}
+        if _preserve:
+            logger.info(f"[素材分析] AI 不改写用户/材料来源字段 {len(_preserve)} 个："
+                        f"{sorted(_preserve)[:8]}")
+    except Exception:
+        _preserve = set()
     _ai_keys = []
     for k, v in updates.items():
         # 🔴 不收 AI 自编的「土地统计摘要」类结构：它们**没有任何消费者**，
@@ -750,6 +763,16 @@ def apply_analysis_to_state(state: dict, analysis_result: Dict[str, Any]) -> Non
         #    （实测 land_statistics_summary=15268 / _land_by_category=14068 / 勘测定界=18929
         #      三套口径并存）。业主口径是「土地面积统一以勘测定界为准」。
         if k in _AI_AREA_SUMMARY_KEYS:
+            continue
+        if str(k) in _preserve:
+            continue
+        # 🔴 **项目名不许由图片/OCR 定**：视觉分析只是看图猜，一张误传进来的
+        #    别的项目的「位置图」就能把整份报告的项目名改掉。
+        #    实测 2026-10-28：洪拟征告〔2026〕7号 的会话里混进一张「万通国际新城」
+        #    的位置图，视觉分析把 `project_name` 写成「万通国际新城」，于是封面、
+        #    评审表「决策事项名称」全变成别的项目（业主：「不要串了」）。
+        #    规则：已有文号（预公告/批复）→ 项目名以文号那套为准，AI 不得改写。
+        if k == "project_name" and str(filled.get("doc_reference") or "").strip():
             continue
         if v and (k not in filled or not filled[k]):
             if isinstance(v, dict):

@@ -71,3 +71,41 @@ class TestMaterialNameWins:
         filled = {"doc_reference": "洪拟征告〔2026〕10号", "land_use": "工业用地"}
         sanitize_fields(filled, state=st)
         assert "洪拟征告〔2026〕10号" in filled["project_name"]
+
+
+class TestVisionCannotTouchMaterialFields:
+    """业主 2026-10-28：视觉分析不得影响用户填的 / 材料识别出来的信息。
+
+    实测事故：洪拟征告〔2026〕7号 的会话里混进一张「万通国际新城」的位置图，
+    视觉分析把 `project_name` 写成万通国际新城，封面与评审表全变成别的项目。
+    """
+
+    def _state(self, filled):
+        return {"filled_data": filled}
+
+    def test_material_sourced_key_is_untouched(self):
+        from app.services.deep_material_analyzer import apply_analysis_to_state
+
+        st = self._state({
+            "doc_reference": "洪拟征告〔2026〕7号",
+            "org_name": "淮安市洪泽区人民政府",
+            "_field_sources": {"org_name": "material"},
+        })
+        apply_analysis_to_state(st, {"filled_data_updates": {
+            "org_name": "万通国际新城管委会", "project_name": "万通国际新城"}})
+        assert st["filled_data"]["org_name"] == "淮安市洪泽区人民政府"
+        assert st["filled_data"].get("project_name", "") == ""
+
+    def test_user_sourced_key_is_untouched(self):
+        from app.services.deep_material_analyzer import apply_analysis_to_state
+
+        st = self._state({"area_mu": "489.511", "_field_sources": {"area_mu": "user"}})
+        apply_analysis_to_state(st, {"filled_data_updates": {"area_mu": "12.1"}})
+        assert st["filled_data"]["area_mu"] == "489.511"
+
+    def test_ai_can_still_fill_unclaimed_keys(self):
+        from app.services.deep_material_analyzer import apply_analysis_to_state
+
+        st = self._state({})
+        apply_analysis_to_state(st, {"filled_data_updates": {"household_count": "50"}})
+        assert st["filled_data"]["household_count"] == "50"

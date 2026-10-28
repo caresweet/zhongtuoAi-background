@@ -455,6 +455,11 @@ class ReportAssembler:
         #    重编号时跳过这些号，免得占掉样本表号。稳评恒为空字典。
         self._system_caption_nums: dict = {}
         self._rendered_extracted_tbls = set()  # 🔴 已就地渲染的 PDF 提取表（表1-1/4-1），防重复
+        # 🔴 已印出的表号（`6-1` 这种）—— 同表号第二次出现一律判重，
+        #    防止「系统按标记渲染一张 + 模型又手写一张」（实测 2026-10-28 表6-1 重复且错列）
+        self._rendered_captions: set = set()
+        # 已渲染系统表的表头签名 [(章号, frozenset(去单位表头), 行数)] —— 无表题重复表判重的依据
+        self._rendered_sigs: list = []
         # 🔴 这张计数器必须按次清零：界面走的是**全局单例** `report_assembler`，
         #    不清零的话**本进程内第二份报告**的表号会接着上一份往后排
         #    （表6-1 变表6-3），第一份正常、后面全错 —— 脚本里每次新建实例，
@@ -469,6 +474,19 @@ class ReportAssembler:
         self._table_issues = []  # 🔴 表格兜底发现的异常（供审核感知）
         session_id = state.get("session_id", "report")
         chapters = state.get("chapters", {})
+        # 🔴 章号键统一成 int：工作流内存里是 `{1: {...}}`，但**会话落盘（JSON）再读回来
+        #    就成了 `{"1": {...}}`** —— 装配器全程按 int 章号 `chapters.get(4)` 取值，
+        #    字符串键一个都取不到，于是出来的 Word **只有标题、封面和配图、正文全空**，
+        #    且不抛任何异常（实测 2026-10-28：23MB、106 张图、正文 1600 字）。
+        #    归一化放在入口，一次解决所有回调读。
+        if isinstance(chapters, dict):
+            _norm = {}
+            for _k, _v in chapters.items():
+                try:
+                    _norm[int(_k)] = _v
+                except (TypeError, ValueError):
+                    _norm[_k] = _v
+            chapters = _norm
         filled = state.get("filled_data", {})
         # `_render_md_table` 要按域改渲染（复垦表4-2）时用它取事实卡数据
         self._filled = filled
@@ -481,6 +499,37 @@ class ReportAssembler:
         self._domain = domain_of_state(state)
         _chapters = all_chapters(self._domain)   # 本域章号列表
         _total = total_chapters(self._domain)    # 本域总章数
+
+        # 🔴 稳评总分跨章一致性：第12章是自己算的表（如 W=0 分），第13章却常从参照范文里
+        #    抄一个**别的项目**的「综合风险指数 12.5 分」。以第12章结论值为准改写。
+        #    放在装配入口而不是工作流节点里 —— 脚本/离线重装配也走同一份代码，不会漏。
+        if self._domain == "stability":
+            try:
+                from app.validation.content_guardrails import (
+                    fix_risk_score_consistency, strip_chapter_self_reference)
+                chapters, _score_fixes = fix_risk_score_consistency(chapters)
+                if _score_fixes:
+                    logger.info("[风险指数] 统一 %d 处：%s", len(_score_fixes),
+                                "；".join(f"第{n}章 {o}→{v}" for n, o, v in _score_fixes[:6]))
+                chapters, _selfref = strip_chapter_self_reference(chapters)
+                if _selfref:
+                    logger.info("[章号自述] 去掉正文里的「第X章…」表述 %d 处", _selfref)
+                # 表12-4 必须与第11章的风险条目一一对应（实测只有 5 行、风险名还是自拟的）
+                from app.validation.content_guardrails import rebuild_risk_level_table
+                if rebuild_risk_level_table(chapters):
+                    logger.info("[表12-4] 与第11章风险条目不一致，已按小节重排")
+            except Exception as _se:
+                logger.warning(f"[风险指数] 一致性修正跳过: {_se}")
+
+        # 🔴 正文去重（两域通用）：模型偶尔把同一句/同一段连写两遍
+        #    （实测：「…涉及户数50户。50户。补偿方案制定应…」）。只删逐字重复与秃噜嘴的残句。
+        try:
+            from app.validation.content_guardrails import dedup_chapters
+            chapters, _dedup_n = dedup_chapters(chapters)
+            if _dedup_n:
+                logger.info("[去重] 去掉相邻重复句/段 %d 处", _dedup_n)
+        except Exception as _de:
+            logger.warning(f"[去重] 跳过: {_de}")
 
         # 🔴 用户在「选择报告人员」多选框里勾选的人员姓名（决定前置工作组名单 + 培训证书取图）
         #    优先级：会话 state → filled_data 透传（脚本生成走这条）→ 空表示"未选，用全部在职人员"
@@ -516,6 +565,20 @@ class ReportAssembler:
                 if not isinstance(md, str):
                     logger.error(f"Chapter {ch_num} markdown is {type(md).__name__}, not str!")
                     ch_data["markdown"] = str(md) if md else ""
+        # 🔴 正文为空必须**报警**：2026-10-28 稳评那次的症状是正文一个字都没进来，
+        #    装配器照常出稿 —— 一份 23MB、106 张图、正文只有 1600 字的 Word 文件，
+        #    没有任何一处日志说「正文没进来」，等于把坏稿当成品交出去。
+        #    键可能是 int（工作流内存里）也可能是 str（JSON 落盘再读回来），两种都认。
+        _md_by_no = {}
+        for _k, _v in (chapters or {}).items():
+            try:
+                _md_by_no[int(_k)] = str((_v or {}).get("markdown") or "") if isinstance(_v, dict) else ""
+            except (TypeError, ValueError):
+                continue
+        _empty_chs = [n for n in _chapters if not _md_by_no.get(n, "").strip()]
+        if chapters and len(_empty_chs) >= max(2, len(_chapters) // 2):
+            logger.error(f"[装配] 章节正文为空 {len(_empty_chs)}/{len(_chapters)} 章："
+                         f"{_empty_chs} —— 报告将只剩标题与配图，请查上方各节点日志")
 
         doc_ref = filled.get("doc_reference", "")
         # 责任单位：尝试多个字段名（不同数据源用不同key）
@@ -2524,6 +2587,14 @@ class ReportAssembler:
                 self._render_personnel_roster(doc)
                 continue
 
+            # 🔴 兜底：上面没认领的任何系统标记**一律不印进正文**。
+            #    标记是给装配器看的，漏进交付稿就是「[TABLE:ch9_public_survey]」
+            #    这种天书（业主 2026-10-28 直接指出「还有这种字段」）。
+            #    典型的漏网情形：标记里有多余空白、大小写不一，或被模型写进了句子中间。
+            if re.match(r'^\s*\[(?:TABLE|SYS_TABLE|SYS_ROSTER)\s*[:：]', s):
+                logger.warning(f"[标记] 第{ch_num}章有未渲染的系统标记，已丢弃：{s[:60]}")
+                continue
+
             if not s:
                 continue
 
@@ -2871,6 +2942,14 @@ class ReportAssembler:
         #       （表间分隔、遇到正文、章末），只挂章末那处根本不触发（实测）。
         if self._render_reclamation_system_table(doc, caption, ch_num):
             return
+        # 🔴 **同一张表号只印一次**：系统已按 `[SYS_TABLE:6-1]` 渲染过表6-1 之后，
+        #    模型又手写了一张同名表（实测 2026-10-28：第二张还列错位，
+        #    三圩社区六组「面积总计」印成 2481，实际 178769）。表题相同即判重。
+        _key = self._caption_key(caption)
+        if _key and _key in (getattr(self, "_rendered_captions", None) or set()):
+            logger.warning(f"[表去重] 第{ch_num}章重复表题「{caption[:24]}」—— "
+                           f"系统已渲染过该表，丢弃模型手写的这张")
+            return
         rows = []
         for line in table_lines:
             if re.match(r'^\|[\s\-:|—]+\|$', line):
@@ -2885,6 +2964,23 @@ class ReportAssembler:
 
         if len(rows) < 2:
             return
+
+        # 🔴 **无表题的 markdown 表**：与本章已渲染的系统表「表头高度重合 + 行数相同」→ 判重。
+        #    实测 2026-10-28：表6-1 由 `[SYS_TABLE:6-1]` 渲染后，模型又在「注：…」
+        #    之后手写了一张同样数据的表（**自己没写表题**，表头还被改成了
+        #    「面积总计(㎡)」这种带单位的写法、列序也乱了：三圩社区六组的
+        #    「面积总计」印成 2481，实际 178769）。按表题判重抓不到它，只能比对表头。
+        #    ⚠️ 只在**无表题**时启用：有表的（如表12-5 措施后评分表）即使表头与
+        #       表12-2 相同也必须各自保留。
+        if not caption:
+            _sig = self._header_sig(rows[0])
+            for _c, _s, _n in (getattr(self, "_rendered_sigs", None) or []):
+                if _c == int(ch_num or 0) and _n == len(rows) and _sig and _s:
+                    _inter = len(_sig & _s)
+                    if _inter / max(1, len(_sig | _s)) >= 0.7:
+                        logger.warning(f"[表去重] 第{ch_num}章无表题的 markdown 表与已渲染系统表"
+                                       f"重复（表头重合 {_inter}/{len(_sig | _s)}），丢弃")
+                        return
 
         ncols = max(len(r) for r in rows) if rows else 2
         # 🔴 这里原来有一条「第12章一律裁成 4 列」的钳制（旧章次下第12章只有
@@ -3204,8 +3300,39 @@ class ReportAssembler:
             return "群众意见分析"
         return ""
 
+    @staticmethod
+    def _caption_key(caption: str):
+        """「表6-1 土地分类面积表」→ `('6-1')`；不是表题返回 None。"""
+        m = re.match(r'^表\s*(\d+)\s*[-－]\s*(\d+)', str(caption or "").strip())
+        return f"{m.group(1)}-{m.group(2)}" if m else None
+
+    @staticmethod
+    def _header_sig(headers) -> frozenset:
+        """表头签名：去掉「（㎡）」这类单位括注再比对（模型手写时常把单位塞进表头）。"""
+        out = set()
+        for h in headers or []:
+            s = re.sub(r'[（(][^）)]*[）)]', '', str(h)).strip()
+            if s:
+                out.add(s)
+        return frozenset(out)
+
+    def _remember_table_sig(self, headers, nrows: int) -> None:
+        """记下系统渲染表的表头签名，供「无表题的重复表」判重用。"""
+        _sig = self._header_sig(headers)
+        _ch = int(getattr(self, "_current_chapter", 0) or 0)
+        if not (_ch and _sig):
+            return
+        if not hasattr(self, "_rendered_sigs") or self._rendered_sigs is None:
+            self._rendered_sigs = []
+        self._rendered_sigs.append((_ch, _sig, nrows))
+
     def _add_table_caption(self, doc, caption):
         """在表格正上方加表题（宋体 小四 12pt 居中）。"""
+        _k = self._caption_key(caption)
+        if _k:
+            if not hasattr(self, "_rendered_captions") or self._rendered_captions is None:
+                self._rendered_captions = set()
+            self._rendered_captions.add(_k)
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(caption)
@@ -3274,6 +3401,17 @@ class ReportAssembler:
             return
         for _sec, tbl in _store.pop(ch_num, []):
             self._render_dyn_table(doc, tbl)
+
+    @staticmethod
+    def _survey_rows_have_counts(rows) -> bool:
+        """问卷统计表是否**真有人数**（第 3 列）；全 0 / [待分析] 视为没有。"""
+        for r in rows or []:
+            try:
+                if float(str(r[2]).strip()) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _render_dyn_table(self, doc, tbl: dict) -> None:
         """引导语 + 表格（表题由 `_render_table_from_dict` 印在表格上方）。"""
@@ -3445,6 +3583,14 @@ class ReportAssembler:
         """
         filled = getattr(self, '_filled', None) or {}
         cap = str(caption or "").strip()
+        # 🔴 本函数是**复垦专用**的，稳评一律不进：它按 `land_classification` 是
+        #    dict（勘测定界视觉读出的地类表）写的，而稳评同名键是纯文本字符串
+        #    （「耕地为主…」）—— 直接进来就是 `'str' object has no attribute 'get'`，
+        #    **整份稳评装配失败、一个字都产不出来**（实测 2026-10-28）。
+        #    以前只在 `_render_md_table` 入口无条件调用，等于把复垦的取数口径
+        #    强加到稳评每一张 markdown 表上。域判断放这里，调用点保持通用。
+        if getattr(self, "_domain", "stability") != "reclamation":
+            return False
         _is_land = ("土地利用现状" in cap) or ("地类" in cap)
 
         # ── 第6章：工程量汇总表**由系统算**（同一会话两次生成必须同数）──
@@ -3470,7 +3616,8 @@ class ReportAssembler:
 
         # ── 第1章：换成样本的「临时用地拟损毁土地情况表」──
         if ch_num == 1 and ("损毁" in cap or _is_land):
-            lc = (filled.get("land_classification") or {})
+            lc = filled.get("land_classification")
+            lc = lc if isinstance(lc, dict) else {}
             _total = float(lc.get("合计_m2") or 0)
             if _total <= 0:
                 try:
@@ -3490,7 +3637,8 @@ class ReportAssembler:
             return True
 
         # ── 第4章：按地类逐项渲染（数据来自勘测定界的土地分类面积表）──
-        lc = (filled.get("land_classification") or {})
+        lc = filled.get("land_classification")
+        lc = lc if isinstance(lc, dict) else {}
         rows = lc.get("rows") or []
         if not rows or "临时用地土地利用现状统计表" not in cap:
             return False
@@ -3578,6 +3726,12 @@ class ReportAssembler:
         caption = caption or table_data.get("caption", "")
         if caption:
             self._add_table_caption(doc, caption)
+        # 🔴 记下签名：同章后面若冒出一张**无表题**但表头/行数都一样的表（模型手写的
+        #    重复表），`_render_md_table` 据此判重丢弃。
+        try:
+            self._remember_table_sig(headers, nrows)
+        except Exception:
+            pass
         table = doc.add_table(rows=nrows, cols=ncols, style='Table Grid')
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
@@ -3724,10 +3878,16 @@ class ReportAssembler:
                     # 🔴 必须 dict(...) 复制：generate_* 每次返回新 dict，但要改写
                     #    caption/headers 供第9章用，不能污染第3章口径。
                     tdata = dict(_gen(state) or {})
-                    if tdata.get("rows"):
+                    # 🔴 **一条实数据都没有就别出表**：实测 2026-10-28 表9-2（单位问卷）
+                    #    人数全 0、比例全「[待分析]」，而正文写着「2 个单位均表示了解」——
+                    #    印一张全 0 的统计表比不印更糟（评审会当数据造假看）。
+                    #    真正的问卷原件在附件里；缺逐题清点时宁可不渲染。
+                    if tdata.get("rows") and self._survey_rows_have_counts(tdata["rows"]):
                         tdata["caption"] = caption
                         tdata["headers"] = headers
                         out.append((marker, tdata))
+                    elif tdata.get("rows"):
+                        logger.warning(f"[第9章] {caption} 没有逐题人数，跳过不渲染（避免全 0 表）")
                 except Exception as _e:
                     logger.warning(f"第9章 {caption} 生成失败: {_e}")
             return out
@@ -3829,9 +3989,17 @@ class ReportAssembler:
             if isinstance(src, list):
                 for tbl in src:
                     if isinstance(tbl, dict):
-                        # Deduplicate by headers signature
-                        sig = '|'.join(str(h) for h in tbl.get('headers', [])[:5])
-                        if sig and sig not in seen:
+                        # 🔴 去重签名**必须先把表头里的单位括注剥掉**：
+                        #    同一个 PDF 表在两条抽取路径上会得到
+                        #    「面积总计/耕地/…」与「面积总计(㎡)/耕地(㎡)/…」两种表头，
+                        #    按原文比对判不出重复 → 两张都渲染进报告（实测 2026-10-28：
+                        #    表6-1 出了两张，第二张列还错位）。剥掉括注 + 带上行数再比。
+                        _hs = [re.sub(r'[（(][^）)]*[）)]', '', str(h)).strip()
+                               for h in (tbl.get('headers') or [])[:5]]
+                        if not any(_hs):
+                            continue
+                        sig = '|'.join(_hs) + f"#{len(tbl.get('rows') or [])}"
+                        if sig not in seen:
                             seen.add(sig)
                             all_tables.append(tbl)
 
@@ -3986,6 +4154,12 @@ class ReportAssembler:
             caption = tbl.get("_rendered_caption", "")
             if caption:
                 self._add_table_caption(doc, caption)
+            # 记签名：模型若在「注：…」之后又手写一张同表头同数据、**不带表题**的表，
+            # `_render_md_table` 会据此判重丢弃（实测 2026-10-28 表6-1 重复且列错位）。
+            try:
+                self._remember_table_sig(headers, nrows)
+            except Exception:
+                pass
 
             table = doc.add_table(rows=nrows, cols=ncols, style='Table Grid')
             table.alignment = WD_TABLE_ALIGNMENT.CENTER

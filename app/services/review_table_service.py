@@ -38,17 +38,44 @@ FILL_INSTRUCTIONS = [
 ]
 
 
+def _clean_md(md) -> str:
+    """去掉**系统标记行与图片行**：评审表里只放人话。
+
+    🔴 实测 2026-10-28（洪拟征告〔2026〕7号）：评审表「稳评方法与过程」那格直接印出
+       `[TABLE:ch9_public_survey]` —— 它是给装配器看的表格占位标记，被整节摘录原样搬进
+       评审表就成了天书（业主：「还有这种字段」）。图片行同理，摘进来只是一串路径。
+    """
+    if not md:
+        return ""
+    keep = []
+    for ln in str(md).splitlines():
+        if re.search(r'\[(?:TABLE|SYS_TABLE|SYS_ROSTER)\b', ln):
+            continue
+        if re.match(r'^\s*!\[', ln):
+            continue
+        # 🔴 「…如下表所示：」「…见下表：」是引出表格的**过渡句**：评审表不复制表格，
+        #    留着就是一句悬空的空话（业主 2026-10-28：「评审表应该全是正文对应地方的内容」）。
+        #    把这一小句摘掉，句子里的事实数字（50 份、100.0%）原样保留。
+        ln = re.sub(r'[^。；\n]{0,30}(?:如下表所示|见下表|见附表)\s*[：:，,]?\s*$', '', ln)
+        # 句中的「从上表可见，」「由下表可知，」同理：表不在这一格里，指代就是空的。
+        ln = re.sub(r'(?:从|由|见)?(?:上|下)表(?:可见|所示|可知)\s*[，,：:]?', '', ln)
+        # 🔴 评审表是**一张表**，不是某一章：正文摘录里的「本章」在这里要改成「本报告」。
+        ln = ln.replace("本章", "本报告")
+        keep.append(ln)
+    return "\n".join(keep)
+
+
 def _extract_from_chapters(chapters: dict) -> str:
     return "\n".join(
-        ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
+        _clean_md(ch.get("markdown", "")) if isinstance(ch, dict) else _clean_md(ch)
         for ch in (chapters or {}).values()
     )
 
 
 def _chapter_md(chapters: dict, num: int) -> str:
-    """取某章 markdown 正文。"""
+    """取某章 markdown 正文（已去系统标记）。"""
     ch = (chapters or {}).get(num) or {}
-    return ch.get("markdown", "") if isinstance(ch, dict) else str(ch or "")
+    return _clean_md(ch.get("markdown", "")) if isinstance(ch, dict) else _clean_md(ch)
 
 
 def _section_text(md: str, *heading_keywords: str, limit: int = 600,
@@ -156,6 +183,114 @@ def _pick_sentence(md: str, *keywords: str, limit: int = 220,
         if t and any(k in t for k in keywords) and not any(x in t for x in exclude):
             return t[:limit]
     return ""
+
+def _subsections(md: str):
+    """按二级「（一）xxx」把一章切成 `[(标题, 正文)]`（标题已剥编号）。
+
+    评审表有几栏要的是**清单**而不是整段摘录 —— 参照件（洞庭湖路）的
+    「主要风险因素」就是 `1.征收程序方面的风险 / 2.…` 六条小节名，
+    「降低风险措施」是 `1.规范征地程序` + 具体做法。用结构取，别整段搬。
+    """
+    items, cur, buf = [], None, []
+    for line in str(md or "").split("\n"):
+        s = line.strip()
+        m = re.match(r'^#{2,4}\s*（[一二三四五六七八九十]+）\s*(.+)$', s)
+        if m:
+            if cur:
+                items.append((cur, "\n".join(buf).strip()))
+            cur, buf = m.group(1).strip(), []
+            continue
+        if cur is not None and s:
+            buf.append(s)
+    if cur:
+        items.append((cur, "\n".join(buf).strip()))
+    return items
+
+
+def _numbered_subheads(md: str, limit: int = 12) -> str:
+    """小节标题 → `1.xxx` 清单（「主要风险因素」栏用）。"""
+    items = _subsections(md)
+    return "\n".join(f"{i}.{t}" for i, (t, _) in enumerate(items[:limit], 1))
+
+
+def _measure_items(md: str, limit: int = 8, para_chars: int = 160) -> str:
+    """小节 → `1.措施名` + 首段做法（「降低风险措施」栏用）。"""
+    lines = []
+    for i, (t, body) in enumerate(_subsections(md)[:limit], 1):
+        first = _plain_text(body.split("\n")[0]) if body else ""
+        first = re.sub(r'\s+', '', first)[:para_chars]
+        lines.append(f"{i}.{t}" + (f"\n{first}" if first else ""))
+    return "\n".join(lines)
+
+
+def _stakeholder_lines(filled: dict) -> str:
+    """「利益相关者情况」= **各类群体的数量范围**（参照件写法），不是问卷统计。
+
+    参照件（洞庭湖路）：
+        1.稳评责任单位（江苏洪泽经济开发区管理委员会）
+        2.街道（朱坝街道办事处、高良涧街道办事处）
+        3.集体经济组织（…大魏社区、…洪泽园三村社区）
+        4.被征地农户（初步统计涉及被征地农户71户…，最终数据以相关部门统计为准）
+
+    以上全部取自本项目的既有事实（责任单位、坐落、户数），推不出来的项就不写。
+    """
+    filled = filled or {}
+
+    def _txt(*keys):
+        for k in keys:
+            v = str(filled.get(k) or "").strip()
+            if v:
+                return v
+        return ""
+
+    def _uniq(seq):
+        out = []
+        for x in seq:
+            x = x.strip()
+            if x and x not in out:
+                out.append(x)
+        return out
+
+    org = _txt("org_name", "decision_unit", "responsible_unit")
+    loc = _txt("location", "land_location")
+    streets = _uniq(re.findall(r'[一-龥]{2,10}?(?:街道|镇|乡)', loc))
+    orgs = _uniq(re.findall(r'[一-龥]{2,10}?(?:社区|村)(?!民)', loc))
+    household = _txt("household_count")
+
+    lines = []
+    if org:
+        lines.append(f"{len(lines) + 1}.稳评责任单位（{org}）")
+    if streets:
+        lines.append(f"{len(lines) + 1}.街道（{'、'.join(streets)}）")
+    if orgs:
+        lines.append(f"{len(lines) + 1}.集体经济组织（{'、'.join(orgs)}）")
+    if household:
+        lines.append(f"{len(lines) + 1}.被征地农户（初步统计涉及被征地农户{household}户，"
+                     f"最终数据以相关部门统计为准）")
+    if not lines:
+        return ""
+    # 定义里这栏还要写**知晓参与情况**（各类群体的数量范围 + 知晓参与）
+    total = _txt("total_samples")
+    support = _txt("support_rate", "support_rate_pct")
+    if total or support:
+        tail = "被调查群众"
+        tail += f"共回收有效问卷{total}份" if total else ""
+        tail += f"，支持率{support}" if support else ""
+        lines.append("知晓参与情况：" + tail.lstrip("，") + "。")
+    return "\n".join(lines)
+
+
+def _ok_item(txt, fallback: str) -> str:
+    """决策概况的每一条：抽到的文字必须是**完整句子**，否则用规范表述兜底。
+
+    实测 2026-10-28：「6.资金筹措」印成了「洪泽区财政筹措单位」——模型归纳时截断的半句。
+    判据：≥12 字且以句末标点收尾。
+    """
+    t = str(txt or "").strip()
+    if len(t) >= 12 and t.endswith(("。", "；", "！", "？")):
+        return t
+    return fallback
+
 
 def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict = None) -> dict:
     """组装评审表所需的全部字段值（唯一数据装配点，DOCX 与 Markdown 共用）。"""
@@ -279,9 +414,13 @@ def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict
             (_pick_sentence(_ch6, '预公告期限为', '公告期限为', limit=130)
              + _pick_sentence(_ch6, '公示期为', limit=150))
             or f"征收土地预公告（{name}）已依法发布，社会稳定风险评估公示已按程序完成。"))),
-        "6.资金筹措 " + (_gb('资金筹措', _g('funding', default=(
-            _pick_sentence(_ch10, '财政统筹', '资金由', '纳入预算', limit=170)
-            or _pick_sentence(_ch6, '补偿安置等费用', limit=170))) )),
+        # 🔴 第6条常常只抽到一个**残句**（实测 2026-10-28 印出「洪泽区财政筹措单位」）。
+        #    判据：不足 12 字或不以句末标点收尾 → 视为没抽到，退回规范表述。
+        "6.资金筹措 " + (_ok_item(
+            _gb('资金筹措', _g('funding', default=(
+                _pick_sentence(_ch10, '财政统筹', '资金由', '纳入预算', limit=170)
+                or _pick_sentence(_ch6, '补偿安置等费用', limit=170)))),
+            "征收补偿安置等费用由属地财政按批准的征收补偿安置方案筹措落实。")),
         "7.决策实施周期 " + _gb('实施周期', _impl_period),
     ]
 
@@ -313,25 +452,33 @@ def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict
     legal_basis = ("（一）法律政策依据\n" + _laws
                    + ("\n\n（二）必要性\n" + _necessity if _necessity else ""))
     # 🔴 三行必须**各有来源**，否则印出来三段一模一样（实测三行都取到同一段）。
-    #    利益相关者情况 ← 各方意见汇总；群众诉求 ← 个人问卷；基层组织意见 ← 村民委员会/社区；
-    #    党委政府或相关部门意见 ← 单位（部门）问卷。
-    stakeholders = _section_text(_ch9, '各方意见', limit=400, body_fallback=True) \
-        or "【待填写：可从报告第9章「各利益相关者对项目的反映」摘录补充】"
-    # 🔴 仿参照件写法：这里是**群众诉求条目**（短句），不是问卷统计的长段描述。
-    #    素材来自第9章问卷结论 + 第11章群众关注点，只做概括，不加情节。
-    demands = ("1.补偿费用和土地换社保是群众最关心的两件事，希望补偿标准公开、补偿资金及时兑现。\n"
-               "2.希望能尽早明确补偿标准和安置方案，统一执行、不搞两套标准。\n"
-               "3.遇到问题愿意通过调解和正常渠道反映，希望基层能及时受理、就地化解。")
+    #    利益相关者情况 ← 各类群体清单（参照件写法，见 `_stakeholder_lines`）；
+    #    群众诉求 ← 第9章「利益相关者诉求」；
+    #    基层组织意见 ← 第9章「基层组织意见」；党委政府或相关部门意见 ← 第9章同名小节。
+    stakeholders = (
+        _stakeholder_lines(filled_data)
+        or _section_text(_ch9, '各方意见', limit=400, body_fallback=True)
+        or "【待填写：可从报告第9章「各利益相关者对项目的反映」摘录补充】")
+    # 🔴 群众诉求必须是**本项目的**：原文是一段写死的通用句（每个项目都印同样三句），
+    #    与参照件「被征地群众表示：希望…」的写法也对不上。改取第9章「利益相关者诉求」小节。
+    demands = (_gb('利益相关者诉求', '')
+               or _section_text(_ch9, '利益相关者诉求', '群众诉求', limit=500)
+               or _section_text(_ch9, '各方意见', limit=400)
+               or "【待填写：可从报告第9章「利益相关者诉求」摘录】")
     # 🔴 优先用 agent 归纳的（`node_review_table` 从正文归纳后经 `extracted` 传进来），
     #    规则抽取只作兜底 —— 动态小节名对不上关键词时，规则必然落空成「【待填写】」。
     grassroots = (_gb('基层组织意见', '') or _section_text(_ch6, '村民委员会', limit=300)
                   or _section_text(_ch9, '村民委员会', '基层组织', limit=300)) or "【待填写】"
     gov_opinion = (_gb('党委政府或相关部门意见', '')
                    or _section_text(_ch9, '单位', '部门', limit=300)) or "【待填写】"
-    risk_factors = _section_text(_ch11, '风险', limit=300, body_fallback=True) \
-        or "【待填写：可从报告第11章「分析预测风险源」摘录】"
-    risk_measures = _section_text(_ch13, '措施', '建议', limit=300, body_fallback=True) \
-        or "【待填写：可从报告第13章「防范和化解风险的工作建议」摘录】"
+    # 🔴 参照件里「主要风险因素」是 **1./2./3. 的风险名称清单**（不是整段描述），
+    #    「降低风险措施」是 **1.措施名 + 具体做法**。按小节标题结构化取，别再整段摘录。
+    risk_factors = (_numbered_subheads(_ch11)
+                    or _section_text(_ch11, '风险', limit=300, body_fallback=True)
+                    or "【待填写：可从报告第11章「分析预测风险源」摘录】")
+    risk_measures = (_measure_items(_ch13)
+                     or _section_text(_ch13, '措施', '建议', limit=300, body_fallback=True)
+                     or "【待填写：可从报告第13章「防范和化解风险的工作建议」摘录】")
 
     return {
         "name": name,

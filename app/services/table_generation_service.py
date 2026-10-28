@@ -996,7 +996,58 @@ class TableGenerationService:
         if stats.total_samples == 0:
             stats.total_samples = 0  # Will show [待分析] in table
 
+        # 🔴 兜底（实测 2026-10-28 踩过）：`filled["survey_dimension_text"]` 里
+        #    **已经有逐题清点结果**（「· 您是：本地居民（48人）、租住本区（1人）…」），
+        #    上面几条路径一个都没接住，于是表9-1 印出**人数全 0、比例 0.00%**，
+        #    而正文写着「发放 50 份、支持率 100%」—— 表与正文自相矛盾。
+        if not (stats.identity_groups or stats.age_groups or stats.occupation_groups
+                or stats.attitude_options):
+            fd = state.get("filled_data", {}) or {}
+            parsed = cls.parse_survey_dimension_text(fd.get("survey_dimension_text") or "")
+            for _k, _v in parsed.items():
+                if _v and not getattr(stats, _k, None):
+                    setattr(stats, _k, _v)
+            if stats.total_samples <= 0 and stats.attitude_options:
+                stats.total_samples = sum(stats.attitude_options.values())
         return stats
+
+    # 「· 您的年龄：16～35（5人）、36～55（26人）、56 以上（19人）」→ 分项字典
+    _DIM_HEADERS = (
+        ("您是否了解", "awareness_levels"),
+        ("对该决策是否支持", "attitude_options"),
+        ("解决诉求", "resolution_methods"),
+        ("您的年龄", "age_groups"),
+        ("您的职业", "occupation_groups"),
+        ("您是", "identity_groups"),
+    )
+
+    @classmethod
+    def parse_survey_dimension_text(cls, txt: str) -> Dict[str, Dict[str, float]]:
+        """把问卷逐题统计文本解析成 `{字段: {选项: 人数}}`。
+
+        文本形态（`filled_data["survey_dimension_text"]`，由问卷逐页清点生成）：
+            · 您是：本地居民（48人）、租住本区（1人）、附近上班（1人）
+            · 您的年龄：16～35（5人）、36～55（26人）、56 以上（19人）
+        解析不出来就返回空字典，调用方按原样处理。
+        """
+        out: Dict[str, Dict[str, float]] = {}
+        for line in str(txt or "").splitlines():
+            s = line.strip().lstrip("·•-— ").strip()
+            m = re.match(r'^([^：:]{2,20})[：:](.+)$', s)
+            if not m:
+                continue
+            head, body = m.group(1), m.group(2)
+            field = next((f for k, f in cls._DIM_HEADERS if k in head), None)
+            if not field:
+                continue
+            groups: Dict[str, float] = {}
+            for seg in re.split(r'[、，,]', body):
+                mm = re.match(r'^\s*(.+?)\s*[（(]\s*(\d+)\s*人\s*[）)]\s*$', seg)
+                if mm:
+                    groups[mm.group(1).strip()] = int(mm.group(2))
+            if groups:
+                out[field] = groups
+        return out
 
     @classmethod
     def _extract_department_survey_stats(cls, state: dict) -> DepartmentSurveyStats:

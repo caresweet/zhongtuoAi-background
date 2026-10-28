@@ -11,7 +11,7 @@ Enhanced with:
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Any, Dict, List, Tuple, Optional, Set
 
 # 只对稳评生效的检查名。复垦报告没有「支持率/户数/补偿」这类概念，
 # 且年份不该被钉死 —— 不加门控就会误报。
@@ -30,6 +30,9 @@ AI_BUZZWORDS = [
     '具有重要意义', '切实保障', '多措并举', '统筹推进',
     '综上所述', '有力支撑', '奠定了坚实基础', '提供了有力保障',
     '注入了强劲动力', '夯实基础',
+    # 公文/宣传腔（实测 2026-10-28 第1章「稳评理由」整段都是这类）：
+    # 「把重大事项晾晒在最广大群众的监督之下」「集中民智、凝聚民心」「搭起互动桥梁」
+    '集中民智', '凝聚民心', '晾晒', '互动桥梁', '有效组织实施',
 ]
 
 AI_BUZZWORD_PATTERNS = [
@@ -43,6 +46,8 @@ AI_BUZZWORD_PATTERNS = [
     (r'奠定了坚实基础', "AI套词-奠定了坚实基础"),
     (r'提供了有力保障', "AI套词-提供了有力保障"),
     (r'注入了强劲动力', "AI套词-注入了强劲动力"),
+    (r'(集中民智|凝聚民心|互动桥梁|有效组织实施)', "AI套词-公文宣传腔"),
+    (r'晾晒', "AI套词-晾晒"),
     (r'全方位[、，]多层次[、，]宽领域', "AI套词-三字排比"),
     (r'多维度[、，]全方位[、，]深层次', "AI套词-三字排比"),
     (r'系统[、，]全面[、，]深入', "AI套词-三字排比"),
@@ -976,3 +981,244 @@ def fix_chapters_against_facts(
                 ch['status'] = 'fact_fixed'
 
     return chapters, fixes
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 稳评总分的一致性（跨章）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 「稳评总分W=0分」「综合风险指数为12.5分」「风险指数 8 分」三种写法都认。
+_RISK_SCORE_PAT = re.compile(
+    r'(?P<lead>(?:稳评总分|综合风险指数|风险指数)\s*(?:W\s*)?(?:为|是)?\s*[=＝]?\s*)'
+    r'(?P<num>\d+(?:\.\d+)?)\s*分')
+
+
+def fix_risk_score_consistency(chapters: Dict[Any, Dict[str, Any]]):
+    """把各章引用的「稳评总分/综合风险指数」统一成**第12章评分表的结论值**。
+
+    为什么必须有这条（实测 2026-10-28，洪拟征告〔2026〕7号）：
+        第12章量化评分表 21 项扣分全 0，明确写「措施前稳评总分 W=0 分」；
+        第13章开头却写「措施前综合风险指数为**12.5分**」—— 12.5 是从参照范文里
+        抄来的**别的项目**的数字，与本报告自己的评分表直接打架，业主一眼看出来。
+        这类数字不在事实库里（它是第12章表算出来的），`fix_chapters_against_facts`
+        管不到，只能做**跨章一致性**：以第12章为准，别的章一律对齐。
+
+    取权威值：第12章里**最后一次**出现的那个（结论句在章末）。
+    返回 (chapters, [(章号, 旧值, 新值), ...])。
+    """
+    ref = None
+    _md12 = (chapters.get(12) or chapters.get("12") or {})
+    if isinstance(_md12, dict):
+        _hits = _RISK_SCORE_PAT.findall(str(_md12.get("markdown") or ""))
+        if _hits:
+            ref = _hits[-1][1]
+    if ref is None:
+        return chapters, []
+
+    fixes = []
+    for ch_num, ch in chapters.items():
+        if not isinstance(ch, dict):
+            continue
+        md = str(ch.get("markdown") or "")
+        if not md:
+            continue
+
+        def _sub(m, _n=ch_num):
+            if m.group("num") == ref:
+                return m.group(0)
+            fixes.append((_n, m.group("num"), ref))
+            return f"{m.group('lead')}{ref}分"
+
+        new_md = _RISK_SCORE_PAT.sub(_sub, md)
+        # 🔴 已全项 0 分还说「扣分均有下降空间、可进一步降低」是**事实矛盾**（不能再降了）。
+        #    实测 2026-10-28 第13章结尾就是这么写的。W=0 时把这些句子整句删掉。
+        if str(ref).strip() in ("0", "0.0", "0.00"):
+            new_md = re.sub(r'[^。！？\n]*?(?:扣分|风险指数)[^。！？\n]{0,30}'
+                            r'(?:下降空间|进一步降低)[^。！？\n]*[。！？]', '', new_md)
+        if new_md != md:
+            ch["markdown"] = new_md
+
+    return chapters, fixes
+
+
+# 「第11章识别出…」「经第12章量化评分…」这类**内部章号自述**。
+# 只认后面紧跟这几种动词的写法；「详见第12章表12-4」这种合法交叉引用不受影响。
+_CH_SELFREF_PAT = re.compile(
+    r'第[一二三四五六七八九十百\d]+章(?=\s*(?:识别|量化|分析|测算|所述|评价|判定))')
+
+# 「本章针对…」「本章将…」整句删除（句首位置，含换行后）。
+_CH_SELF_SENT_PAT = re.compile(
+    r'(?:(?<=[。！？])|(?<=\n)|^)\s*本章[^。！？\n]{0,80}[。！？]', re.M)
+
+
+def strip_chapter_self_reference(chapters: Dict[Any, Dict[str, Any]]):
+    """去掉正文里的「第11章识别出…、经第12章量化评分…」式章号自述。
+
+    业主 2026-10-28 指出这句「话术不正确」：评审表与正文里写「第11章…第12章…」，
+    读起来像**编制说明**而不是报告正文；章号本来是目录的事，正文该直接说事。
+    改成「识别出本项目六项风险因素，经量化评分，…」—— 语义不变、不丢数据。
+
+    返回 (chapters, 改写处数)。
+    """
+    n = 0
+    for ch in chapters.values():
+        if not isinstance(ch, dict):
+            continue
+        md = str(ch.get("markdown") or "")
+        if not md:
+            continue
+        new_md, k = _CH_SELFREF_PAT.subn("", md)
+        # 「本章针对各项风险逐条提出…」「本章将…」这类**章节自述**一并删掉：
+        # 正文只写事，不写"我这一章打算写什么"（业主 2026-10-28 指出「话术不正确」）。
+        new_md, k2 = _CH_SELF_SENT_PAT.subn("", new_md)
+        if k or k2:
+            ch["markdown"] = new_md
+            n += k + k2
+    return chapters, n
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 正文去重（相邻重复句 / 残句 / 重复段）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 「…涉及约50户被征地群众。50户。」这类**把刚说过的数又秃噜一遍**的残句。
+# 判据：去掉标点后 ≤ 8 字、含数字、且内容原样出现在上一句里。
+_FRAG_MAX = 8
+
+
+def dedup_repeated_text(md: str) -> Tuple[str, int]:
+    """去掉正文里**紧邻重复**的句子/残句/段落，返回 `(新文本, 去掉处数)`。
+
+    只动「一模一样」或「明显是秃噜嘴」的重复，不做语义改写 —— 宁可漏，不可误删。
+
+    实测来源（业主 2026-10-28 指出「需要去重」）：
+        「本次拟征收土地面积489.5亩……涉及户数50户。50户。补偿方案制定应……」
+    以及模型偶发的整段重复（同一段连写两遍）。
+    """
+    text = str(md or "")
+    if not text:
+        return text, 0
+    removed = 0
+
+    # ── ① 段落级：相邻两段逐字相同 → 去后一段 ──
+    paras = text.split("\n\n")
+    kept_paras = []
+    for p in paras:
+        if kept_paras and p.strip() and p.strip() == kept_paras[-1].strip():
+            removed += 1
+            continue
+        kept_paras.append(p)
+    text = "\n\n".join(kept_paras)
+
+    # ── ② 句子级：逐段拆句，去掉紧邻重复句与残句 ──
+    out_paras = []
+    for p in text.split("\n\n"):
+        if not p.strip():
+            out_paras.append(p)
+            continue
+        sents = [s for s in re.split(r'(?<=[。！？；])', p) if s]
+        kept: List[str] = []
+        for s in sents:
+            core = s.strip().rstrip("。！？；")
+            prev = kept[-1].strip() if kept else ""
+            prev_core = prev.rstrip("。！？；")
+            # 紧邻重复句（≥4 字才算重复，太短的多为标点碎片）
+            if core and len(core) >= 4 and core == prev_core:
+                removed += 1
+                continue
+            # 残句：极短 + 含数字 + 上一句已包含同样内容
+            if (core and len(core) <= _FRAG_MAX and re.search(r'\d', core)
+                    and prev_core and core in prev_core):
+                removed += 1
+                continue
+            kept.append(s)
+        out_paras.append("".join(kept))
+
+    return "\n\n".join(out_paras), removed
+
+
+def dedup_chapters(chapters: Dict[Any, Dict[str, Any]]):
+    """全章正文去重，返回 `(chapters, 去掉处数)`。"""
+    n = 0
+    for ch in chapters.values():
+        if not isinstance(ch, dict):
+            continue
+        md = str(ch.get("markdown") or "")
+        if not md:
+            continue
+        new_md, k = dedup_repeated_text(md)
+        if k:
+            ch["markdown"] = new_md
+            n += k
+    return chapters, n
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 表12-4 主要风险因素初始风险等级表 —— 必须与第11章逐条对应
+# ═══════════════════════════════════════════════════════════════════════════════
+# 实测 2026-10-28：第11章列了**六项**风险（（一）～（六）），第12章正文也写
+# 「六项风险、4 项一般 2 项较小」；可模型手写的 表12-4 只有 **5 行**，风险名还是
+# 自拟的（「补偿标准争议」「社保安置衔接」…）—— 表、章、结论三处对不上。
+# 这里按第11章的小节与各小节自己的「风险程度为 X」结论**重排该表**。
+
+_RISK_LEVEL_PAT = re.compile(r'风险程度为\s*(重大|较大|一般|较小|微小)')
+
+
+def _ch11_items(md: str) -> List[Tuple[str, str]]:
+    """第11章的小节 → [(风险名, 风险程度)]，程度取该小节内最后一次判定。"""
+    items, cur, buf = [], None, []
+
+    def _flush():
+        if cur is None:
+            return
+        lv = _RISK_LEVEL_PAT.findall("\n".join(buf))
+        items.append((cur, lv[-1] if lv else ""))
+
+    for line in str(md or "").split("\n"):
+        s = line.strip()
+        m = re.match(r'^#{2,4}\s*（[一二三四五六七八九十]+）\s*(.+)$', s)
+        if m:
+            _flush()
+            cur, buf = m.group(1).strip(), []
+            continue
+        if cur is not None and s:
+            buf.append(s)
+    _flush()
+    return items
+
+
+def rebuild_risk_level_table(chapters: Dict[Any, Dict[str, Any]]):
+    """按第11章小节重排第12章的「主要风险因素初始风险等级表」，返回改写处数。
+
+    只在**行数与第11章风险条数不一致**时动手 —— 一致就说明模型自己排对了。
+    """
+    md11 = str(((chapters.get(11) or chapters.get("11") or {}) if isinstance(
+        chapters.get(11) or chapters.get("11"), dict) else {}).get("markdown") or "")
+    items = _ch11_items(md11)
+    if len(items) < 3:
+        return 0
+    ch12 = chapters.get(12) or chapters.get("12")
+    if not isinstance(ch12, dict):
+        return 0
+    md = str(ch12.get("markdown") or "")
+    if not md:
+        return 0
+    # 定位那张表：表头含「风险因素」与「风险等级」的 markdown 表块
+    lines = md.split("\n")
+    hdr_i = next((i for i, ln in enumerate(lines)
+                  if ln.strip().startswith("|")
+                  and "风险因素" in ln and "风险等级" in ln), None)
+    if hdr_i is None:
+        return 0
+    end = hdr_i
+    while end < len(lines) and lines[end].strip().startswith("|"):
+        end += 1
+    data_rows = max(0, end - hdr_i - 2)          # 去表头与分隔线
+    if data_rows == len(items):
+        return 0
+
+    new_tbl = ["| 序号 | 风险因素 | 初始风险等级 |", "| --- | --- | --- |"]
+    for i, (name, level) in enumerate(items, 1):
+        new_tbl.append(f"| {i} | {name} | {level or '低风险'} |")
+    ch12["markdown"] = "\n".join(lines[:hdr_i] + new_tbl + lines[end:])
+    return 1

@@ -1584,3 +1584,43 @@ def test_area_chart_is_landscape(tmp_path):
     assert ok is True
     with PILImage.open(out) as im:
         assert im.width > im.height * 1.3
+
+
+# ════════════════════════════════════════════════════════════
+# L. 复垦专用的系统表渲染器**不得接管稳评**
+# ════════════════════════════════════════════════════════════
+# 实测（2026-10-28）：稳评提交生成后在装配阶段整份失败 ——
+#   `AttributedError: 'str' object has no attribute 'get'`
+# 落点是 `_render_reclamation_system_table` 里 `lc.get("rows")`，
+# 而 `lc` 来自 `filled["land_classification"]`：复垦是勘测定界视觉读出的 dict，
+# 稳评是纯文本（「以耕地为主」）。该函数挂在 `_render_md_table` 入口、
+# **对每一张 markdown 表无条件调用**，于是稳评第 4 章那张普通表格把它踩崩，
+# 一个字都产不出来。
+
+def test_stability_table_is_not_hijacked_by_reclamation_renderer():
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler()
+    a._domain = "stability"
+    a._filled = {"land_classification": "以耕地为主，另有少量沟渠"}
+    a._session_state = {}
+    doc = Document()
+    assert a._render_reclamation_system_table(
+        doc, "表4-2 临时用地土地利用现状统计表", 4) is False
+    # 再走一遍真实入口：不得抛异常，且照常渲染成普通表
+    a._render_md_table(doc, ["| 地类 | 面积（㎡） |", "|---|---|", "| 耕地 | 8070.0 |"],
+                       4, {}, caption="表4-2 临时用地土地利用现状统计表")
+    assert len(doc.tables) == 1
+
+
+def test_reclamation_renderer_tolerates_str_land_classification():
+    """复垦会话里若 `land_classification` 被写成字符串，也只跳过、不能崩。"""
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler()
+    a._domain = "reclamation"
+    a._filled = {"land_classification": "耕地为主"}
+    a._session_state = {}
+    doc = Document()
+    assert a._render_reclamation_system_table(
+        doc, "表4-2 临时用地土地利用现状统计表", 4) is False
+    assert a._render_reclamation_system_table(
+        doc, "表1-1 临时用地拟损毁土地情况表", 1) is True   # 第1章按面积兜底仍成立

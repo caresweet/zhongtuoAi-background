@@ -1997,7 +1997,10 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
     except Exception as e:
         state["errors"] = state.get("errors",[]) + [f"组装失败: {e}"]
         state["phase"] = WorkflowPhase.ERROR.value
-        logger.error(f"assemble failed: {e}")
+        # 🔴 必须带堆栈：这里只打一句话时，线上只能看到
+        #    「'str' object has no attribute 'get'」这种没头没尾的消息，
+        #    定位不到是哪一段把 dict 写成了 str（实测 2026-10-28 稳评装配失败）。
+        logger.error(f"assemble failed: {e}", exc_info=True)
 
     return state
 

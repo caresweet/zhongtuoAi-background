@@ -192,3 +192,205 @@ def test_table_title_renumbering_works_past_chapter_ten():
     titles = [p.text.strip() for p in d.paragraphs if p.text.strip().startswith("表")]
     assert titles == ["表12-1 稳评风险等级确定量化指标评价体系（措施前）", "表12-2 群众意见分析"], titles
     assert not any(re.search(r"表11-1", p.text) for p in d.paragraphs)
+
+
+# ════════════════════════════════════════════════════════
+# ④ 系统标记绝不能印进正文
+# ════════════════════════════════════════════════════════
+
+def test_unrendered_system_markers_never_reach_the_document():
+    """`[TABLE:…]` / `[SYS_TABLE:…]` 是给装配器看的，漏进交付稿就是天书。
+
+    实测 2026-10-28：业主在成稿里看到「[TABLE:ch9_public_survey]」字样。
+    """
+    from docx import Document
+
+    a = _fresh_assembler()
+    a._domain = "stability"
+    a._filled = {}
+    d = Document()
+    a._setup_page(d)
+    md = ("### （一）问卷调查情况\n\n引导语。\n\n"
+          "[TABLE:ch9_unknown_table]\n\n"
+          "[SYS_TABLE:9-9]\n\n"
+          "[TABLE: ch9_public_survey]\n\n"
+          "解读句。\n")
+    a._add_chapter(d, 9, md, {}, {}, [], {})
+    text = "\n".join(p.text for p in d.paragraphs)
+    assert "[TABLE" not in text and "[SYS_TABLE" not in text
+    assert "引导语" in text and "解读句" in text
+
+
+# ════════════════════════════════════════════════════════
+# ⑤ 稳评总分跨章一致
+# ════════════════════════════════════════════════════════
+
+def test_risk_score_is_unified_across_chapters():
+    """第13章从范文抄来的「综合风险指数 12.5 分」必须对齐第12章的 W=0 分。"""
+    from app.validation.content_guardrails import fix_risk_score_consistency
+
+    chapters = {
+        12: {"markdown": "扣分合计即为稳评总分W。\n\n综上，措施前稳评总分 W=0 分，判定为低风险。"},
+        13: {"markdown": "第11章识别出本项目六项风险因素，经第12章量化评分，"
+                         "措施前综合风险指数为12.5分，风险等级为低风险。"},
+    }
+    out, fixes = fix_risk_score_consistency(chapters)
+    assert "12.5" not in out[13]["markdown"]
+    assert "综合风险指数为0分" in out[13]["markdown"]
+    assert fixes and fixes[0][0] == 13
+
+
+def test_risk_score_fix_keeps_consistent_text_untouched():
+    from app.validation.content_guardrails import fix_risk_score_consistency
+
+    md12 = "措施前稳评总分 W=0 分。"
+    chapters = {12: {"markdown": md12}, 13: {"markdown": "综合风险指数为0分，属低风险。"}}
+    out, fixes = fix_risk_score_consistency(chapters)
+    assert fixes == [] and out[13]["markdown"] == chapters[13]["markdown"]
+
+
+# ════════════════════════════════════════════════════════
+# ⑥ 评审表摘录不得带系统标记
+# ════════════════════════════════════════════════════════
+
+def test_review_table_extracts_clean_text():
+    """评审表「稳评方法与过程」一格曾印出 `[TABLE:ch9_public_survey]`（2026-10-28 实测）。"""
+    from app.services.review_table_service import _chapter_md, _extract_from_chapters
+
+    chapters = {
+        9: {"markdown": "（一）问卷调查情况\n\n引导语。\n\n[TABLE:ch9_public_survey]\n\n解读句。"},
+        6: {"markdown": "![现场图](images/x.jpg)\n\n第6章正文。"},
+    }
+    txt = _extract_from_chapters(chapters)
+    assert "[TABLE" not in txt and "![" not in txt
+    assert "引导语" in txt and "解读句" in txt
+    assert "[TABLE" not in _chapter_md(chapters, 9)
+
+
+def test_review_table_drops_dangling_table_leadin():
+    """评审表里不能留「…如下表所示：」这种悬空句子（表格并未复制进来）。"""
+    from app.services.review_table_service import _chapter_md
+
+    md = ("个人问卷统计情况如下表所示：\n\n"
+          "本次调查共发放个人问卷50份，回收有效问卷50份，回收率100.0%。\n\n"
+          "[TABLE:ch9_public_survey]\n")
+    out = _chapter_md({9: {"markdown": md}}, 9)
+    assert "如下表所示" not in out
+    assert "50份" in out and "100.0%" in out
+
+
+def test_chapter_self_reference_is_stripped_but_crossref_kept():
+    """正文/评审表里不写「第11章识别出…经第12章量化评分」；合法的「详见第12章表12-4」保留。"""
+    from app.validation.content_guardrails import strip_chapter_self_reference
+
+    chapters = {
+        13: {"markdown": "第11章识别出本项目六项风险因素，经第12章量化评分，"
+                         "措施前综合风险指数为0分，风险等级为低风险。"},
+        11: {"markdown": "…初始风险等级汇总详见第12章表12-4。"},
+    }
+    out, n = strip_chapter_self_reference(chapters)
+    assert n == 2
+    assert "第11章" not in out[13]["markdown"] and "第12章" not in out[13]["markdown"]
+    assert "识别出本项目六项风险因素" in out[13]["markdown"]
+    assert "详见第12章表12-4" in out[11]["markdown"]
+
+
+# ════════════════════════════════════════════════════════
+# ⑦ 评审表各栏的取数位置要对上参照件（洞庭湖路）
+# ════════════════════════════════════════════════════════
+
+def test_review_stakeholders_is_group_list_not_survey_stats():
+    """「利益相关者情况」要写各类群体清单（参照件写法），不是问卷统计。"""
+    from app.services.review_table_service import _build_review_data
+
+    filled = {"org_name": "淮安市洪泽区人民政府",
+              "location": "朱坝街道办事处、三圩社区、二组、三组、六组",
+              "household_count": "50", "total_samples": "50", "support_rate": "100%"}
+    d = _build_review_data(filled, {}, {})
+    s = d["stakeholders"]
+    assert "稳评责任单位（淮安市洪泽区人民政府）" in s
+    assert "街道（朱坝街道）" in s
+    assert "集体经济组织（三圩社区）" in s
+    assert "被征地农户" in s and "50" in s
+
+
+def test_review_risk_factors_are_numbered_subheads():
+    """「主要风险因素」是 1./2. 的风险名称清单（参照件写法）。"""
+    from app.services.review_table_service import _build_review_data
+
+    md = ("## 11 分析预测风险源\n\n### （一）征收程序方面的风险\n正文甲。\n\n"
+          "### （二）土地征收补偿方案方面的风险\n正文乙。\n")
+    d = _build_review_data({}, {11: {"markdown": md}}, {})
+    assert d["risk_factors"] == "1.征收程序方面的风险\n2.土地征收补偿方案方面的风险"
+
+
+def test_review_risk_measures_carry_title_and_first_para():
+    from app.services.review_table_service import _build_review_data
+
+    md = ("## 13 防范和化解风险的工作建议\n\n### （一）规范征地程序\n严格履行相关程序。\n\n"
+          "### （二）合法制定补偿方案\n做好政策解释。\n")
+    d = _build_review_data({}, {13: {"markdown": md}}, {})
+    assert d["risk_measures"].startswith("1.规范征地程序\n严格履行相关程序。")
+    assert "2.合法制定补偿方案" in d["risk_measures"]
+
+
+# ════════════════════════════════════════════════════════
+# ⑧ 去重 & 表9-1 取数
+# ════════════════════════════════════════════════════════
+
+def test_dedup_removes_repeated_fragment_and_paragraph():
+    from app.validation.content_guardrails import dedup_repeated_text
+
+    md = "本次拟征收土地面积489.5亩，涉及户数50户。50户。补偿方案制定应严格对照标准。"
+    out, n = dedup_repeated_text(md)
+    assert n == 1 and "50户。50户" not in out and "涉及户数50户。补偿方案" in out
+
+    out2, n2 = dedup_repeated_text("第一段内容。\n\n第一段内容。\n\n第二段。")
+    assert n2 == 1 and out2.count("第一段内容") == 1
+
+
+def test_same_table_number_is_rendered_once():
+    """系统已渲染表6-1后，模型手写的同名表必须丢弃（实测重复且错列）。"""
+    a = _fresh_assembler()
+    a._rendered_captions = set()
+    d = Document()
+    a._setup_page(d)
+    lines = ["| 单位 | 面积 |", "|---|---|", "| 甲 | 100 |"]
+    a._render_md_table(d, lines, 6, {}, caption="表6-1 土地分类面积表")
+    a._render_md_table(d, lines, 6, {}, caption="表6-1 土地分类面积表")
+    assert len(d.tables) == 1
+
+
+def test_survey_table_reads_dimension_text_instead_of_zeros():
+    """表9-1 必须用 `survey_dimension_text` 的逐题清点，不能印全 0。"""
+    from app.services.table_generation_service import TableGenerationService
+
+    state = {"filled_data": {
+        "survey_total_count": 50,
+        "survey_dimension_text": (
+            "【问卷调查分项统计（共 50 份，逐题勾选结果）】\n"
+            "  · 您是：本地居民（48人）、租住本区（1人）、附近上班（1人）\n"
+            "  · 您的年龄：16～35（5人）、36～55（26人）、56 以上（19人）\n"
+            "  · 对该决策是否支持：支持（50人）")}}
+    t = TableGenerationService.generate_table_3_1(state)
+    flat = {tuple(r[:2]): r[2] for r in t["rows"]}
+    assert flat[("您是", "本地居民")] == "48"
+    assert flat[("您的年龄", "36～55")] == "26"
+    assert flat[("对该决策是否支持", "支持")] == "50"
+
+
+def test_risk_level_table_rebuilt_to_match_ch11():
+    """表12-4 的风险条目必须与第11章小节一一对应（实测 6 项被写成 5 条自拟名）。"""
+    from app.validation.content_guardrails import rebuild_risk_level_table
+
+    ch11 = ("## 11 分析预测风险源\n\n### （一）甲风险\n正文。该事项风险程度为一般。\n\n"
+            "### （二）乙风险\n正文。该事项风险程度为较小。\n\n"
+            "### （三）丙风险\n正文。该事项风险程度为一般。\n")
+    ch12 = ("## 12 确定风险等级\n\n| 序号 | 风险因素 | 发生概率 | 影响程度 | 初始风险等级 |\n"
+            "| --- | --- | --- | --- | --- |\n| 1 | 模型自拟名 | 低 | 一般 | 低风险 |\n\n结论段。\n")
+    chapters = {11: {"markdown": ch11}, 12: {"markdown": ch12}}
+    assert rebuild_risk_level_table(chapters) == 1
+    md = chapters[12]["markdown"]
+    assert "| 1 | 甲风险 | 一般 |" in md
+    assert "| 2 | 乙风险 | 较小 |" in md
+    assert "模型自拟名" not in md and "结论段。" in md

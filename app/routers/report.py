@@ -167,6 +167,25 @@ def _regex_extract_data(text: str) -> dict:
     return extracted
 
 
+def _has_live_bg_task(session) -> bool:
+    """本进程里还有没有存活的生成后台任务。
+
+    🔴 服务重启后 `_bg_tasks` 里的 Task 对象已随进程消失（或根本没被恢复），
+       此时状态里却还可能写着 `_workflow_running=True` —— 用它区分「真在跑」与「僵尸」。
+    """
+    try:
+        tasks = (getattr(session, "state", None) or {}).get("_bg_tasks") or []
+    except Exception:
+        return False
+    for t in tasks:
+        try:
+            if not t.done():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _has_real_data(state: dict, attachments: list | None = None) -> bool:
     """会话里有没有**真材料**（不是用户敲进去的几个字）。
 
@@ -2492,6 +2511,8 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
 
     async def _progress_cb(phase, steps):
         state["phase"] = phase; state["step_statuses"] = steps; session.state = state
+        # 🔴 心跳：每推进一个节点就刷新，供 `workflow_status` 判断「任务是否卡死」。
+        state["_workflow_heartbeat"] = __import__('time').time()
         # Add log entry for each phase change
         labels = {"analysis": "📂 正在解析上传资料...", "checking": "📋 正在检查数据完整性...",
                   "generating": "✍️ 正在逐章生成报告...", "assembling": "📄 正在组装 DOCX 报告..."}
@@ -2795,6 +2816,7 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest, user: U
     state["step_statuses"] = {"analysis": "running", "generation": "pending", "assembly": "pending"}
     state["_workflow_running"] = True
     state["_workflow_started_at"] = __import__('time').time()  # For timeout detection in workflow_status
+    state["_workflow_heartbeat"] = state["_workflow_started_at"]  # 心跳起点：卡死判据用
     # Do NOT auto-fill — let master orchestrator detect missing fields and prompt user
     session.state = state
 
@@ -2967,6 +2989,38 @@ async def workflow_status(
         except (OSError, ValueError):
             subprocess_error = "生成进程异常退出，请重试"
             running = False
+
+    # 🔴 僵尸任务兜底（2026-10-29 事故）：后台 asyncio 任务在**服务重启/进程崩溃**后就没了，
+    #    但 `_workflow_running` 还留在会话状态里 = True —— 前端据此**无限轮询**，
+    #    用户看到的就是「生成一直卡着」（实测有人挂了 16 小时后只能手动取消）。
+    #    判据：标记在跑、不在暂停态，但本进程里**没有任何存活的后台任务** → 判为中断。
+    #    暂停态不算：暂停时任务已正常返回，等用户填表。
+    if running and not paused and not _has_live_bg_task(session):
+        state["_workflow_running"] = False
+        state["_workflow_interrupted"] = True
+        state["phase"] = "error"
+        state.setdefault("_workflow_logs", []).append(
+            "❌ 生成任务已中断（服务重启或异常退出），请点击「开始生成」重新生成")
+        session.state = state
+        running = False
+
+    # 🔴 进程内卡死兜底：任务还活着但**长时间没有任何进度**（心跳停摆）→ 判为卡死。
+    #    心跳由 `_run_workflow_bg` 的进度回调与各节点完成时刷新；30 分钟没动静就不正常
+    #    （单章最慢实测约 4 分钟）。
+    if running and not paused:
+        _hb = state.get("_workflow_heartbeat") or state.get("_workflow_started_at") or 0
+        if _hb:
+            import time as _t2
+            _idle = _t2.time() - float(_hb)
+            if _idle > 1800:
+                state["_workflow_running"] = False
+                state["_workflow_interrupted"] = True
+                state["phase"] = "error"
+                state.setdefault("_workflow_logs", []).append(
+                    f"❌ 生成已 {int(_idle/60)} 分钟没有任何进展，判定为卡死，请重新生成")
+                session.state = state
+                running = False
+                _log.warning(f"[WATCHDOG] 会话 {session_id[:12]} 心跳停摆 {_idle/60:.0f} 分钟，已判中断")
 
     # 🔴 不做时间限制——生成时长不固定，改为记录耗时供优化。
     # 若运行超长（>60分钟）仅记录日志，不中断生成。

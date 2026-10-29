@@ -1637,6 +1637,30 @@ async def _draft_gap_fills(pending: list, filled: dict,
         return {}
 
 
+def _apply_gap_drafts(chapters: dict, pending: list, drafts: dict):
+    """把 AI 拟好的替代句**就地替换**正文里的遁词句。
+
+    `pending` 是 `[(key, 章号, gap_dict)]`，`gap_dict["sentence"]` 是原始那句遁词。
+    返回 `(已替换数, 未替换数, 已解决的 key 集合)`。
+
+    为什么必须在正文里替换：以前草稿只进 `filled["_fallbacks"]`，正文那句
+    「以…为准」原样留着 —— 报告读起来仍是空心话，前端还一直显示「N 处待补充」。
+    """
+    applied, left, resolved = 0, 0, set()
+    for key, ch, g in (pending or []):
+        draft = str((drafts or {}).get(key, "") or "").strip()
+        sent = str((g or {}).get("sentence") or "").strip()
+        ch_obj = chapters.get(ch) or chapters.get(str(ch))
+        md = str((ch_obj or {}).get("markdown") or "") if isinstance(ch_obj, dict) else ""
+        if draft and sent and sent in md:
+            ch_obj["markdown"] = md.replace(sent, draft, 1)
+            resolved.add(key)
+            applied += 1
+        else:
+            left += 1
+    return applied, left, resolved
+
+
 async def node_gap_review(state: ReportWorkflowState) -> ReportWorkflowState:
     """生成后缺口核对。
 
@@ -1708,17 +1732,25 @@ async def node_gap_review(state: ReportWorkflowState) -> ReportWorkflowState:
     #    见 `_draft_field_fallbacks` 的说明），批次记为「确认保持」，直接去组装。
     if not ENABLE_DATA_INQUIRY:
         _fb = filled.setdefault("_fallbacks", {})
-        _drafted = 0
-        for _it in items:
-            _v = str(_it.get("current") or "").strip()
-            if _v:
-                _fb.setdefault(f"gap:{_it['key']}", _v)
-                _drafted += 1
-        acked |= {_it["key"] for _it in items}
+        # 🔴 **就地改写**：AI 拟好的替代句直接替换正文里那句遁词 —— 以前只把草稿存进
+        #    `_fallbacks`（事实卡兜底区），正文里那句「以…为准」**原样留着**，于是
+        #    成稿仍是遁词、前端一直显示「N 处待补充」（业主 2026-10-29：「这个在生成
+        #    的时候改不了么？」）。就地改写后，遁词从正文消失，清单自然变少。
+        _applied, _left, _resolved = _apply_gap_drafts(chapters, pending, _drafts)
+        for _k, _c, _g in pending:      # 草稿一律进兜底区（没替换上的也有据可查）
+            _d = str(_drafts.get(_k, "") or "").strip()
+            if _d:
+                _fb.setdefault(f"gap:{_k}", _d)
+        # 旧清单里那些**已经被改写掉**的句子不能再留着 —— 否则组装时 `collect_gaps`
+        # 会把历史缺口并进来，前端继续显示已经不存在的缺口。
+        state["_chapter_gaps"] = {}
+        acked |= {k for k, _c, _g in pending}      # 不重复问
         state["_gap_ack"] = sorted(acked)
         state["filled_data"] = filled
-        logs.append(f"✍️ 正文 {len(items)} 处缺口已由 AI 拟替代文字"
-                    f"（{_drafted} 条进事实卡兜底区，不打断生成）")
+        state["chapters"] = chapters
+        logs.append(
+            f"✍️ 正文 {len(items)} 处缺口：AI 已就地改写 {_applied} 处"
+            + (f"，{_left} 处保留提示（缺硬数据）" if _left else ""))
         state["_next_action"] = "assemble"
         return state
 

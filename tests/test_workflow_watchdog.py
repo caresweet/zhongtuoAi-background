@@ -46,3 +46,25 @@ def test_live_task_is_alive():
         return alive
 
     assert asyncio.run(_run()) is True
+
+
+# ════════════════════════════════════════════════════════
+# 缺口草稿必须**写进正文**，不是只存兜底区
+# ════════════════════════════════════════════════════════
+# 业主 2026-10-29：「本次生成有 13 处待补充/待核对 —— 这个在生成的时候改不了么？」
+# 原因是 AI 拟好的替代句只进了事实卡兜底区，正文那句「以…为准」原样留着。
+
+def test_gap_drafts_replace_hedge_sentences_in_body():
+    from app.services.report_workflow import _apply_gap_drafts
+
+    chapters = {6: {"markdown": "第一句。以征收补偿安置方案为准。第三句。"}}
+    pending = [
+        ("_gap_6_0", 6, {"sentence": "以征收补偿安置方案为准。"}),
+        ("_gap_6_1", 6, {"sentence": "这句正文里没有。"}),
+    ]
+    drafts = {"_gap_6_0": "补偿标准按洪政规〔2026〕1号执行。", "_gap_6_1": "无关草稿"}
+    applied, left, resolved = _apply_gap_drafts(chapters, pending, drafts)
+    assert (applied, left) == (1, 1)
+    assert resolved == {"_gap_6_0"}
+    assert "以征收补偿安置方案为准" not in chapters[6]["markdown"]
+    assert "洪政规〔2026〕1号" in chapters[6]["markdown"]

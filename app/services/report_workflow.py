@@ -54,6 +54,11 @@ ENABLE_HUMAN_REVIEW = os.environ.get("ENABLE_HUMAN_REVIEW", "false").lower() in 
 #      不问就只能印占位符。这是刻意保留的**唯一**提问点。
 ENABLE_DATA_INQUIRY = os.environ.get("ENABLE_DATA_INQUIRY", "false").lower() in ("1", "true", "yes")
 
+# 🔴 缺口弹窗单独一个开关（业主 2026-10-29：「缺少数据的可以弹窗问用户啊」）：
+#    AI 能拟出替代句的缺口**不打扰**（就地改写），只把**真缺硬数据**的那几条弹窗问。
+#    与 `ENABLE_DATA_INQUIRY`（生成前的整批字段核对）分开，避免又把「一堆字段」弹给用户。
+ENABLE_GAP_INQUIRY = os.environ.get("ENABLE_GAP_INQUIRY", "true").lower() in ("1", "true", "yes")
+
 # ── Progress emitter ───────────────────────────────────────────────────────────
 _progress_callback = None
 def set_workflow_progress_callback(cb): global _progress_callback; _progress_callback = cb
@@ -1727,41 +1732,62 @@ async def node_gap_review(state: ReportWorkflowState) -> ReportWorkflowState:
         _it["source"] = "AI 已拟稿，可采纳或改写" if _draft else "缺口核对"
         _it["example"] = "直接采纳，或写一句你的想法让 AI 重写"
 
-    # 🔴 默认**不打断**（业主 2026-09-29：尽量少问用户）：
-    #    AI 已拟好的替代文字写进 `filled["_fallbacks"]`（事实卡的兜底草稿通道，
-    #    见 `_draft_field_fallbacks` 的说明），批次记为「确认保持」，直接去组装。
-    if not ENABLE_DATA_INQUIRY:
-        _fb = filled.setdefault("_fallbacks", {})
-        # 🔴 **就地改写**：AI 拟好的替代句直接替换正文里那句遁词 —— 以前只把草稿存进
-        #    `_fallbacks`（事实卡兜底区），正文里那句「以…为准」**原样留着**，于是
-        #    成稿仍是遁词、前端一直显示「N 处待补充」（业主 2026-10-29：「这个在生成
-        #    的时候改不了么？」）。就地改写后，遁词从正文消失，清单自然变少。
-        _applied, _left, _resolved = _apply_gap_drafts(chapters, pending, _drafts)
-        for _k, _c, _g in pending:      # 草稿一律进兜底区（没替换上的也有据可查）
+    # 🔴 两步走（业主 2026-10-29 口径）：
+    #    ① AI 能拟出替代句的缺口 → **就地改写正文**，不打扰用户；
+    #    ② 真缺硬数据、AI 也拟不出的 → **弹窗问用户**（以前只在清单里列出来）。
+    #
+    # ⚠️ 改写必须放在 interrupt **之后**执行：LangGraph 的 `interrupt()` 恢复时，
+    #    节点会**从头重跑**、中断前写进 state 的内容全部丢弃（只有节点 return 才落盘）。
+    #    所以这里先**预判**哪些能改写（纯读），弹窗回来后统一落笔。
+    def _can_rewrite(key, ch, g) -> bool:
+        d = str(_drafts.get(key, "") or "").strip()
+        sent = str((g or {}).get("sentence") or "").strip()
+        obj = chapters.get(ch) or chapters.get(str(ch))
+        md = str((obj or {}).get("markdown") or "") if isinstance(obj, dict) else ""
+        return bool(d and sent and sent in md)
+
+    _fb = filled.setdefault("_fallbacks", {})
+    _resolvable = {k for k, c, g in pending if _can_rewrite(k, c, g)}
+    _residual = [it for it in items if it.get("key") not in _resolvable]
+
+    def _finalize_rewrite():
+        """落笔：替换正文、草稿进兜底区、清旧清单。返回改写处数。"""
+        applied, _left_n, _res = _apply_gap_drafts(chapters, pending, _drafts)
+        for _k, _c, _g in pending:
             _d = str(_drafts.get(_k, "") or "").strip()
             if _d:
                 _fb.setdefault(f"gap:{_k}", _d)
-        # 旧清单里那些**已经被改写掉**的句子不能再留着 —— 否则组装时 `collect_gaps`
-        # 会把历史缺口并进来，前端继续显示已经不存在的缺口。
+        # 旧清单里已经被改写掉的句子不能留着，否则组装时 `collect_gaps` 又并回来
         state["_chapter_gaps"] = {}
-        acked |= {k for k, _c, _g in pending}      # 不重复问
-        state["_gap_ack"] = sorted(acked)
         state["filled_data"] = filled
         state["chapters"] = chapters
-        logs.append(
-            f"✍️ 正文 {len(items)} 处缺口：AI 已就地改写 {_applied} 处"
-            + (f"，{_left} 处保留提示（缺硬数据）" if _left else ""))
+        return applied, _res
+
+    # 全部能改完，或用户明确关掉了缺口问询 → 直接组装
+    if not _residual or not ENABLE_GAP_INQUIRY:
+        _applied, _ = _finalize_rewrite()
+        acked |= {k for k, _c, _g in pending}      # 不重复问
+        state["_gap_ack"] = sorted(acked)
+        logs.append(f"✍️ 正文 {len(items)} 处缺口：AI 已就地改写 {_applied} 处"
+                    + (f"，{len(_residual)} 处保留提示（缺硬数据）" if _residual else ""))
         state["_next_action"] = "assemble"
         return state
 
     from langgraph.types import interrupt
-    logs.append(f"⏸️ 正文有 {len(items)} 处缺少素材支撑，已拟好替代文字待你确认")
-    ui = interrupt({"type": "gap_review", "gaps": items, "missing_fields": items})
+    _res_keys = {it["key"] for it in _residual}
+    logs.append(f"✍️ 可自动改写 {len(_resolvable)} 处；⏸️ 还有 {len(_residual)} 处缺硬数据，"
+                f"已弹窗请你补充（可跳过）")
+    ui = interrupt({"type": "gap_review", "gaps": _residual, "missing_fields": _residual})
+
+    # 恢复后**先落笔改写**（中断前写的不算数），再处理用户补充的内容
+    _applied, _resolved = _finalize_rewrite()
 
     _notes = filled.setdefault("_supplement_notes", [])
     rewrite_ch, rewrite_issues = [], {}
     if isinstance(ui, dict):
         for key, ch, g in pending:
+            if key not in _res_keys:        # 已由 AI 就地改写，不再问
+                continue
             val = ui.get(key, "")
             if val and str(val).strip():
                 _notes.append({"chapter": ch, "note": str(val).strip(),

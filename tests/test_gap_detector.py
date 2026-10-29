@@ -1,4 +1,9 @@
-"""回归：遁词检测 —— 把「以…为准」的**推脱**句标成缺口，法定援引必须放行。
+"""回归：缺口检测 —— 只抓**真缺东西**的地方。
+
+🔴 2026-10-29 业主口径：「以…为准」不要再当缺口处理（那是标准法律写法，
+   拿大白话去改公文只会越改越不像话）。现在只抓：悬置（待…后补）、
+   材料截断、空泛判断。
+
 
 这个模块的全部价值在于**信噪比**：
   · 漏报 → 客户看不到缺口，遁词留在成稿里（「不留空」被架空）；
@@ -42,28 +47,8 @@ class TestLegitimateReferencesMustPass:
         assert detect_evasions(sentence, 10, {}) == []
 
 
-class TestRealEvasionMustBeCaught:
-    def test_reference_to_asset_we_already_have(self):
-        """签到表已在上传材料里，正文却推给它 → 真遁词。"""
-        md = "参会人员包括群众代表，实际参加人员以座谈会签到表为准。"
-        gaps = detect_evasions(md, 8, {"_classified_images": {"survey": ["images/签到表_x.jpg"]}})
-        hit = [g for g in gaps if g["reason"] == "evasion_phrase"]
-        assert hit, "指向已上传签到表的遁词没被标出来"
-        assert "签到表已在上传材料中" in hit[0]["detail"]
-
-    def test_reference_to_parsed_land_survey(self):
-        md = "具体征收范围以征收土地预公告所附红线图及勘测定界成果为准。"
-        gaps = detect_evasions(md, 6, {})
-        assert any(g["reason"] == "evasion_phrase" and "勘测定界" in g["detail"] for g in gaps)
-
-    def test_sentence_with_date_still_flagged(self):
-        """🔴 整句带日期不能豁免 —— 判据只能是**援引片段本身**。
-        实测踩过：「2026年9月6日，…，实际参加人员以座谈会签到表为准。」被整句
-        的日期放行，这是全篇最该报的一条。"""
-        md = ("2026年9月6日，评估工作组在朱坝街道集体组织座谈会，"
-              "参会人员包括群众代表及相关部门人员，实际参加人员以座谈会签到表为准。")
-        gaps = detect_evasions(md, 8, {"_classified_images": {"survey": ["images/签到表_x.jpg"]}})
-        assert any(g["reason"] == "evasion_phrase" for g in gaps), "整句带日期导致漏报"
+class TestDeferredAndTruncated:
+    """仍然要抓的两类：把数据推给后续程序、材料原文没抄完。"""
 
     def test_deferred_data(self):
         md = "拟征收土地涉及的具体户数、人口数，待现状调查和权属确认工作完成后进一步补充确认。"
@@ -75,28 +60,23 @@ class TestRealEvasionMustBeCaught:
         gaps = detect_evasions(md, 6, {})
         assert "material_truncated" in _kinds(gaps)
 
-    def test_escalates_when_fact_card_already_has_value(self):
-        """句里提到的数据事实卡里已有 → 不是「要等调查」，是「没接上」，应升级为 warn。"""
-        md = "本次征收范围内的具体户数以现状调查确认结果为准。"
-        gaps = detect_evasions(md, 6, {"filled_data": {"household_count": "120"}})
-        esc = [g for g in gaps if g["reason"] == "evasion_phrase"]
-        assert esc and esc[0]["severity"] == "warn"
-        assert "120" in esc[0]["detail"]
-
-    def test_stays_info_when_value_unknown(self):
-        md = "本次征收范围内的具体户数以现状调查确认结果为准。"
-        gaps = detect_evasions(md, 6, {"filled_data": {}})
-        v = [g for g in gaps if g["reason"] == "vague_reference"]
-        assert v and v[0]["severity"] == "info"
+    def test_reference_wording_is_no_longer_a_gap(self):
+        """🔴 业主 2026-10-29：「以……为准」不再作为缺口处理。"""
+        for md in (
+            "具体征收范围以勘测定界成果为准。",
+            "实际参加人员以座谈会签到表为准。",
+            "本次征收范围内的具体户数以现状调查确认结果为准。",
+        ):
+            assert detect_evasions(md, 6, {"_classified_images": {"survey": ["images/签到表_x.jpg"]}}) == [], md
 
 
 class TestDoesNotTouchBody:
     def test_detector_returns_gaps_only(self):
         """检测器**只标注、不改正文** —— 正文留占位符违反硬约束。"""
-        md = "具体征收范围以勘测定界成果为准。"
+        md = "具体户数待现状调查完成后补充确认。"
         gaps = detect_evasions(md, 6, {})
         assert gaps
-        assert md == "具体征收范围以勘测定界成果为准。"
+        assert md == "具体户数待现状调查完成后补充确认。"
         for g in gaps:
             assert "【待补充】" not in g["detail"]
             assert "【待填写】" not in g["detail"]
@@ -115,11 +95,11 @@ class TestCollectGaps:
         }
         chapters = {
             7: "## 7.6 工作计划\n\n正常正文。",
-            8: "实际参加人员以座谈会签到表为准。",
+            8: "具体人数待现状调查完成后补充确认。",
         }
         acc = collect_gaps(st, chapters)
         assert 7 in acc and any(g["reason"] == "work_schedule_missing" for g in acc[7])
-        assert 8 in acc and any(g["reason"] == "evasion_phrase" for g in acc[8])
+        assert 8 in acc and any(g["reason"] == "deferred_data" for g in acc[8])
 
     def test_tolerates_string_and_int_chapter_keys(self):
         """JSON 往返会把章号变成字符串 —— 两种键都要认。"""
@@ -139,8 +119,8 @@ class TestCollectGapsDedup:
         `collect_gaps` 若既读它又重跑一遍，同一处缺口会出现**两条** ——
         实测第6章 5 项翻成 10 项，弹窗里同一件事问两遍。
         """
-        md = "参会人员包括群众代表，实际参加人员以座谈会签到表为准。"
-        st = {"_classified_images": {"survey": ["images/签到表_x.jpg"]}}
+        md = "参会人员包括群众代表，具体人数待现状调查完成后补充确认。"
+        st = {}
         first = collect_gaps(st, {8: md})
         n1 = len(first.get(8) or [])
         assert n1, "首次应当检出缺口"
@@ -149,7 +129,7 @@ class TestCollectGapsDedup:
         assert len(second.get(8) or []) == n1, "重复检测导致缺口翻倍"
 
     def test_idempotent_across_repeated_calls(self):
-        md = "具体征收范围以勘测定界成果为准。"
+        md = "具体户数待现状调查完成后补充确认。"
         st = {}
         a = collect_gaps(st, {6: md})
         b = collect_gaps(st, {6: md})

@@ -906,20 +906,11 @@ def style_rules(domain: str | None, chapter_number: int | None = None) -> str:
     if domain != _RECLAMATION:
         return ""
 
-    block = (
-        "## ✍️ 行文要求（复垦）\n"
-        "- 单句尽量不超过 40 字，一句话只说一件事；长句宁可断开\n"
-        "- 同一章里不要连续三段用同一个开头（「本项目…」「该项目…」「本方案…」）：换主语，或直接说事实\n"
-        "- 写具体：面积、数量、工艺、时限能写就写；不写「加强」「提升」「有力保障」这类空话\n"
-        # 🔴 配图必须有数据解读：业主「每个图片内容放入的小节上都要有对应的数据分析」
-        "- 🔴 **配图要有数据解读**：凡是本章出现图的小节，图前用一句话说明这张图画的是什么，"
-        "图后用 2～3 句把图上的数字讲清楚（面积、占比、数量、去向），口径必须与正文表格一致；"
-        "只放图、不解读的一律不接受\n"
-        "\n"
-    )
-
+    # 通用行文底线（短句/换开头/禁空话/配图须解读）已移到
+    # `app/content_rules/common_style.md` + `reclamation_style.md`；
+    # 这里只放**逐章专规**，避免两处规则打架。
     if int(chapter_number or 0) == 1:
-        block += (
+        return (
             "## ✍️ 本章专规（第1章 前言 · **只写文字**）\n"
             "- 全章**只写文字**：不排表格、不配图、不做数据分析\n"
             "- 1.1 编制背景及过程：把立项背景、委托关系、工作过程（资料收集→现场踏勘→方案编制→成果对接）叙述清楚\n"
@@ -928,7 +919,7 @@ def style_rules(domain: str | None, chapter_number: int | None = None) -> str:
             "- 禁止「如下表所示」「从上表看」「占比多少」这类表格引导与解读句（本章没有表）\n"
             "\n"
         )
-    return block
+    return ""
 
 
 def chapter_data_iron_rule(domain: str | None) -> str:

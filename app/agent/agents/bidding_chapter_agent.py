@@ -50,6 +50,22 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _system_prompt() -> str:
+    """投标的行文规则优先读 `app/content_rules/bidding_style.md`（+ common）。
+
+    读不到（文件缺失/打包丢文件）退回本文件内置的那段，保证不断供。
+    """
+    try:
+        from app.services.content_rules import load_domain_rules
+        from app.validation.content_guardrails import AI_BUZZWORDS
+        rules = load_domain_rules("bidding", buzzwords="、".join(AI_BUZZWORDS))
+        if rules:
+            return "你是招标投标文件编写专家，替供应商写投标（磋商）响应文件。\n" + rules
+    except Exception as e:      # pragma: no cover - 兜底路径
+        logger.warning(f"[投标] 读取 content_rules 失败，用内置规则: {e}")
+    return _SYSTEM_PROMPT
+
+
 class BiddingChapterAgent(BaseAgent):
     """Generate a single chapter/module of a bidding document."""
 
@@ -105,7 +121,7 @@ class BiddingChapterAgent(BaseAgent):
 
         resp = await self._llm.chat(
             messages=[{"role": "user", "content": user}],
-            system=_SYSTEM_PROMPT,
+            system=_system_prompt(),
             max_tokens=4000,
             temperature=0.35,
         )

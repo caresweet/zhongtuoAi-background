@@ -55,3 +55,25 @@ def test_audit_accepts_figure_with_analysis():
           "图上红线范围为临时用地，东西长约120米、南北宽约65米，面积8070平方米。\n")
     a = audit_chapters({3: {"markdown": md}})
     assert a["by_kind"].get("figure_no_text") is None
+
+
+# ── 分域规则 md（业主 2026-10-30：「不同类型报告各一份 md，内容大多不能复用」）──
+
+def test_domain_rules_come_from_separate_md():
+    from app.services.content_rules import load_domain_rules
+
+    rec = load_domain_rules("reclamation", buzzwords="套话A、套话B")
+    bid = load_domain_rules("bidding", buzzwords="套话A")
+    assert "不套用其他报告类型的写法" in rec
+    assert "以勘测定界成果为准" in rec
+    assert "配图要有数据解读" in rec
+    assert "套话A" in rec            # 通用块占位符已替换
+    assert "投标专属禁忌" in bid
+    assert "复垦专属" not in bid
+
+
+def test_reclamation_prompt_uses_own_rules_not_stability_wording():
+    p = _prompt("reclamation", 3)
+    assert "不套用其他报告类型的写法" in p
+    # 复垦提示词里不再出现土地征收口径的遁词
+    assert "以现状调查确认结果为准" not in p

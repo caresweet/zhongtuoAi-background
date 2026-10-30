@@ -272,15 +272,10 @@ def ensure_reclamation_figures(materials: Sequence[dict],
     polys = collect_survey_polygons(materials)
     _init_fonts()
 
-    # ① 第1章「各类土地面积关系图」（有地类数据就出，与界址点无关）
-    _chart = "图1-1 各类土地面积关系图.jpg"
-    try:
-        if _draw_area_chart(filled or {}, Path(storage_dir) / "images" / _chart,
-                            "各类土地面积关系图"):
-            out.append({"path": f"images/{_chart}", "original_name": _chart})
-            logger.info(f"[复垦图件] 已生成 {_chart}")
-    except Exception as e:                       # pragma: no cover - 绘图失败不阻断
-        logger.warning(f"[复垦图件] 面积关系图生成失败: {e}")
+    # 🔴 第1章「前言」不再出「各类土地面积关系图」（业主 2026-10-30：「前言部分
+    #    不应该有数据分析，只有文字才对」）。该图原挂在 1.2 复垦方案摘要之后，
+    #    属于前言里的数据可视化，已随 `RECLAMATION_IMAGE_SPECS[1]` 一并下线。
+    #    `_draw_area_chart` 保留（复垦其他位置/后续需要时可直接调用）。
 
     if not polys:
         return out

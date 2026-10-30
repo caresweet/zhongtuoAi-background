@@ -38,6 +38,8 @@ _VAGUE_RE = re.compile(
     r"|(高度重视|狠抓落实|扎实推进|进一步增强|不断提升)"
 )
 _HAS_NUM_RE = re.compile(r"\d")
+# 图块：markdown 图片或「图1-1 …」图题
+_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)|图\s*\d+\s*[-–]\s*\d+")
 # 不算正文的块：标题、表格、图片、标记行
 _SKIP_RE = re.compile(r"^\s*(#{1,6}\s|\||!\[|\[TABLE:|\[SYS_|\[图|图\s*\d+-\d+\s*$)")
 
@@ -105,8 +107,28 @@ _KIND_LABEL = {
     "vague": "空泛表述",
     "long_sentence": "长句难读",
     "repeat_open": "段首雷同",
+    "figure_no_text": "图后无解读",
     "shaky": "数据可疑",
 }
+
+
+def _figure_gaps(markdown: str) -> List[str]:
+    """返回「图后没有数据解读」的图块文本（业主口径：配图的小节必须有数据分析）。"""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", markdown or "") if b.strip()]
+    bad: List[str] = []
+    for i, b in enumerate(blocks):
+        if not _IMAGE_RE.search(b):
+            continue
+        # 往后找第一个正文段（跳过标题/表格/标记）
+        follow = ""
+        for nxt in blocks[i + 1: i + 4]:
+            if _SKIP_RE.match(nxt.split("\n")[0]):
+                continue
+            follow = nxt
+            break
+        if not follow or not _HAS_NUM_RE.search(follow):
+            bad.append(b[:60])
+    return bad
 
 
 def audit_chapters(chapters: Dict[Any, Any]) -> Dict[str, Any]:
@@ -152,6 +174,20 @@ def audit_chapters(chapters: Dict[Any, Any]) -> Dict[str, Any]:
                     "label": _KIND_LABEL.get(kind, kind),
                     "detail": _detail(para, kind),
                     "text": para[:60],
+                })
+
+        # 配图小节必须有数据解读（业主口径）：图后找不到带数字的段落就记一笔
+        for fig in _figure_gaps(md or ""):
+            total += 1
+            flagged += 1
+            by_kind["figure_no_text"] = by_kind.get("figure_no_text", 0) + 1
+            if len(items) < 60:
+                items.append({
+                    "chapter": _as_int(ch_num),
+                    "kind": "figure_no_text",
+                    "label": _KIND_LABEL["figure_no_text"],
+                    "detail": "图后没有带数字的解读，补 2～3 句说明",
+                    "text": fig,
                 })
 
     rate = (total - flagged) / total if total else 1.0

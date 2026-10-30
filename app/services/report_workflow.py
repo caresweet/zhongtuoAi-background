@@ -301,6 +301,17 @@ REVIEW_TABLE_FIELDS = [
 _REVIEW_TABLE_OWNER = "评审表"
 
 
+def review_table_fields_for(domain: str) -> list:
+    """该域要问的「评审表专用字段」。
+
+    🔴 评审表是**稳评专有**（江苏省制式评审表要印责任单位负责人/联系人）。
+       复垦没有评审表章，问「责任单位负责人」只会让用户莫名其妙
+       （业主 2026-10-30）。按域门控，稳评行为不变。
+    """
+    from app.agent.chapter_catalog import has_review_table
+    return list(REVIEW_TABLE_FIELDS) if has_review_table(domain) else []
+
+
 def _missing_for(filled: dict, fields, chapter=None) -> list:
     """返回缺失字段（带弹窗所需元数据 + chapter 归属 + used_in 用途说明）。
 
@@ -1056,8 +1067,12 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     #       `_confirmed_`，若把评审表字段也带上，它们会被提前标成「已确认」，
     #       导致 `node_review_table`（**唯一保留**的提问点）再也问不出来 →
     #       评审表的负责人/联系人只能印【待填写】。
-    if idx == 0 and ENABLE_DATA_INQUIRY:
-        _need = [(f, _REVIEW_TABLE_OWNER) for f in REVIEW_TABLE_FIELDS] + _need
+    # 🔴 但评审表是**稳评专有**（江苏省制式评审表要印责任单位负责人/联系人）：
+    #    复垦没有评审表章，再问「责任单位负责人/职务/实施单位联系人/电话」，
+    #    用户只会莫名其妙（业主 2026-10-30）。按域门控。
+    _rt_fields = review_table_fields_for(domain_of_state(state))
+    if idx == 0 and ENABLE_DATA_INQUIRY and _rt_fields:
+        _need = [(f, _REVIEW_TABLE_OWNER) for f in _rt_fields] + _need
     if _need:
         _miss = _missing_for(filled, _need)
         if _miss:

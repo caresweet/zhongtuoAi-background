@@ -2011,9 +2011,10 @@ class ChapterAgentBase(BaseAgent):
         except Exception:
             template_block = ""
 
-        # 🔴 行文要求（按域）：复垦加短句/换开头两条；稳评为空串（提示词逐字不变）
+        # 🔴 行文要求（按域+章）：复垦加短句/换开头/配图须解读，第1章另加「只写文字」；
+        #    稳评为空串（提示词逐字不变）
         try:
-            style_block = chapter_catalog.style_rules(domain)
+            style_block = chapter_catalog.style_rules(domain, self.chapter_number)
         except Exception:
             style_block = ""
 

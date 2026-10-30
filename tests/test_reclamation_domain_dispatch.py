@@ -319,7 +319,7 @@ def test_body_image_anchor_per_domain():
         assert cat.body_image_anchor(None, ch) is None
     assert cat.body_image_anchor("reclamation", 3) == "项目简介"
     assert cat.body_image_anchor("reclamation", 4) == "土地损毁分析与评定"
-    assert cat.body_image_anchor("reclamation", 1) == "复垦方案摘要"   # 图1-1 面积关系图
+    assert cat.body_image_anchor("reclamation", 1) is None   # 前言不配图（业主 2026-10-30）
     assert cat.body_image_anchor("reclamation", 10) is None
 
 

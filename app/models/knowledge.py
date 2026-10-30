@@ -16,8 +16,12 @@ class Template(Base):
     description = Column(Text, default="")
     category = Column(String(100), nullable=False, default="通用")
 
-    # Report domain this template belongs to (stability, bidding, feasibility, ...)
+    # Report domain this template belongs to (stability, bidding, reclamation, ...)
     domain = Column(String(50), nullable=False, default="stability")
+
+    # 地区（洪泽/金湖/盱眙/涟水…）：同类模板按地区分版，
+    # 生成时按项目文本里的地名挑对应地区的那一版（业主口径：不同地区不同模板）
+    region = Column(String(50), nullable=True, default="")
 
     # File paths (relative to storage/)
     template_file_path = Column(String(500), nullable=False)

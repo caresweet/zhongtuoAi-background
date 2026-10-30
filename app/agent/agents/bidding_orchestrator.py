@@ -388,6 +388,16 @@ class BiddingOrchestrator(BaseAgent):
         from app.services.bidding_docx_generator import BiddingDocxGenerator
 
         bidding_data = state.get("_bidding_data", {}) or {}
+
+        # 投标按「域 + 地区」挑模板：页面尺寸/页边距照模板（不同地区不同模板）
+        from app.services.template_selector import resolve_template_path, build_match_text
+        _tpl_path = state.get("template_path") or await resolve_template_path(
+            "bidding",
+            build_match_text(bidding_data.get("bid_project_name"),
+                             bidding_data.get("bid_reference"),
+                             state.get("project_context"), state.get("initial_message")),
+        )
+
         generator = BiddingDocxGenerator()
         output_path = generator.generate(
             markdown_content=markdown,
@@ -398,6 +408,7 @@ class BiddingOrchestrator(BaseAgent):
                 "reference": bidding_data.get("bid_reference", ""),
             },
             state=state,
+            template_path=_tpl_path,
         )
 
         try:

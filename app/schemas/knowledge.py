@@ -38,6 +38,7 @@ class TemplateBase(BaseModel):
     description: Optional[str] = ""
     category: str = Field(default="通用", max_length=100)
     domain: str = Field(default="stability", max_length=50)
+    region: Optional[str] = Field(default="", max_length=50)
 
 
 class TemplateCreate(TemplateBase):
@@ -49,6 +50,7 @@ class TemplateUpdate(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     domain: Optional[str] = None
+    region: Optional[str] = None
 
 
 class TemplateResponse(TemplateBase):

@@ -23,6 +23,44 @@ from docx.oxml.ns import qn
 logger = logging.getLogger(__name__)
 
 
+def _read_page_geometry(template_path: Optional[str]):
+    """从模板 docx 读页面尺寸与页边距（twips → EMU）；读不到返回 None。
+
+    只解 `word/document.xml` 里的最后一个 `<w:sectPr>` —— 用 zip 直读，
+    比 `Document(path)` 整体加载一份几十 MB 的模板快得多，
+    也不会把模板里的图片/页眉页脚带进产物。
+    """
+    import re as _re
+    import zipfile as _zip
+
+    try:
+        with _zip.ZipFile(str(template_path)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+    except Exception:
+        return None
+
+    _i = xml.rfind("<w:sectPr")
+    if _i < 0:
+        return None
+    _end = xml.find("</w:sectPr>", _i)
+    _chunk = xml[_i: _end if _end > 0 else len(xml)]
+
+    def _attr(tag_name: str, attr: str):
+        m = _re.search(rf"<w:{tag_name}\b[^>]*w:{attr}=\"(-?\d+)\"", _chunk)
+        return int(m.group(1)) if m else None
+
+    _w, _h = _attr("pgSz", "w"), _attr("pgSz", "h")
+    _top, _bottom = _attr("pgMar", "top"), _attr("pgMar", "bottom")
+    _left, _right = _attr("pgMar", "left"), _attr("pgMar", "right")
+    if not all(v and v > 0 for v in (_w, _h, _top, _bottom, _left, _right)):
+        return None
+
+    from docx.shared import Emu
+    _tw = 635  # 1 twip = 635 EMU
+    return (Emu(_w * _tw), Emu(_h * _tw), Emu(_top * _tw),
+            Emu(_bottom * _tw), Emu(_left * _tw), Emu(_right * _tw))
+
+
 def _asset_image_to_dict(row) -> Dict:
     """Convert AssetImage ORM row to a simple dict (avoids import issues)."""
     return {
@@ -104,6 +142,7 @@ class BiddingDocxGenerator:
         report_type: str = "summary",
         metadata: Optional[Dict[str, str]] = None,
         state: Optional[Dict] = None,
+        template_path: Optional[str] = None,
     ) -> str:
         """Convert markdown to DOCX and save.
 
@@ -112,6 +151,8 @@ class BiddingDocxGenerator:
             report_type: announcement | evaluation | award | summary | tender_response.
             metadata: {project_name, reference, session_id, ...}
             state: Optional agent state dict with _uploaded_files, _bidding_data, etc.
+            template_path: 该域/该地区模板 docx —— 页面尺寸与页边距照它来（业主口径：
+                          不同地区用官方发布的模板）。取不到就用内置默认值。
 
         Returns:
             Relative path to generated DOCX (e.g. "generated/xxx.docx").
@@ -128,7 +169,7 @@ class BiddingDocxGenerator:
         company_images = self._get_company_images()
 
         doc = Document()
-        self._setup_page(doc)
+        self._setup_page(doc, template_path=template_path)
 
         # ── Cover Page ──
         self._add_cover(doc, report_name, project_name, reference)
@@ -166,8 +207,14 @@ class BiddingDocxGenerator:
     # Page Setup
     # ═══════════════════════════════════════════════════════════════
 
-    def _setup_page(self, doc: Document):
+    def _setup_page(self, doc: Document, template_path: Optional[str] = None):
+        """页面尺寸/页边距：有该地区模板就照模板，没有用内置默认（A4）。"""
+        geo = _read_page_geometry(template_path) if template_path else None
         for sec in doc.sections:
+            if geo:
+                (sec.page_width, sec.page_height, sec.top_margin,
+                 sec.bottom_margin, sec.left_margin, sec.right_margin) = geo
+                continue
             sec.page_width = Cm(21)
             sec.page_height = Cm(29.7)
             sec.top_margin = Cm(2.54)

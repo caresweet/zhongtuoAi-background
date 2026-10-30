@@ -1671,6 +1671,16 @@ class MasterAgent(BaseAgent):
 
         bidding_data = state.get("_bidding_data", {})
 
+        # 🔴 投标也按「域 + 地区」挑模板：模板里的页面尺寸/页边距照原样套用
+        #    （业主口径：不同地区用官方发布的不同模板）。
+        from app.services.template_selector import resolve_template_path, build_match_text
+        _tpl_path = state.get("template_path") or await resolve_template_path(
+            "bidding",
+            build_match_text(bidding_data.get("bid_project_name"),
+                             bidding_data.get("bid_reference"),
+                             state.get("project_context"), state.get("initial_message")),
+        )
+
         generator = BiddingDocxGenerator()
         output_path = generator.generate(
             markdown_content=content,
@@ -1681,6 +1691,7 @@ class MasterAgent(BaseAgent):
                 "reference": bidding_data.get("bid_reference", ""),
             },
             state=state,  # Pass state for image/attachment support
+            template_path=_tpl_path,
         )
 
         # Save to history database

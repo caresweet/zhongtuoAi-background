@@ -45,6 +45,7 @@ class TemplateService:
             description=data.description or "",
             category=data.category,
             domain=getattr(data, "domain", "stability") or "stability",
+            region=getattr(data, "region", "") or "",
             template_file_path=template_path,
             example_file_path=example_path,
             analysis_status="pending",
@@ -64,6 +65,7 @@ class TemplateService:
         category: Optional[str] = None,
         search: Optional[str] = None,
         domain: Optional[str] = None,
+        region: Optional[str] = None,
     ) -> tuple[List[Template], int]:
         """List templates with pagination and filtering.
 
@@ -79,6 +81,8 @@ class TemplateService:
             query = query.where(Template.category == category)
         if domain:
             query = query.where(Template.domain == domain)
+        if region:
+            query = query.where(Template.region == region)
         if search:
             query = query.where(
                 or_(

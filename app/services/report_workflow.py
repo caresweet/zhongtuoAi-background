@@ -1968,12 +1968,35 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
         from app.services.report_assembler import report_assembler
         from app.services.company_service import load_company
         filled = state.get("filled_data",{})
+        # 🔴 模板按「域 + 地区」挑（业主口径：不同地区用官方发布的不同模板）。
+        #    项目地名/项目名/需求原文里出现哪个区县词，就用那一版模板的目录域与版式；
+        #    一条都不命中时返回空串 → 装配器原有兜底（行为与改动前一致）。
+        _tpl_path = state.get("template_path") or ""
+        if not _tpl_path:
+            try:
+                from app.services.template_selector import resolve_template_path, build_match_text
+                _tpl_path = await resolve_template_path(
+                    domain_of_state(state),
+                    build_match_text(
+                        filled.get("location"), filled.get("project_name"),
+                        filled.get("doc_reference"),
+                        state.get("project_context"),
+                        state.get("initial_message"),
+                    ),
+                )
+            except Exception as _te:
+                logger.warning(f"[模板] 按地区选模板失败，走兜底：{_te}")
+            if _tpl_path:
+                state["template_path"] = _tpl_path
         # 🔴 公司档案在**这里**（异步）读好再传下去：装配器是同步的，
         #    没法自己查异步的 auth 库。读不到 → 空 dict → 报告里显示「待填写」。
         _company = await load_company(state.get("_company_id"))
         asm_state = {
             "session_id": state.get("session_id","report"), "chapters": chapters,
             "filled_data": filled, "_domain": domain_of_state(state),
+            # 🔴 模板文件（按域+地区挑出来的那一版）——装配器的目录域/版式、
+            #    评审表填充都靠它；白名单式构造，漏加就等于丢。
+            "template_path": _tpl_path,
             # 🔴 公司归属**必须带进来**：装配器靠它决定「公司简介 / 编写单位 /
             #    营业执照·资质证书取哪一套」。外来的用户没有公司 → 报告里显示
             #    「待填写」，**绝不回落成江苏众拓**（那等于把别人的客户抬头印成我们的）。

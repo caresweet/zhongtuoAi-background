@@ -26,6 +26,7 @@ async def init_knowledge_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_add_domain_columns)
+        await conn.run_sync(_migrate_add_region_columns)
         await conn.run_sync(_migrate_add_extraction_columns)
         await conn.run_sync(_migrate_add_cleaning_columns)
         await conn.run_sync(_migrate_add_chat_tables)
@@ -50,6 +51,24 @@ def _migrate_add_domain_columns(conn):
                 f"ALTER TABLE {table} ADD COLUMN domain "
                 f"VARCHAR(50) NOT NULL DEFAULT 'stability'"
             ))
+
+
+def _migrate_add_region_columns(conn):
+    """幂等迁移：给 templates 加 `region`（地区）列。
+
+    同类模板按地区分版（洪泽/金湖/盱眙…），生成时按项目地名挑对应版本。
+    老数据补空串，不影响现有行为。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+    if not inspector.has_table("templates"):
+        return
+    cols = {c["name"] for c in inspector.get_columns("templates")}
+    if "region" not in cols:
+        conn.execute(text(
+            "ALTER TABLE templates ADD COLUMN region VARCHAR(50) DEFAULT ''"
+        ))
 
 
 def _migrate_add_extraction_columns(conn):

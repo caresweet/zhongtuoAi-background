@@ -27,13 +27,15 @@ async def upload_template(
     name: str = Form(..., description="模板名称"),
     description: Optional[str] = Form("", description="模板描述"),
     category: str = Form("通用", description="模板分类"),
-    domain: str = Form("stability", description="报告领域: stability/bidding"),
+    domain: str = Form("stability", description="报告领域: stability/bidding/reclamation"),
+    region: str = Form("", description="地区（洪泽/金湖/盱眙…），空=通用"),
     template_file: UploadFile = File(..., description="模板docx文件（含占位符）"),
     example_file: Optional[UploadFile] = File(None, description="完整示例docx文件"),
     db: AsyncSession = Depends(get_knowledge_db),
 ):
     """上传新模板。template_file为含占位符的模板，example_file为完整填充的示例。"""
-    data = TemplateCreate(name=name, description=description, category=category, domain=domain)
+    data = TemplateCreate(name=name, description=description, category=category,
+                          domain=domain, region=region)
     template = await template_service.create_template(
         db, data, template_file, example_file
     )
@@ -50,11 +52,13 @@ async def list_templates(
     category: Optional[str] = Query(None, description="按分类筛选"),
     search: Optional[str] = Query(None, description="按名称/描述搜索"),
     domain: Optional[str] = Query(None, description="按报告领域筛选"),
+    region: Optional[str] = Query(None, description="按地区筛选"),
     db: AsyncSession = Depends(get_knowledge_db),
 ):
     """获取模板列表（分页）。"""
     templates, total = await template_service.get_templates(
-        db, page=page, page_size=page_size, category=category, search=search, domain=domain
+        db, page=page, page_size=page_size, category=category, search=search,
+        domain=domain, region=region,
     )
     items = [TemplateResponse.model_validate(t).model_dump() for t in templates]
     return ApiResponse(

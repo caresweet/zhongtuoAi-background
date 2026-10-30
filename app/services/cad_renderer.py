@@ -78,6 +78,13 @@ def render_cad_to_png(src: str, out_png: str, *, dpi: int = 200,
         import matplotlib
         matplotlib.use("Agg")           # 无界面后端，服务端渲染
         import matplotlib.pyplot as plt
+        # 🔴 中文字体：镜像里装了 fonts-wqy-*，这里显式指定，否则图纸上的
+        #    中文标注/图名会被 matplotlib 丢弃（只留英文与线条）。
+        matplotlib.rcParams["font.sans-serif"] = [
+            "WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
+            "SimHei", "DejaVu Sans",
+        ]
+        matplotlib.rcParams["axes.unicode_minus"] = False
         import ezdxf
         from ezdxf.addons.drawing import RenderContext, Frontend
         from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
@@ -87,7 +94,23 @@ def render_cad_to_png(src: str, out_png: str, *, dpi: int = 200,
     try:
         doc = ezdxf.readfile(dxf_path)
         msp = doc.modelspace()
-        if len(msp) == 0:
+
+        # 🔴 有些图纸的正文在**图纸空间（布局）**里，模型空间只有零星几个实体
+        #    （实测「宗地图」：模型空间渲出来只有几个红点，图框和标注都在布局里）。
+        #    规则：模型空间实体够多就渲模型空间；太少就挑实体最多的那个布局。
+        target = msp
+        if len(msp) < 5:
+            best, best_n = None, len(msp)
+            for name in doc.layouts.names():
+                if name.lower() == "model":
+                    continue
+                lay = doc.layouts.get(name)
+                if len(lay) > best_n:
+                    best, best_n = lay, len(lay)
+            if best is not None:
+                target = best
+                logger.info(f"[CAD] 模型空间只有 {len(msp)} 个实体，改渲布局「{best.name}」（{best_n} 个）")
+        if len(target) == 0:
             return False, "图纸里没有可渲染的实体"
 
         fig = plt.figure(figsize=(11.69, 8.27))     # A4 横向
@@ -96,7 +119,7 @@ def render_cad_to_png(src: str, out_png: str, *, dpi: int = 200,
         fig.patch.set_facecolor(background)
         ax.set_facecolor(background)
         Frontend(RenderContext(doc), MatplotlibBackend(ax)).draw_layout(
-            msp, finalize=True)
+            target, finalize=True)
         Path(out_png).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_png, dpi=dpi, facecolor=background)
         plt.close(fig)

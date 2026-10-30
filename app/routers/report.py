@@ -2020,6 +2020,28 @@ async def upload_attachment(
     except Exception as _ce:
         _ul.warning(f"[UPLOAD] CAD 渲染跳过: {_ce}")
 
+    # 🔴 Shapefile（GIS 矢量数据）：和 CAD 同理 —— 报告里要的是图，
+    #    上传的 `.shp` 先渲一张 PNG 并登记成上传图片（红线图/用地范围图的原始成果）。
+    #    同批上传的 `.shx/.dbf/.prj` 只是配套，不参与渲染。
+    try:
+        from app.services.shapefile_renderer import (
+            SHAPEFILE_EXTENSIONS, render_shapefile_to_png,
+        )
+        if Path(result["relative_path"]).suffix.lower() in SHAPEFILE_EXTENSIONS:
+            from app.config import settings as _st
+            _src = Path(_st.STORAGE_DIR) / result["relative_path"]
+            _png_rel = str(Path(result["relative_path"]).with_suffix(".shp.png"))
+            _ok, _why = render_shapefile_to_png(str(_src), str(Path(_st.STORAGE_DIR) / _png_rel))
+            if _ok:
+                uploaded_files.append({"path": _png_rel,
+                                       "original_name": Path(_orig).stem + "_矢量图.png",
+                                       "file_type": "image"})
+                _ul.info(f"[UPLOAD] Shapefile 已出图: {_png_rel}（{_why}）")
+            else:
+                _ul.warning(f"[UPLOAD] Shapefile 未出图（数据仍已留存）: {_why}")
+    except Exception as _se:
+        _ul.warning(f"[UPLOAD] Shapefile 渲染跳过: {_se}")
+
     session.state = session.state
     report_service._save_sessions()
     _ul.info(f"[UPLOAD] 会话文件数: {len(uploaded_files)}")

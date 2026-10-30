@@ -1141,6 +1141,24 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
         state["_img_catalog"] = build_image_catalog(
             uploaded_items, ai_classifications=state.get("_classified_images"),
             domain=domain_of_state(state))
+        # 🔴 模板在**写正文之前**就要定下来：章节 agent 要拿它当底稿
+        #    （「不需要动的不动、要写的重新拟」）。按「域+地区」挑，挑不到就空。
+        #    装配阶段还会再兜一次（见 node_assemble_final_report）。
+        if not state.get("template_path"):
+            try:
+                from app.services.template_selector import resolve_template_path, build_match_text
+                _tp = await resolve_template_path(
+                    domain_of_state(state),
+                    build_match_text(
+                        filled.get("location"), filled.get("project_name"),
+                        state.get("project_context"), state.get("initial_message"),
+                    ),
+                )
+                if _tp:
+                    state["template_path"] = _tp
+                    logs.append(f"📐 使用模板：{os.path.basename(_tp)}")
+            except Exception as _tpe:
+                logger.warning(f"[模板] 按地区选模板失败（不影响出报告）：{_tpe}")
         state["_gen_prepared"] = True
 
     # 🔴 RAG 素材不在这里检索 —— 每个章节 agent 自己按小节检索并注入

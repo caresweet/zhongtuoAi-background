@@ -337,3 +337,148 @@ def build_template_block_for_prompt(chapter_number: int, limit: int = 6000) -> s
         "- 模板里的示例数据（别的地块/文号/单位/数字）一律不得照抄。\n"
         f"```\n{text}\n```\n"
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 任意域模板按章切块（复垦 / 投标共用）
+#
+# 业主口径（2026-10-30）：「我希望这块的逻辑跟之前稳评一样，部分内容不需要动的
+# 就不动，需要 AI 去做的就让 agent 根据模板和提供的知识库上的内容拟人构写。」
+#
+# 稳评的模板是「12 章 洪泽模板」，走上面那套写死映射；复垦/投标的模板是
+# **各自域的 docx**（盐业井神复垦方案、投标文件…），章标题是「1 前 言」这种
+# 编号式 Heading 1。这里按 Heading 1 通用切章，编号 1:1 对应报告章号，
+# 不再需要人工维护映射表 —— 换模板、加地区都不用改代码。
+# ═══════════════════════════════════════════════════════════════
+
+_HEAD1_RE = re.compile(r"^(?:Heading|标题)\s*1$", re.IGNORECASE)
+_LEAD_NUM_RE = re.compile(r"^\s*(\d{1,2})(?:[\.、．]|\s|$)")
+_TOC_STYLE_RE = re.compile(r"^(?:toc|目录)", re.IGNORECASE)
+
+# path → (mtime, {章号: {title, text}})
+_DOCX_CHAPTER_CACHE: Dict[str, Any] = {}
+
+
+def chunk_docx_by_headings(path: str) -> Dict[int, Dict[str, str]]:
+    """把模板 docx 按 `Heading 1` 切章，返回 {章号: {"title", "text"}}。
+
+    取「结构 + 原文」用：正文段落按顺序拼接，表格压成 `单元格 | 单元格` 行。
+    目录条目（toc 样式）与封面/扉页（第一个 Heading 1 之前）不计入章节。
+    """
+    p = str(path or "")
+    if not p or not os.path.exists(p):
+        return {}
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        mtime = 0
+    cached = _DOCX_CHAPTER_CACHE.get(p)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = Document(p)
+    chapters: Dict[int, Dict[str, str]] = {}
+    cur_no: Optional[int] = None
+    cur_title = ""
+    buf: List[str] = []
+    seq = 0
+
+    def _flush():
+        nonlocal cur_no, cur_title, buf
+        if cur_no is not None:
+            text = "\n".join(x for x in buf if x.strip()).strip()
+            if text:
+                chapters[cur_no] = {"title": cur_title, "text": text}
+        buf = []
+
+    for block in doc.iter_inner_content():
+        if isinstance(block, Paragraph):
+            style = (block.style.name if block.style is not None else "") or ""
+            text = (block.text or "").strip()
+            if _TOC_STYLE_RE.match(style):
+                continue
+            if _HEAD1_RE.match(style) and text:
+                _flush()
+                seq += 1
+                m = _LEAD_NUM_RE.match(text)
+                cur_no = int(m.group(1)) if m else seq
+                cur_title = _LEAD_NUM_RE.sub("", text, count=1).strip() or text
+                continue
+            if cur_no is not None and text:
+                buf.append(text)
+        elif isinstance(block, Table) and cur_no is not None:
+            for row in block.rows:
+                cells = [(c.text or "").strip().replace("\n", " ") for c in row.cells]
+                line = " | ".join(cells).strip(" |")
+                if line:
+                    buf.append(line)
+    _flush()
+
+    _DOCX_CHAPTER_CACHE[p] = (mtime, chapters)
+    logger.info(f"[模板] {os.path.basename(p)} 切出 {len(chapters)} 章：{sorted(chapters)}")
+    return chapters
+
+
+def build_template_block_from_path(
+    path: Optional[str], chapter_number: int, limit: int = 6000,
+) -> str:
+    """把「该域模板」对应章的原文格式化成可注入 prompt 的底稿块。
+
+    模板章号与报告章号 1:1（复垦 10 章、投标按模块）。取不到返回空串 ——
+    调用方照常走无底稿路径，绝不报错。
+    """
+    if not path:
+        return ""
+    try:
+        chapters = chunk_docx_by_headings(str(path))
+    except Exception as e:  # 模板损坏/加密都不该拦住出报告
+        logger.warning(f"[模板] 切章失败 {path}: {e}")
+        return ""
+    ch = chapters.get(int(chapter_number)) or {}
+    text = (ch.get("text") or "").strip()
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit] + "\n…（模板后续内容略）"
+    title = ch.get("title") or f"第{chapter_number}章"
+    return (
+        "\n## 📐 本章模板底稿（同地区官方模板原文 —— **结构与固定表述以此为准**）\n"
+        f"底稿对应模板的「{title}」。请按下列规则使用：\n"
+        "- **不需要动的不动**：固定条款、政策依据、程序性表述、清单与表格结构，照原样保留；\n"
+        "- **要写的地方重新拟**：涉及本项目情况、数据、分析的段落，依据本项目事实卡与知识库内容重新撰写，"
+        "读起来像有经验的编制人员写的，不要套模板腔；\n"
+        "- 模板里属于**其他项目**的事实（项目名/地名/单位/面积/日期/文号/人名）一律不得照抄。\n"
+        f"```\n{text}\n```\n"
+    )
+
+
+def outline_headings(path: Optional[str], limit: int = 120) -> str:
+    """模板 docx 的标题大纲（Heading 1–3），给「结构参考」用，不含正文。
+
+    投标文件这类模板没有规整的「第X章」，用大纲让 agent 知道
+    「该写哪些小节、顺序怎么排」，具体内容仍由它按项目情况拟写。
+    """
+    if not path or not os.path.exists(str(path)):
+        return ""
+    _HEAD_RE = re.compile(r"^(?:Heading|标题)\s*([123])$", re.IGNORECASE)
+    try:
+        from docx import Document
+        doc = Document(str(path))
+    except Exception as e:
+        logger.warning(f"[模板] 读大纲失败 {path}: {e}")
+        return ""
+    lines: List[str] = []
+    for p in doc.paragraphs:
+        style = (p.style.name if p.style is not None else "") or ""
+        text = (p.text or "").strip()
+        m = _HEAD_RE.match(style)
+        if not m or not text:
+            continue
+        lines.append("  " * (int(m.group(1)) - 1) + f"- {text}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)

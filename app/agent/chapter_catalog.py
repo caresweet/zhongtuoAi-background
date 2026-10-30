@@ -915,15 +915,20 @@ def headings_for_prompt(domain: str | None, chapter_number: int) -> str:
     return format_headings_for_prompt(chapter_number)
 
 
-def template_block_for_prompt(domain: str | None, chapter_number: int) -> str:
+def template_block_for_prompt(
+    domain: str | None, chapter_number: int, template_path: str | None = None,
+) -> str:
     """默认单章 system prompt 的「人工模板底稿」块（按域）。
 
-    稳评：委托 `template_chapter_chunker.build_template_block_for_prompt`（逐字不变）。
-    复垦：公司标准模板库目前只有稳评模板，复垦无底稿 —— 返回空串，绝不把
-          稳评模板底稿当作复垦章的「行文基准」注入。
+    稳评：委托 `template_chapter_chunker.build_template_block_for_prompt`（逐字不变，
+          仍是 12 章洪泽模板的固定映射）。
+    复垦/投标：按传入的模板文件（按域+地区挑出来的那一版）**按 Heading 1 切章**，
+          1:1 取本章原文作底稿 —— 业主口径「不需要动的不动、要写的重新拟」。
+          没有模板（或切不出这一章）返回空串，照常走无底稿路径。
     """
     if domain == _RECLAMATION:
-        return ""
+        from app.services.template_chapter_chunker import build_template_block_from_path
+        return build_template_block_from_path(template_path, chapter_number)
     from app.services.template_chapter_chunker import build_template_block_for_prompt
     return build_template_block_for_prompt(chapter_number)
 

@@ -2003,8 +2003,11 @@ class ChapterAgentBase(BaseAgent):
             section_spec = ""
 
         # 🔴 本章「人工模板底稿」：从公司标准模板切出本章对应文本，作为结构与行文基准（按域）
+        #    复垦/投标用会话按「域+地区」挑出来的模板文件（state["template_path"]），
+        #    按 Heading 1 切章 1:1 取本章原文；稳评仍走固定 12 章映射，不受影响。
         try:
-            template_block = chapter_catalog.template_block_for_prompt(domain, self.chapter_number)
+            template_block = chapter_catalog.template_block_for_prompt(
+                domain, self.chapter_number, (state or {}).get("template_path"))
         except Exception:
             template_block = ""
 

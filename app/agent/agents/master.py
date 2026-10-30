@@ -1115,7 +1115,7 @@ class MasterAgent(BaseAgent):
         from app.config import settings
 
         try:
-            # 1. Find an active bidding template
+            # 1. 找当前域的投标模板（按「域+地区」挑；不同地区用官方发布的不同模板）
             import sqlite3
             db = settings.DATA_DIR / "knowledge_base.db"
             if not db.exists():
@@ -1123,13 +1123,23 @@ class MasterAgent(BaseAgent):
 
             conn = sqlite3.connect(str(db))
             conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT id, name, template_file_path FROM templates "
-                "WHERE is_active=1 AND category LIKE '%招标%' "
-                "ORDER BY id DESC LIMIT 1"
-            )
-            tpl = cur.fetchone()
+            rows = conn.execute(
+                "SELECT id, name, region, template_file_path FROM templates "
+                "WHERE is_active=1 AND domain='bidding' AND template_file_path LIKE '%.docx' "
+                "ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
             conn.close()
+
+            # 地区词命中优先（取最长命中），都没命中用第一条（通用模板）
+            _text = f"{bidding_data.get('bid_project_name','')} {bidding_data.get('bid_reference','')}"
+            tpl = None
+            _best = ""
+            for r in rows:
+                _reg = (r["region"] or "").strip()
+                if _reg and _reg in _text and len(_reg) > len(_best):
+                    tpl, _best = r, _reg
+            if tpl is None and rows:
+                tpl = rows[0]
 
             if not tpl:
                 logger.info("No bidding template found for fill")
@@ -1445,6 +1455,17 @@ class MasterAgent(BaseAgent):
             return
 
         tech_full_md = "\n\n".join(tech_markdown_parts)
+
+        # 🔴 护栏：一个模块都没写出来（全是【待生成】/【待补充】）时**保留模板原文**。
+        #    以前 agent 是占位实现，这里会拿一堆「【待生成】」把模板里的技术方案整段换掉，
+        #    等于把好好的正文毁掉。宁可不动，也不要交付一堆占位符。
+        _real = [p for p in tech_markdown_parts
+                 if not any(m in p for m in ("【待生成】", "【待补充】"))]
+        if not _real:
+            await self._emit_thinking("⚠️ 技术方案未生成有效内容，保留模板原文")
+            logger.warning("Tech proposal: all modules empty/placeholder, keep template text")
+            return
+        tech_full_md = "\n\n".join(_real)
 
         # ── Step 2: Open filled docx, find 技术方案 section ──
         doc = DocxDocument(filled_docx_path)

@@ -15,6 +15,29 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -i https://pypi.tuna.tsinghua.edu.cn/simple/ -r requirements.txt
 
 
+# ── libredwg：DWG 渲染依赖 dwgread（DWG → DXF）──────────────────────────────
+# 🔴 为什么内置：复垦「临时用地功能分布图 / 主体项目红线图」甲方给的就是 DWG。
+#    没有 dwgread 时上传能成功但渲不出图，报告里的图件页就是空的
+#    （线上实测 2026-10-30：4 个 DWG 全部「CAD 未渲染」）。
+# 源码包随仓库走（vendor/）：服务器连不上 GitHub，构建必须可复现。
+# 实测产物只依赖 libredwg.so.0 + libc + libm，运行阶段整目录拷过去即可。
+FROM python:3.12-slim AS libredwg
+
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
+    build-essential xz-utils texinfo libtool pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY vendor/libredwg-0.14.tar.xz /tmp/libredwg.tar.xz
+RUN cd /tmp && tar xf libredwg.tar.xz && cd libredwg-0.14 \
+    && ./configure --prefix=/opt/libredwg --disable-python --disable-bindings \
+       --enable-release --disable-doc \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/libredwg*
+
+
 # ── Runtime stage ──────────────────────────────────────────────────────────
 FROM python:3.12-slim
 
@@ -30,11 +53,15 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 # Copy installed packages from builder
 COPY --from=builder /root/.local /root/.local
 
+# DWG 渲染器（dwgread + libredwg.so），见上面的 libredwg 阶段
+COPY --from=libredwg /opt/libredwg /opt/libredwg
+ENV LD_LIBRARY_PATH=/opt/libredwg/lib:$LD_LIBRARY_PATH
+
 # Copy application code
 COPY . .
 
-# Ensure scripts in .local/bin are on PATH
-ENV PATH=/root/.local/bin:$PATH
+# Ensure scripts in .local/bin are on PATH（并把 dwgread 所在目录加进去）
+ENV PATH=/root/.local/bin:/opt/libredwg/bin:$PATH
 
 EXPOSE 8000
 

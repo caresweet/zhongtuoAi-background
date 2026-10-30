@@ -63,9 +63,14 @@ def render_cad_to_png(src: str, out_png: str, *, dpi: int = 200,
 
     dxf_path = p
     if ext == ".dwg":
+        if shutil.which(_DWGREAD) is None:
+            # 生产镜像里已内置（见 Dockerfile.prod 的 libredwg 阶段），
+            # 本机开发环境才需要自己装：macOS `brew install libredwg`，Debian 从源码编译。
+            return False, ("DWG 需要 dwgread 才能渲染（生产镜像已内置；本机请 brew install libredwg）；"
+                           "也可以在 CAD 里另存为 DXF 后重传")
         converted = _dwg_to_dxf(p)
         if converted is None:
-            return False, ("DWG 需要 dwgread 才能渲染（brew install libredwg）；"
+            return False, ("DWG 转换失败（图纸可能加密或版本过新）；"
                            "也可以在 CAD 里另存为 DXF 后重传")
         dxf_path = converted
 

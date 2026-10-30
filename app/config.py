@@ -131,6 +131,12 @@ class Settings(BaseSettings):
         #    本来就是 DWG/DXF（业主实测材料就是这两种）。不放行的话这两张图
         #    根本进不来 —— 报告里那份「图件」就永远是空的。
         ".dwg", ".dxf",
+        # 🔴 GIS 矢量数据（Shapefile 一整套）：复垦红线/勘界定界的原始成果就是它。
+        #    一套 shapefile 由**同名多扩展名**组成（.shp 几何 + .shx 索引 + .dbf 属性
+        #    + .prj 坐标系 + .cpg 编码 + .sbn/.sbx 空间索引 + .qpj），缺一个都打不开，
+        #    必须整组放行。`.xml` 放行的是 ArcGIS 的 `.shp.xml` 元数据文件。
+        #    （业主 2026-10-30：线上文件夹上传时这 8 个文件被 400 挡掉了。）
+        ".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qpj", ".xml",
     ]
     MAX_ATTACHMENT_SIZE_MB: int = 100  # Max size for non-image, non-PDF attachments
 

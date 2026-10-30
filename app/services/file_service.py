@@ -594,6 +594,10 @@ class FileService:
         is_pptx = ext in (".ppt", ".pptx")
         is_text = ext in (".txt", ".md")
         is_archive = ext in (".zip", ".rar")
+        # GIS 矢量数据（Shapefile 一整套）：只存档留痕，不解析 —— 报告的「图件」
+        # 目前不直接读它，但甲方给的红线成果必须能传上来、能追溯。
+        is_vector = ext in (".shp", ".shx", ".dbf", ".prj", ".cpg",
+                            ".sbn", ".sbx", ".qpj", ".xml")
 
         if is_image:
             max_mb = settings.MAX_IMAGE_SIZE_MB
@@ -646,6 +650,8 @@ class FileService:
             file_type = "text"
         elif is_archive:
             file_type = "archive"
+        elif is_vector:
+            file_type = "vector"
         else:
             file_type = "file"
 

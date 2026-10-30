@@ -929,6 +929,24 @@ def chapter_data_iron_rule(domain: str | None) -> str:
     return _STABILITY_DATA_IRON_RULE
 
 
+def chapter_need_fields_for(domain: str | None, chapter_number: int) -> list:
+    """本章「该问用户什么」的字段清单（按域）。
+
+    🔴 稳评那份来自 `chapter_definitions.chapter_need_fields`（`CHAPTER_SECTION_SPECS`
+       ∪ `CHAPTER_REQUIRED_FIELDS`）——里面全是土地征收口径的字段：
+       `org_name`（稳评责任单位）、`household_count`、`questionnaire_*`…
+       **复垦不能拿这份去问**：业主 2026-10-31 反馈「复垦生成还在弹窗问责任单位」，
+       根因就是这里按稳评的章节规格推导询问清单。
+
+    复垦/投标：事实来自材料与勘测定界/招标文件，**不逐章追问**；缺的由
+    材料识别结果、缺口清单与 AI 兜底稿承接（正文用本域规范话术）。
+    """
+    if domain in (None, "stability"):
+        from app.agent.chapter_definitions import chapter_need_fields
+        return chapter_need_fields(chapter_number)
+    return []
+
+
 def headings_for_prompt(domain: str | None, chapter_number: int) -> str:
     """默认单章 system prompt 的「标准子标题」块（按域）。
 

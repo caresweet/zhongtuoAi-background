@@ -114,6 +114,10 @@ class WorkflowStartRequest(BaseModel):
     materials_dir: str = Field(default="", description="资料目录路径（可选）")
     project_context: str = Field(default="", description="项目背景说明")
     report_title: str = Field(default="社会稳定风险评估报告", description="报告标题")
+    # 🔴 报告类型（stability/reclamation/bidding）：前端「报告类型」选择必须显式传，
+    #    后端据此纠正会话域 —— 以前前端没传/传错位，选了复垦却按稳评跑完整条工作流，
+    #    连模板都取稳评的（业主 2026-10-31 实测）。
+    domain: str = Field(default="", description="报告类型：stability/reclamation/bidding")
     selected_personnel: List[str] = Field(
         default_factory=list,
         description="用户在「选择报告人员」多选框里勾选的人员姓名（决定前置工作组名单与培训证书取图）")

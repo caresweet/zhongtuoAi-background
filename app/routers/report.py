@@ -2772,6 +2772,40 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
         except: pass
 
 
+def _apply_requested_domain(state: dict, domain: str) -> None:
+    """把前端选的报告类型落到会话状态上（**显式域优先于残留域**）。
+
+    业主 2026-10-31 实测：选了「复垦」，出来的却是社会稳定报告 ——
+    前端 `generateWithWorkflow` 里写死了 `startGeneration(..., 'stability')`，
+    后端 `WorkflowStartRequest` 也没有 domain 字段，整条工作流按稳评域跑。
+    前端已修；这里再加一道保险：请求里带了 domain 就以它为准，
+    把旧的章节/大纲/模板底稿清掉，按新域重建。
+    """
+    d = (domain or "").strip()
+    if not d:
+        return
+    try:
+        from app.domains import detect_domain as _detect_domain
+        want = _detect_domain(message="", explicit=d) or d
+    except Exception:
+        want = d
+    cur = state.get("_domain") or state.get("_conversation_domain")
+    if not want or want == cur:
+        return
+    logger.info(f"[WORKFLOW] 按前端选择的报告类型纠正域：{cur} → {want}")
+    state["_domain"] = want
+    state["domain"] = want
+    state["_conversation_domain"] = want
+    try:
+        state["template_name"] = _catalog_template_name(want)
+    except Exception:
+        pass
+    # 旧域生成的内容与模板不能留着，否则复垦会话里会冒出稳评的章节
+    state["chapters"] = {}
+    state["outline_list"] = []
+    state["template_path"] = ""
+
+
 @router.post("/generate/{session_id}/workflow/start", response_model=ApiResponse)
 async def start_workflow(session_id: str, request: WorkflowStartRequest, user: User = Depends(get_current_user)):
     """Start the LangGraph report generation workflow.
@@ -2785,6 +2819,9 @@ async def start_workflow(session_id: str, request: WorkflowStartRequest, user: U
         raise HTTPException(status_code=404, detail="Session not found")
 
     state = session.state
+
+    # 🔴 前端选的报告类型**优先于会话里残留的域**（见 `_apply_requested_domain`）
+    _apply_requested_domain(state, request.domain)
 
     # 🔴 Guard: reject if workflow already running or paused
     if state.get("_workflow_running"):

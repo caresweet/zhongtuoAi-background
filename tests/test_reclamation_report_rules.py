@@ -77,3 +77,32 @@ def test_reclamation_prompt_uses_own_rules_not_stability_wording():
     assert "不套用其他报告类型的写法" in p
     # 复垦提示词里不再出现土地征收口径的遁词
     assert "以现状调查确认结果为准" not in p
+
+
+# ── 报告类型必须落到工作流上（业主 2026-10-31：选了复垦却出稳评报告）──
+
+def test_requested_domain_overrides_stale_session():
+    from app.routers.report import _apply_requested_domain
+
+    state = {"_domain": "stability", "chapters": {1: {"markdown": "稳评正文"}},
+             "outline_list": [{"chapter_no": 1}], "template_path": "x.docx",
+             "template_name": "社会稳定风险评估报告"}
+    _apply_requested_domain(state, "reclamation")
+    assert state["_domain"] == "reclamation"
+    assert state["domain"] == "reclamation"
+    # 旧域产物必须清掉，否则复垦会话里会冒出稳评章节
+    assert state["chapters"] == {} and state["outline_list"] == []
+    assert state["template_path"] == ""
+    assert "复垦" in state["template_name"]
+
+
+def test_requested_domain_noop_when_same_or_empty():
+    from app.routers.report import _apply_requested_domain
+
+    state = {"_domain": "reclamation", "chapters": {1: {"markdown": "x"}}}
+    _apply_requested_domain(state, "reclamation")
+    assert state["chapters"] == {1: {"markdown": "x"}}
+
+    state2 = {"_domain": "reclamation"}
+    _apply_requested_domain(state2, "")
+    assert state2["_domain"] == "reclamation"

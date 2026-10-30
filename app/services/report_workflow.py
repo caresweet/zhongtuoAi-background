@@ -1060,8 +1060,11 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     #    再并上 `CHAPTER_REQUIRED_FIELDS[ch]` 兜底（第1/3/11/13 章的 spec.data 是空的），
     #    最后滤掉「问了也答不上来」的（风险等级是系统算的、界址描述只可能来自勘测定界…）。
     #    好处：改 `CHAPTER_SECTION_SPECS` 弹窗自动跟着变，不用再同步第二份硬编码清单。
-    from app.agent.chapter_definitions import chapter_need_fields
-    _need = [(f, ch_num) for f in chapter_need_fields(ch_num)]
+    # 🔴 按域取：稳评走上面那套章节规格；复垦/投标**不逐章追问**
+    #    （业主 2026-10-31：「线上复垦报告还在弹窗问责任单位」—— 根因是这里
+    #      一直按稳评的章节规格推导询问清单，问出了 `org_name` 这种土地征收字段）。
+    from app.agent.chapter_catalog import chapter_need_fields_for
+    _need = [(f, ch_num) for f in chapter_need_fields_for(domain_of_state(state), ch_num)]
     # 🔴 首章生成前，先把「评审表（不编号前置部分）」需要的字段一并问掉
     #    ⚠️ **仅在开启提问时**并进来：默认（不提问）路径会把本章缺失字段统统标
     #       `_confirmed_`，若把评审表字段也带上，它们会被提前标成「已确认」，

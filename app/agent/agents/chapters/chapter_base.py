@@ -2011,6 +2011,12 @@ class ChapterAgentBase(BaseAgent):
         except Exception:
             template_block = ""
 
+        # 🔴 行文要求（按域）：复垦加短句/换开头两条；稳评为空串（提示词逐字不变）
+        try:
+            style_block = chapter_catalog.style_rules(domain)
+        except Exception:
+            style_block = ""
+
         return (
             f"{chapter_catalog.chapter_persona(domain)}\n"
             f"根据你的专业经验撰写第{self._chapter_num_cn()}章「{self.chapter_title}」。\n\n"
@@ -2051,6 +2057,8 @@ class ChapterAgentBase(BaseAgent):
             f"{section_spec}\n"
             # 🔴 本章人工模板底稿（从数据库模板按 12 章切块，结构与行文基准）
             f"{template_block}\n"
+            # 🔴 行文要求（复垦专用；稳评为空串）
+            f"{style_block}"
         )
 
     def _default_user_prompt(

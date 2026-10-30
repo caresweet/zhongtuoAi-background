@@ -523,13 +523,18 @@ class ReportAssembler:
 
         # 🔴 正文去重（两域通用）：模型偶尔把同一句/同一段连写两遍
         #    （实测：「…涉及户数50户。50户。补偿方案制定应…」）。只删逐字重复与秃噜嘴的残句。
+        # 🔴 顺带断长句：交付体检实测「60 字以上长句」占了不合格段落的绝大多数
+        #    （稳评 402 段里 81 段、复垦 432 段里 84 段）。装配前确定性断一次，
+        #    断点只取引号/括号外的中文逗号，前后各留 ≥15 字，一句最多断两处。
         try:
-            from app.validation.content_guardrails import dedup_chapters
-            chapters, _dedup_n = dedup_chapters(chapters)
-            if _dedup_n:
-                logger.info("[去重] 去掉相邻重复句/段 %d 处", _dedup_n)
+            from app.validation.content_guardrails import polish_chapters
+            chapters, _polish = polish_chapters(chapters)
+            if _polish.get("dedup"):
+                logger.info("[去重] 去掉相邻重复句/段 %d 处", _polish["dedup"])
+            if _polish.get("split"):
+                logger.info("[断句] 拆开超长句 %d 处", _polish["split"])
         except Exception as _de:
-            logger.warning(f"[去重] 跳过: {_de}")
+            logger.warning(f"[去重/断句] 跳过: {_de}")
 
         # 🔴 用户在「选择报告人员」多选框里勾选的人员姓名（决定前置工作组名单 + 培训证书取图）
         #    优先级：会话 state → filled_data 透传（脚本生成走这条）→ 空表示"未选，用全部在职人员"

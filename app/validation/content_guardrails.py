@@ -1222,3 +1222,98 @@ def rebuild_risk_level_table(chapters: Dict[Any, Dict[str, Any]]):
         new_tbl.append(f"| {i} | {name} | {level or '低风险'} |")
     ch12["markdown"] = "\n".join(lines[:hdr_i] + new_tbl + lines[end:])
     return 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 长句断开 —— 「用户只看一遍」的第一大障碍
+# ═══════════════════════════════════════════════════════════════════════════════
+# 实测 2026-10-30（交付体检 baseline）：
+#   稳评 402 段里 **81 段**含超过 60 字的长句、22 段段首雷同；复垦 432 段里 84 段长句。
+#   长句是最好改、也是评审最刺眼的一类 —— 在装配前确定性地断一次，
+#   比让模型「下次注意」靠谱得多。
+#
+# 断句只断**安全**的地方：
+#   ① 引号/括号内的逗号不碰（「根据《X办法》第3条，……」不能断在书名号里）；
+#   ② 断点前后都要 ≥ 15 字（否则会断出「本项目，位于……」这种碎句）；
+#   ③ 含冒号的列举句不断（「包括：①…；②…」断了更乱）；
+#   ④ 一句最多断两次，避免把一句话切成一堆短句。
+_MAX_SENT_LEN = 60
+_MIN_PIECE = 15
+_MAX_SPLITS_PER_SENT = 2
+
+_OPEN_BRACKETS = "「『（(《《【“"
+_CLOSE_BRACKETS = "」』）)）》】”"
+
+
+def _comma_positions(sent: str) -> list[int]:
+    """返回**不在引号/括号里**的逗号下标。"""
+    depth = 0
+    out = []
+    for i, ch in enumerate(sent):
+        if ch in _OPEN_BRACKETS:
+            depth += 1
+        elif ch in _CLOSE_BRACKETS:
+            depth = max(0, depth - 1)
+        elif ch == "，" and depth == 0:   # 🔴 只认中文逗号：顿号（、）是并列项，断开就错了
+            out.append(i)
+    return out
+
+
+def split_long_sentences(md: str, max_len: int = _MAX_SENT_LEN):
+    """把超长句在安全的逗号处断开，返回 `(新文本, 断句处数)`。
+
+    只处理正文行；标题（#）、表格（|）、图片行原样保留。
+    """
+    import re as _re
+
+    if not md:
+        return md, 0
+
+    n = 0
+    out_lines = []
+    for line in md.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("|") or s.startswith("!["):
+            out_lines.append(line)
+            continue
+        # 按句末标点切，保留标点
+        parts = _re.split(r"(?<=[。！？])", s)
+        new_parts = []
+        for sent in parts:
+            if len(sent) <= max_len or "：" in sent or ":" in sent:
+                new_parts.append(sent)
+                continue
+            cur = sent
+            for _ in range(_MAX_SPLITS_PER_SENT):
+                if len(cur) <= max_len:
+                    break
+                pos = _comma_positions(cur)
+                # 选「离中点最近、且两边都够长」的逗号
+                cand = [p for p in pos
+                        if p >= _MIN_PIECE and len(cur) - p - 1 >= _MIN_PIECE]
+                if not cand:
+                    break
+                mid = len(cur) / 2
+                cut = min(cand, key=lambda p: abs(p - mid))
+                cur = cur[:cut] + "。" + cur[cut + 1:]
+                n += 1
+            new_parts.append(cur)
+        out_lines.append("".join(new_parts))
+    return "\n".join(out_lines), n
+
+
+def polish_chapters(chapters: Dict[Any, Dict[str, Any]]):
+    """装配前的确定性润色：去重复段 + 断长句。返回 `(chapters, 统计dict)`。"""
+    chapters, dup_n = dedup_chapters(chapters)
+    split_n = 0
+    for ch in chapters.values():
+        if not isinstance(ch, dict):
+            continue
+        md = str(ch.get("markdown") or "")
+        if not md:
+            continue
+        new_md, k = split_long_sentences(md)
+        if k:
+            ch["markdown"] = new_md
+            split_n += k
+    return chapters, {"dedup": dup_n, "split": split_n}

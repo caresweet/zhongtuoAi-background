@@ -2230,6 +2230,8 @@ async def get_session_gaps(session_id: str, user: User = Depends(get_current_use
         "by_chapter": {str(ch): len(gaps[ch] or []) for ch in sorted(gaps)},
         "warnings": sum(1 for g in items if g.get("severity") == "warn"),
         "items": _jsonable(items),
+        # 🔴 交付体检（80% 可用率目标）：可用率、需扫一眼的段落清单
+        "audit": _jsonable((session.state or {}).get("_delivery_audit") or {}),
     })
 
 

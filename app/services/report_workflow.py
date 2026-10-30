@@ -2046,6 +2046,17 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
             for _k in ("_chapter_gaps", "_table_issues"):
                 if asm_state.get(_k):
                     state[_k] = asm_state[_k]
+            # 🔴 交付体检：把「80% 可用、看一遍就过」算成分数与清单
+            #    （业主 2026-10-30）。体检的是**最终进文档的章节**，不是中间稿。
+            try:
+                from app.services.delivery_audit import audit_chapters, summarize
+                _audit = audit_chapters(chapters)
+                state["_delivery_audit"] = _audit
+                logs.append(summarize(_audit))
+                if _audit.get("below_target"):
+                    logs.append("⚠️ 可用率低于目标 80%，建议按清单人工过一遍再交稿")
+            except Exception as _ae:
+                logger.warning(f"[体检] 计算失败（不影响出报告）：{_ae}")
             state["phase"] = WorkflowPhase.COMPLETE.value
             logs.append(f"✅ 报告已生成: {output}")
             # 🔴 输出各流程耗时，供后续逐步优化

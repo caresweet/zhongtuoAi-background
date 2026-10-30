@@ -895,6 +895,23 @@ _RECLAMATION_DATA_IRON_RULE = (
 )
 
 
+def style_rules(domain: str | None) -> str:
+    """「行文要求」块（按域）。稳评返回空串（其文风规则已内联在提示词里，逐字不变）。
+
+    复垦加这块的原因：交付体检（2026-10-30）实测复垦报告 432 段里有 84 段长句、
+    35 段段首雷同 —— 这两项是人一眼就能看出、但模型自己不会收敛的 AI 味。
+    """
+    if domain != _RECLAMATION:
+        return ""
+    return (
+        "## ✍️ 行文要求（复垦）\n"
+        "- 单句尽量不超过 40 字，一句话只说一件事；长句宁可断开\n"
+        "- 同一章里不要连续三段用同一个开头（「本项目…」「该项目…」「本方案…」）：换主语，或直接说事实\n"
+        "- 写具体：面积、数量、工艺、时限能写就写；不写「加强」「提升」「有力保障」这类空话\n"
+        "\n"
+    )
+
+
 def chapter_data_iron_rule(domain: str | None) -> str:
     """默认单章 system prompt 的「数据归位铁律」块（按域，含块尾换行）。"""
     if domain == _RECLAMATION:

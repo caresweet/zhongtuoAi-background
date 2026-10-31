@@ -415,6 +415,10 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             # 🔴 图片→章绑定也按域取：复垦不借稳评那套写死 6/7/8/9 章的文件夹提示。
             chapter_hint = _catalog.image_chapter_hint(domain, name, folder_hint)
 
+        # 🔴 内容复核：被判成 photo 但实际是**灰度影像页**的，改判地图类
+        if cat == "photo" and _looks_like_gray_page(path):
+            cat = "map"
+
         display_name = _rule_label or _clean_display_name(name, cat)
 
         # Check folder structure for better display name
@@ -545,6 +549,30 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         "catalog": catalog,
         "appendix": appendix,
     }
+
+
+def _looks_like_gray_page(path: str) -> bool:
+    """内容判据：**灰度 + 大面积白边** 的图不是现场照片，是影像图/扫描页。
+
+    🔴 为什么要有这条（业主 2026-10-31 实测）：用户传的「微信图片_2026…jpg」
+       文件名毫无线索，内容其实是**灰度航拍影像图**（带界址点/尺寸标注），
+       视觉模型一律判成 `photo`，于是被印成「临时用地现场照片」。
+       现场照片几乎都是彩色；灰度 + 白边（>25% 纯白）= 扫描页/影像图。
+    """
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            im = im.convert("RGB")
+            im.thumbnail((200, 200))
+            px = list(im.getdata())
+            if not px:
+                return False
+            n = len(px)
+            gray = sum(1 for r, g, b in px if abs(r - g) <= 12 and abs(g - b) <= 12)
+            white = sum(1 for r, g, b in px if r >= 240 and g >= 240 and b >= 240)
+            return (gray / n) >= 0.9 and (white / n) >= 0.25
+    except Exception:
+        return False
 
 
 def _classify_filename(name: str, folder_hint: str = "") -> str:

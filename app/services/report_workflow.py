@@ -437,6 +437,21 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
     except Exception as _ge:
         logger.warning(f"签到表解析跳过: {_ge}")
 
+    # 🔴 复垦：从材料原文补「建设单位 / 用地时间」（实测 2026-10-31：材料里有，
+    #    抽取器只认冒号写法，两条都没进来，第1章于是编了个 48 个月的服务年限）
+    try:
+        if domain_of_state(state) == "reclamation":
+            from app.services.field_fixer import fix_reclamation_fields
+            _before = {k: filled.get(k) for k in ("build_unit", "land_use_period")}
+            fix_reclamation_fields(filled, state.get("_project_materials") or [])
+            _new = [k for k, v in (("build_unit", filled.get("build_unit")),
+                                   ("land_use_period", filled.get("land_use_period")))
+                    if v and not _before.get(k)]
+            if _new:
+                logs.append("📌 复垦事实补全：" + "、".join(_new))
+    except Exception as _rfe:
+        logger.warning(f"fix_reclamation_fields skipped: {_rfe}")
+
     # 🔴 用勘测定界表纠正被正则抓错的字段（land_use/location/project_name）——按表头语义，不锁位置
     try:
         from app.services.field_fixer import fix_fields_from_tables

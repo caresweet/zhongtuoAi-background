@@ -530,7 +530,7 @@ class ReportAssembler:
         #    断点只取引号/括号外的中文逗号，前后各留 ≥15 字，一句最多断两处。
         try:
             from app.validation.content_guardrails import polish_chapters
-            chapters, _polish = polish_chapters(chapters)
+            chapters, _polish = polish_chapters(chapters, self._domain)
             if _polish.get("dedup"):
                 logger.info("[去重] 去掉相邻重复句/段 %d 处", _polish["dedup"])
             if _polish.get("split"):
@@ -3600,6 +3600,13 @@ class ReportAssembler:
         #    强加到稳评每一张 markdown 表上。域判断放这里，调用点保持通用。
         if getattr(self, "_domain", "stability") != "reclamation":
             return False
+        # 🔴 第1章（前言）**不排任何表**（业主 2026-10-31：「前言只写文字」）：
+        #    模型手写的地类表、系统补渲的损毁表，一律丢弃。
+        #    返回 True = 调用方认为已处理，不再走默认渲染。
+        if int(ch_num) == 1:
+            logger.info(f"[表1-x] 前言不排表，已丢弃：{cap}")
+            return True
+
         _is_land = ("土地利用现状" in cap) or ("地类" in cap)
 
         # ── 第6章：工程量汇总表**由系统算**（同一会话两次生成必须同数）──
@@ -3621,14 +3628,6 @@ class ReportAssembler:
         # ── 第3章：样本没有这张表 —— 整张丢掉（数据归第4章表4-4）──
         if ch_num == 3 and _is_land:
             logger.info(f"[表3-1] 第3章不设土地利用现状表（样本无此表），已丢弃 LLM 表：{cap}")
-            return True
-
-        # ── 第1章：**不再排表** ──
-        # 🔴 业主 2026-10-31：「前言部分不应该有数据分析，只有文字才对」。
-        #    样本第1章虽有「表1-1 临时用地拟损毁土地情况表」，但那是样本书的排法；
-        #    本次口径优先：前言只写文字，表格与明细归第3/4章（表4-4 已按地类渲染）。
-        if ch_num == 1 and ("损毁" in cap or _is_land):
-            logger.info(f"[表1-1] 前言不排表，已丢弃：{cap}")
             return True
 
         # ── 第4章：按地类逐项渲染（数据来自勘测定界的土地分类面积表）──
@@ -5129,7 +5128,15 @@ class ReportAssembler:
                 continue
             _p = str(img.get("path", ""))
             _cat = str(img.get("category") or "")
-            if not _p or _cat not in ("photo", "announcement"):
+            if not _p:
+                continue
+            # 🔴 影像图（灰度航拍被判成 map 的）没进正文 → 归附件12「现场照片、影像图」。
+            #    2026-10-31 实测：两张航拍影像既不进正文也不进附件，材料等于丢了。
+            if _cat == "map":
+                if not os.path.basename(_p).startswith("pdf_"):
+                    _add(12, _p, str(img.get("display_name") or "影像图"))
+                continue
+            if _cat not in ("photo", "announcement"):
                 continue
             # 🔴 **PDF 派生的图不进这一类**（`pdf_*` 是 PDF 内嵌位图 / 整页渲染 / 关键图）：
             #    那些 PDF 的原件已经在 ① 里整份进附件了。不排除的话，同一份「核准批复」
@@ -5157,8 +5164,13 @@ class ReportAssembler:
             # 🔴 合同/协议扫描件按名归项（分类器已把这类判成 `document`，不进 ③ 的
             #    11/12）：临时用地协议 → 附件5，复垦协议 → 附件6。
             #    否则这类图会**既不进正文也不进附件**，材料等于丢了（实测 2026-10-31）。
+            # 🔴 材料名 → 附件项（2026-10-31 实测：材料明明传了，却全标「待补充」）
             (6, ("复垦协议",)),
-            (5, ("临时用地协议", "临时使用土地合同", "使用土地合同")),
+            (5, ("临时用地协议", "临时使用土地合同", "使用土地合同", "临时用地合同")),
+            (9, ("调查表", "公众调查", "调查问卷")),
+            (10, ("权利人意见", "权利人")),
+            (14, ("补偿证明", "补偿到位", "补偿款到位")),
+            (16, ("勘界报告", "勘测定界报告", "勘测报告")),
         )
         for img in ((getattr(self, '_img_catalog_data', {}) or {}).get("catalog") or []):
             _p = str(img.get("path", ""))
@@ -5598,7 +5610,8 @@ class ReportAssembler:
             self._pending_section_trigger = None
             self._defer_imgs = (_trig, list(_imgs))
             _pend.pop(_trig, None)
-            logger.info(f"[落图] 小节「{_trig}」暂无正文，图片挂起等第一段")
+            logger.info(f"[落图] 小节「{_trig}」暂无正文，图片挂起等第一段："
+                        + "、".join(str(x.get('path') if isinstance(x, dict) else x) for x in _imgs))
             return
         self._pending_section_trigger = None
         self._section_body_seen = False
@@ -5620,6 +5633,8 @@ class ReportAssembler:
                 #    看不清 —— 逐张独占一行（宽 12.5cm）。照片类才需要并排。
                 for _p, _l in _pairs:
                     self._add_image(doc, _p, _l or "", numbered=True)
+                # 图后补带数字的解读（业主 2026-10-31）
+                self._add_figure_reading(doc, getattr(self, '_current_chapter', 0))
             else:
                 self._add_image_row_pair(doc, _pairs)
 
@@ -6373,7 +6388,38 @@ class ReportAssembler:
                 _p, _l = str(info), ""
             if _p:
                 self._add_image(doc, _p, _l or "", numbered=True)
-        logger.info(f"[落图] 小节「{_trig}」的 {len(_imgs)} 张图落在首段之后")
+        logger.info(f"[落图] 小节「{_trig}」的 {len(_imgs)} 张图落在首段之后："
+                    + "、".join(str(x.get('path') if isinstance(x, dict) else x) for x in _imgs))
+        self._add_figure_reading(doc, getattr(self, '_current_chapter', 0))
+
+    def _add_figure_reading(self, doc, ch_num):
+        """图后补一段**带数字的解读**（业主 2026-10-31：配图小节必须有数据分析）。
+
+        🔴 为什么系统来写：复垦第3/4章的图是装配器插的，模型写正文时并不知道
+           图会落在哪一段，所以几乎从不主动写图后解读（实测三张图后一个字都没有）。
+           这里用事实卡里的**真实数字**补一句：范围面积 + 主导地类占比；
+           没有的数字就不写，绝不编。
+        """
+        if self._domain != "reclamation" or int(ch_num or 0) not in (3, 4):
+            return
+        st = getattr(self, '_session_state', {}) or {}
+        filled = st.get("filled_data") or {}
+        m2 = _num_or(filled.get("area_m2"), 0) or _num_or(filled.get("area_mu"), 0) * 666.67
+        lc = filled.get("land_classification") or {}
+        rows = lc.get("rows") if isinstance(lc, dict) else []
+        parts = []
+        if m2 > 0:
+            parts.append(f"图中红线范围为本次复垦责任范围，面积 {m2:,.0f} 平方米"
+                         f"（约 {m2 / 10000:.2f} 公顷）")
+        if isinstance(rows, list) and rows and m2 > 0:
+            _r = rows[0] or {}
+            _name = "".join(str(_r.get(k) or "") for k in ("一级地类", "二级地类"))
+            _a = _num_or(_r.get("面积_m2"), 0)
+            if _name and _a > 0:
+                parts.append(f"范围内以{_name}为主，面积 {_a:,.0f} 平方米，占 {_a / m2 * 100:.1f}%")
+        if not parts:
+            return
+        self._add_para(doc, "；".join(parts) + "。上述边界即复垦工程与监测管护的实际作业范围。")
 
     # ═══════════════════════════════════════════════════════════════
     # 审核元信息 → Word 批注（python-docx 无原生批注 API，直接操作 OOXML）

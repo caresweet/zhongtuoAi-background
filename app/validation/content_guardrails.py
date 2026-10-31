@@ -1240,6 +1240,11 @@ def rebuild_risk_level_table(chapters: Dict[Any, Dict[str, Any]]):
 _MAX_SENT_LEN = 60
 _MIN_PIECE = 15
 _MAX_SPLITS_PER_SENT = 2
+# 🔴 后半句以这些词开头时**不断**：那是目的/结果状语从句，
+#    断了会得到「……为及时复垦利用被损毁的土地。促进土地集约节约利用。」这种碎句
+#    （实测 2026-10-31 第1章）。
+_NO_SPLIT_HEADS = ("促进", "实现", "达到", "确保", "保障", "推动", "提高", "增强",
+                   "使", "从而", "进而", "最终", "确保", "防止", "避免")
 
 _OPEN_BRACKETS = "「『（(《《【“"
 _CLOSE_BRACKETS = "」』）)）》】”"
@@ -1290,7 +1295,8 @@ def split_long_sentences(md: str, max_len: int = _MAX_SENT_LEN):
                 pos = _comma_positions(cur)
                 # 选「离中点最近、且两边都够长」的逗号
                 cand = [p for p in pos
-                        if p >= _MIN_PIECE and len(cur) - p - 1 >= _MIN_PIECE]
+                        if p >= _MIN_PIECE and len(cur) - p - 1 >= _MIN_PIECE
+                        and not cur[p + 1:].lstrip().startswith(_NO_SPLIT_HEADS)]
                 if not cand:
                     break
                 mid = len(cur) / 2
@@ -1302,8 +1308,31 @@ def split_long_sentences(md: str, max_len: int = _MAX_SENT_LEN):
     return "\n".join(out_lines), n
 
 
-def polish_chapters(chapters: Dict[Any, Dict[str, Any]]):
-    """装配前的确定性润色：去重复段 + 断长句。返回 `(chapters, 统计dict)`。"""
+# 🔴 前言里引用不存在的表（业主 2026-10-31 实测：「上表所列临时用地总面积…」
+#    但第1章按新口径**不排表**，读者找不到「上表」）。
+_TABLE_REF_RE = re.compile(
+    r'(如下表所示|如下表|上表所列|上表中|上表|下表所列|下表中|见下表|见上表|如表所示|如表|见表)')
+
+
+def strip_table_references(md: str) -> str:
+    """去掉正文里的「上表/下表/如表」引用（用于没有表的章节）。"""
+    if not md:
+        return md
+    out = []
+    for sent in re.split(r'(?<=[。！？])', md):
+        if _TABLE_REF_RE.search(sent):
+            sent = _TABLE_REF_RE.sub('', sent)
+            sent = re.sub(r'^[，、；：\s]+', '', sent)
+            sent = re.sub(r'，\s*，', '，', sent)
+        out.append(sent)
+    return ''.join(out)
+
+
+def polish_chapters(chapters: Dict[Any, Dict[str, Any]], domain: str | None = None):
+    """装配前的确定性润色：去重复段 + 断长句（复垦第1章另去「上表」引用）。
+
+    返回 `(chapters, 统计dict)`。
+    """
     chapters, dup_n = dedup_chapters(chapters)
     split_n = 0
     for ch in chapters.values():
@@ -1316,4 +1345,12 @@ def polish_chapters(chapters: Dict[Any, Dict[str, Any]]):
         if k:
             ch["markdown"] = new_md
             split_n += k
+    # 🔴 复垦第1章**没有表** → 正文里的「上表/如表」引用一律清掉（否则读者找不到表）
+    if domain == "reclamation":
+        _ch1 = chapters.get(1) or chapters.get("1")
+        if isinstance(_ch1, dict):
+            _md = str(_ch1.get("markdown") or "")
+            _new = strip_table_references(_md)
+            if _new != _md:
+                _ch1["markdown"] = _new
     return chapters, {"dedup": dup_n, "split": split_n}

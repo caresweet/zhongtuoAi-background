@@ -473,13 +473,26 @@ def test_stability_render_keeps_qualifications_and_intro(tmp_path):
 
 
 def test_normalize_reclamation_headings_sub_items():
-    """小节下的「（一）（二）」→ 当前小节的三级编号（样本体例 `1.2.1`）。"""
-    md = ("## 1.1 编制背景及过程\n\n正文\n\n"
-          "## （一）复垦方案服务年限\n\nA\n\n## （二）各类土地面积\n\nB\n")
-    out = cat.normalize_reclamation_headings(1, md)
-    assert "### 1.1.1 复垦方案服务年限" in out
-    assert "### 1.1.2 各类土地面积" in out
+    """小节下的「（一）（二）」→ 当前小节的三级编号（样本体例 `6.1.1`）。
+
+    🔴 第1章自 2026-10-31 起把 1.2.1~1.2.6 写进了官方小节清单 ——
+       「复垦方案服务年限」这类标题会被归到官方小节号（1.2.1），
+       不再按 1.1.x 顺排。这里用第6章（无官方子节清单）验证归一化本身。
+    """
+    md = ("## 6.1 工程设计\n\n正文\n\n"
+          "## （一）表土剥离\n\nA\n\n## （二）场地清理\n\nB\n")
+    out = cat.normalize_reclamation_headings(6, md)
+    assert "### 6.1.1 表土剥离" in out
+    assert "### 6.1.2 场地清理" in out
     assert "（一）" not in out and "（二）" not in out
+
+
+def test_ch1_official_subsections_are_pinned():
+    """第1章 1.2.1~1.2.6 与模板逐字一致（模型不许简写小节名）。"""
+    from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS as D
+    secs = D[1]["sections"]
+    assert "1.2.2 方案涉及的各类土地面积" in secs
+    assert "1.2.6 生态空间管控情况" in secs
 
 
 def test_normalize_reclamation_headings_renumbers_restarted_group():

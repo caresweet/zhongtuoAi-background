@@ -156,3 +156,31 @@ def test_reclamation_other_category_is_not_bound_as_photo():
     cat = build_image_catalog([p], domain="reclamation")
     labels = [i["label"] for imgs in cat["by_chapter"].values() for i in imgs]
     assert "临时用地现场照片" not in labels
+
+
+def test_gray_page_detection_splits_maps_from_photos(tmp_path):
+    """内容判据：灰度 + 白边 = 影像图/扫描页；彩色 = 现场照片。
+
+    实测 2026-10-31：用户传的「微信图片_xxx.jpg」其实是灰度航拍影像，
+    被视觉模型判成 photo，印进了第4章「现场照片」。
+    """
+    from PIL import Image, ImageDraw
+    from app.services.image_catalog import _looks_like_gray_page
+
+    gray = Image.new("L", (800, 600), 255)
+    d = ImageDraw.Draw(gray)
+    for i in range(60):
+        d.line([(0, i * 10), (800, i * 10 + 30)], fill=120, width=3)
+    p_gray = str(tmp_path / "wx.jpg")
+    gray.convert("RGB").save(p_gray)
+
+    color = Image.new("RGB", (800, 600), (90, 140, 80))
+    dc = ImageDraw.Draw(color)
+    for i in range(50):
+        dc.rectangle([i * 15, i * 9, i * 15 + 40, i * 9 + 40],
+                     fill=(200 - i * 2, 120 + i, 60))
+    p_color = str(tmp_path / "photo.jpg")
+    color.save(p_color)
+
+    assert _looks_like_gray_page(p_gray) is True
+    assert _looks_like_gray_page(p_color) is False

@@ -106,3 +106,24 @@ def test_requested_domain_noop_when_same_or_empty():
     state2 = {"_domain": "reclamation"}
     _apply_requested_domain(state2, "")
     assert state2["_domain"] == "reclamation"
+
+
+def test_fix_reclamation_fields_extracts_unit_and_period():
+    """材料里的「建设单位」「用地时间」要进事实卡（实测 2026-10-31：没进来 → 模型编了时间）。"""
+    from app.services.field_fixer import fix_reclamation_fields
+
+    filled = {}
+    mats = [{"source_name": "主体建设单位.docx",
+             "text_content": "江苏苏盐井神股份有限公司第一分公司\n用地时间  2026.10.1-------2028.9.30"}]
+    fix_reclamation_fields(filled, mats)
+    assert filled["build_unit"] == "江苏苏盐井神股份有限公司第一分公司"
+    assert filled["land_use_months"] == "24个月"
+    assert filled["land_use_start"].startswith("2026年10月")
+    assert filled["land_use_end"].startswith("2028年9月")
+
+
+def test_strip_table_references_for_chapter_without_tables():
+    from app.validation.content_guardrails import strip_table_references
+
+    md = "上表所列临时用地总面积以勘测定界成果为准。耕地占比82.2%。"
+    assert strip_table_references(md) == "临时用地总面积以勘测定界成果为准。耕地占比82.2%。"

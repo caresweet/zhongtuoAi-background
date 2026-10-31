@@ -85,3 +85,70 @@ def fix_fields_from_tables(filled: dict, tables: list) -> dict:
         filled.pop("land_location", None)
 
     return filled
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 复垦：从材料原文补 build_unit / 用地时间（业主 2026-10-31 实测缺陷）
+# ═══════════════════════════════════════════════════════════════════════════════
+# 材料里有「主体建设单位.docx」：首行是「江苏苏盐井神股份有限公司第一分公司」，
+# 第二行是「用地时间 2026.10.1-------2028.9.30」。
+# 但既有抽取器只认「标签：值」的冒号写法，两条都没进 filled_data ——
+# 结果第1章把建设单位写成「建设单位」泛称、服务年限**编成 48 个月**（实际 24 个月）。
+# 这里用确定性规则补上：用地时间区间 → 起止 + 月数；文件名带「建设单位」的文档首行 → build_unit。
+import re as _re
+
+_PERIOD_RE = _re.compile(
+    r'(?:用地时间|使用期限|用地期限|临时用地期限|复垦期限)\s*[:：]?\s*'
+    r'(\d{4})\s*[.\-/年]\s*(\d{1,2})\s*[.\-/月]?\s*(\d{1,2})?\s*日?\s*'
+    r'[-—~～至到]+\s*'
+    r'(\d{4})\s*[.\-/年]\s*(\d{1,2})\s*[.\-/月]?\s*(\d{1,2})?'
+)
+
+
+def fix_reclamation_fields(filled: dict, materials: list) -> dict:
+    """复垦：从 `_project_materials[].text_content` 补关键事实（幂等、不改已有值）。"""
+    if not isinstance(filled, dict):
+        return filled
+    items = []
+    for m in (materials or []):
+        if isinstance(m, dict):
+            items.append((str(m.get("source_name") or ""), str(m.get("text_content") or "")))
+    if not items:
+        return filled
+
+    # ① 用地时间 → 起止 + 月数
+    if not filled.get("land_use_start"):
+        for _name, _t in items:
+            mm = _PERIOD_RE.search(_t)
+            if not mm:
+                continue
+            y1, m1, d1, y2, m2, d2 = (mm.group(i) for i in range(1, 7))
+            filled["land_use_start"] = f"{y1}年{int(m1)}月" + (f"{int(d1)}日" if d1 else "")
+            filled["land_use_end"] = f"{y2}年{int(m2)}月" + (f"{int(d2)}日" if d2 else "")
+            # 🔴 含头含尾算月数：2026.10.1→2028.9.30 实际是 24 个月，
+            #    只做月份相减会算成 23（差一天到不了整月）。
+            _d1, _d2 = int(d1 or 1), int(d2 or 1)
+            months = (int(y2) - int(y1)) * 12 + (int(m2) - int(m1)) + (1 if _d2 >= _d1 else 0)
+            if months > 0:
+                filled["land_use_months"] = f"{months}个月"
+            filled["land_use_period"] = f"{filled['land_use_start']}至{filled['land_use_end']}"
+            break
+
+    # ② 建设单位：文件名带「建设单位/项目单位/用地单位」的文本，首行就是单位名
+    if not filled.get("build_unit"):
+        for _name, _t in items:
+            if not any(k in _name for k in ("建设单位", "项目单位", "用地单位", "复垦义务")):
+                continue
+            first = next((ln.strip() for ln in _t.splitlines() if ln.strip()), "")
+            if first and len(first) <= 40 and ("公司" in first or "单位" in first or "局" in first):
+                filled["build_unit"] = first
+                break
+
+    try:
+        from app.services import field_sources as _fs
+        _fs.mark(filled, _fs.MATERIAL,
+                 "land_use_start", "land_use_end", "land_use_months",
+                 "land_use_period", "build_unit")
+    except Exception:
+        pass
+    return filled

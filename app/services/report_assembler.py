@@ -467,6 +467,8 @@ class ReportAssembler:
         self._ch_table_seq = {}
         self._cur_section_name = ""
         self._pending_section_imgs = {}
+        self._defer_imgs = None
+        self._defer_empty_section = False
         self._pending_section_trigger = None
         self._ch8_subimg = {}
         self._ch8_cur_sub = None
@@ -2454,6 +2456,8 @@ class ReportAssembler:
                             (it or {}).get("label") or (it or {}).get("name")
                             or (it or {}).get("original_name") or "") else 1)
                 self._pending_section_imgs = {_anchor: list(_imgs_a)}
+                self._section_body_seen = False   # 本节还没有正文段时，图不能顶在标题下
+                self._defer_empty_section = True  # 仅复垦锚点章启用「无正文则挂起」
                 _cim_a[ch_num] = []
 
         # 🔴 复垦第4章：登记待补渲的分析表（表4-8/4-11/4-12/4-13），
@@ -3619,26 +3623,12 @@ class ReportAssembler:
             logger.info(f"[表3-1] 第3章不设土地利用现状表（样本无此表），已丢弃 LLM 表：{cap}")
             return True
 
-        # ── 第1章：换成样本的「临时用地拟损毁土地情况表」──
+        # ── 第1章：**不再排表** ──
+        # 🔴 业主 2026-10-31：「前言部分不应该有数据分析，只有文字才对」。
+        #    样本第1章虽有「表1-1 临时用地拟损毁土地情况表」，但那是样本书的排法；
+        #    本次口径优先：前言只写文字，表格与明细归第3/4章（表4-4 已按地类渲染）。
         if ch_num == 1 and ("损毁" in cap or _is_land):
-            lc = filled.get("land_classification")
-            lc = lc if isinstance(lc, dict) else {}
-            _total = float(lc.get("合计_m2") or 0)
-            if _total <= 0:
-                try:
-                    _total = float(str(filled.get("area_m2") or 0).replace(",", "")) or 0.0
-                except Exception:
-                    _total = 0.0
-            _ha = f"{_total / 10000.0:.4f}" if _total else "—"
-            _plots = str(filled.get("plot_count") or "").strip() or "1"
-            self._render_table_from_dict(
-                doc,
-                {"headers": ["临时用地名称", "面积（公顷）", "地块个数",
-                             "损毁方式", "损毁程度", "复垦情况"],
-                 "rows": [["施工用地", _ha, _plots, "压占", "重度", "待复垦"],
-                          ["合计", _ha, "——", "——", "——", "——"]]},
-                caption="表1-1 临时用地拟损毁土地情况表")
-            logger.info(f"[表1-1] 按样本渲染「临时用地拟损毁土地情况表」（{_ha} 公顷）")
+            logger.info(f"[表1-1] 前言不排表，已丢弃：{cap}")
             return True
 
         # ── 第4章：按地类逐项渲染（数据来自勘测定界的土地分类面积表）──
@@ -5481,7 +5471,9 @@ class ReportAssembler:
             return
         for _key in list(_pend.keys()):
             self._pending_section_trigger = _key
-            self._flush_section_images(doc)
+            self._flush_section_images(doc, force=True)
+        # 挂起的（本节没正文）也要落，否则章末丢图
+        self._flush_deferred_images(doc)
 
     # 第8章「（四）风险调查过程」的四个子项 → 各自照片的识别关键词（顺序敏感：先专后泛）
     _CH8_SUBITEMS = (
@@ -5583,13 +5575,28 @@ class ReportAssembler:
             self._flush_ch8_group(doc, _prev)
         self._ch8_cur_sub = _t
 
-    def _flush_section_images(self, doc):
-        """把当前待插入的章节内图片（第6章 公示/现场/座谈 等）成对插入。"""
+    def _flush_section_images(self, doc, force: bool = False):
+        """把当前待插入的章节内图片（第6章 公示/现场/座谈 等）成对插入。
+
+        🔴 `force=False` 且本节**只有标题、还没有正文段**时，先挂起：
+           实测 2026-10-31「4.1 土地损毁分析与评定」下面没有引言、直接进 4.1.1，
+           三张图就顶在小节标题下面，正文一个字都没有。挂起后等第一个正文段出现，
+           再插到那段后面（见 `_add_para` 里的 `_flush_deferred_images`）。
+        """
         _trig = getattr(self, '_pending_section_trigger', None)
         if not _trig:
             return
-        self._pending_section_trigger = None
         _pend = getattr(self, '_pending_section_imgs', {}) or {}
+        _imgs = _pend.get(_trig) or []
+        if (_imgs and not force and getattr(self, '_defer_empty_section', False)
+                and not getattr(self, '_section_body_seen', False)):
+            self._pending_section_trigger = None
+            self._defer_imgs = (_trig, list(_imgs))
+            _pend.pop(_trig, None)
+            logger.info(f"[落图] 小节「{_trig}」暂无正文，图片挂起等第一段")
+            return
+        self._pending_section_trigger = None
+        self._section_body_seen = False
         _imgs = _pend.pop(_trig, [])
         if not _imgs:
             return
@@ -6326,6 +6333,7 @@ class ReportAssembler:
             run.font.color.rgb = RGBColor(0, 0, 0)  # 强制黑色，覆盖 Word 默认蓝色
 
     def _add_para(self, doc, text, bold=False, indent=False, font=None, size=None):
+        _txt_len = len(str(text or ""))
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # 🔴 正文两端对齐
         p.paragraph_format.space_after = Pt(4)
@@ -6337,6 +6345,30 @@ class ReportAssembler:
         _df, _dp = typography(getattr(self, '_domain', None), "body")
         _set_run_font(r, font or _df, size=size if size is not None else Pt(_dp),
                       bold=bold, ascii_font=FONT_ASCII)
+
+        # 🔴 图落位：本节已经有正文了（不再把图顶在小节标题下）；
+        #    若有「挂起」的图，插到这段正文之后。
+        if getattr(self, '_pending_section_trigger', None) and _txt_len >= 30:
+            self._section_body_seen = True
+        if getattr(self, '_defer_imgs', None) and _txt_len >= 30:
+            self._flush_deferred_images(doc)
+
+    def _flush_deferred_images(self, doc):
+        """把「本节暂无正文」而挂起的图，插到第一个正文段之后。"""
+        item = getattr(self, '_defer_imgs', None)
+        if not item:
+            return
+        _trig, _imgs = item
+        self._defer_imgs = None
+        for info in _imgs:
+            if isinstance(info, dict):
+                _p = info.get("path", "")
+                _l = info.get("label", "") or info.get("name", "") or ""
+            else:
+                _p, _l = str(info), ""
+            if _p:
+                self._add_image(doc, _p, _l or "", numbered=True)
+        logger.info(f"[落图] 小节「{_trig}」的 {len(_imgs)} 张图落在首段之后")
 
     # ═══════════════════════════════════════════════════════════════
     # 审核元信息 → Word 批注（python-docx 无原生批注 API，直接操作 OOXML）

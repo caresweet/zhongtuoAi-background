@@ -870,8 +870,12 @@ def _render_doc_full(tmp_path, chapters, filled):
     return _D(str(tmp_path / "generated" / out.split("/")[-1]))
 
 
-def test_ch1_renders_sample_damage_table(tmp_path):
-    """第1章的表按样本换成「临时用地拟损毁土地情况表」（6 列 + 合计）。"""
+def test_ch1_drops_damage_table(tmp_path):
+    """第1章**不排表**（业主 2026-10-31：「前言只写文字，不做数据分析」）。
+
+    以前这里按样本把 LLM 表换成「临时用地拟损毁土地情况表」并印进前言；
+    现在口径优先：前言只写文字，表格与明细归第3/4章（表4-4 已按地类渲染）。
+    """
     md = ("# 前言\n\n## 1.2 复垦方案摘要\n\n"
           "表1-1 临时用地土地利用现状地类构成表\n\n"
           "| 一级地类 | 二级地类 | 面积() |\n| --- | --- | --- |\n"
@@ -880,12 +884,8 @@ def test_ch1_renders_sample_damage_table(tmp_path):
                            {"project_name": "测试复垦项目",
                             "land_classification": {"rows": [{"一级地类": "耕地", "二级地类": "水田",
                                                               "面积_m2": 478.0}], "合计_m2": 8070.0}})
-    tb = _table_by_header(doc, "临时用地名称")
-    assert tb is not None, "第1章应渲染「临时用地拟损毁土地情况表」"
-    _rows = [[c.text.strip() for c in r.cells] for r in tb.rows]
-    assert _rows[0][1] == "面积（公顷）"
-    assert _rows[1] == ["施工用地", "0.8070", "1", "压占", "重度", "待复垦"]
-    assert _rows[2][0] == "合计" and _rows[2][1] == "0.8070"
+    assert _table_by_header(doc, "临时用地名称") is None, "前言不该再出现表1-1"
+    assert _table_by_header(doc, "一级地类") is None, "LLM 手写的地类表也不该留在前言"
 
 
 def test_ch3_land_use_table_is_dropped(tmp_path):

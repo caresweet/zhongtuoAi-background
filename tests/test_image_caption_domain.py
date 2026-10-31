@@ -136,3 +136,23 @@ def test_chapter_image_specs_reclamation_from_samples():
     assert "勘测定界图" in _rel["keywords"] and "勘测定界" not in _rel["keywords"]
     # 稳评仍是原表（同一对象，逐字不变）
     assert set(catalog.chapter_image_specs("stability")) == {6, 7, 8, 9}
+
+
+# ── 2026-10-31 线上实测回归：影像图被当成现场照片、文档扫描页进了正文 ──
+
+def test_reclamation_satellite_image_is_map_not_photo():
+    """文件名带「影像/航拍/现状图」→ 地图类，落第3章，不能当现场照片进第4章。"""
+    p = _img_in("井神资料", "井神现状图-已去除林地.jpg")
+    cat = build_image_catalog([p], domain="reclamation")
+    ch4 = [i["label"] for i in cat["by_chapter"].get(4, [])]
+    assert "临时用地现场照片" not in ch4
+    ch3 = [i["label"] for i in cat["by_chapter"].get(3, [])]
+    assert ch3, "影像/现状图应绑到第3章"
+
+
+def test_reclamation_other_category_is_not_bound_as_photo():
+    """认不出的图（category=other）不能兜底成「现场照片」（扫描协议页曾被印进正文）。"""
+    p = _img_in("附件扫描", "临时用地协议_p1.jpg")
+    cat = build_image_catalog([p], domain="reclamation")
+    labels = [i["label"] for imgs in cat["by_chapter"].values() for i in imgs]
+    assert "临时用地现场照片" not in labels

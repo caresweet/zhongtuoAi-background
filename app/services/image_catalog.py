@@ -404,6 +404,13 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                 cat = "survey_map"
             elif any(k in _nl for k in ('流程图', '评估流程')):
                 cat = "flowchart"
+            # 🔴 影像/航拍/卫星/遥感/现状图 → 地图类，**绝不是现场照片**。
+            #    实测 2026-10-31：井神的灰度航拍图被当成「临时用地现场照片」
+            #    印进第4章（图4-2），而它本来该是第3章的位置/现状图。
+            elif any(k in _nl for k in ('影像', '航拍', '卫星', '遥感', '现状图',
+                                         '位置图', '红线', '界址')):
+                if cat in ("", "other", "photo"):
+                    cat = "map"
 
             # 🔴 图片→章绑定也按域取：复垦不借稳评那套写死 6/7/8/9 章的文件夹提示。
             chapter_hint = _catalog.image_chapter_hint(domain, name, folder_hint)
@@ -488,13 +495,18 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
             if remaining <= 0:
                 continue
             # Find matching images NOT already used in another chapter
+            # 🔴 复垦**不认** `other` 兜底：`other` 是「认不出的图」大杂烩，
+            #    实测 2026-10-31 把临时用地协议的扫描页当「现场照片」印进了第4章。
+            #    稳评保留原兜底（历史行为，逐字不动）。
+            _allow_other_as_photo = (domain != "reclamation")
             available = [img for img in catalog
                          if img["path"] not in used_paths and not img.get("chapter_hint")
                          and not img.get("pinned") and (
                              img["category"] == spec["type"] or
                              img["category"] in (spec.get("aliases") or []) or
                              (spec["type"] == "meeting" and img["category"] in ("photo", "review")) or
-                             (spec["type"] == "photo" and img["category"] in ("photo", "other"))  # 🔴 Allow "other" as photo fallback
+                             (_allow_other_as_photo and spec["type"] == "photo"
+                              and img["category"] in ("photo", "other"))
                          )]
             for m in available[:remaining]:
                 used_paths.add(m["path"])
@@ -590,6 +602,13 @@ def _classify_filename(name: str, folder_hint: str = "") -> str:
     # 🔴 公司资质/证书
     if any(k in nl for k in ['执照', '证书', '资质', '备案']):
         return "cert"
+    # 🔴 文档扫描件（协议/合同/委托/承诺/批复/报告/说明…）**不是照片**。
+    #    实测 2026-10-31：「临时用地协议」的扫描页命中了下面那句里的
+    #    「临时用地」，被判成现场照片、印进第4章正文（图4-3）。
+    #    这类一律归 `document`，只进附件，绝不进正文配图。
+    if any(k in nl for k in ['协议', '合同', '委托', '承诺', '批复', '报告',
+                             '说明', '申请书', '审批', '证明', '备案表']):
+        return "document"
     # Site photos — check after specific categories
     if any(k in nl for k in ['现场', '勘察', '地块现状', '临时用地', '房屋现状', '走访', '照片']):
         return "photo"

@@ -127,3 +127,20 @@ def test_strip_table_references_for_chapter_without_tables():
 
     md = "上表所列临时用地总面积以勘测定界成果为准。耕地占比82.2%。"
     assert strip_table_references(md) == "临时用地总面积以勘测定界成果为准。耕地占比82.2%。"
+
+
+def test_recognition_report_is_domain_aware():
+    """上传核验清单按域取：复垦不该再弹「稳评责任单位/问卷份数/群众支持率」。"""
+    from app.services.material_ingestion_service import material_ingestion_service as mis
+
+    src = {"project_name": "井神临时用地复垦", "build_unit": "江苏苏盐井神股份有限公司第一分公司",
+           "area_m2": "23248", "location": "淮安区石塘镇"}
+    rep = mis.recognition_report(src, domain="reclamation")
+    labels = [i["label"] for i in rep["missing"]] + [i["label"] for i in rep["recognized"]]
+    for bad in ("稳评责任单位", "问卷份数", "群众支持率", "座谈会日期", "专家评审日期"):
+        assert bad not in labels, bad
+    assert any("建设单位" in l for l in labels)
+
+    # 稳评清单保持原样
+    stab = mis.recognition_report({}, domain="stability")
+    assert any("稳评责任单位" in i["label"] for i in stab["missing"])

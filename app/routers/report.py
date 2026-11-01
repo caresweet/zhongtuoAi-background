@@ -630,10 +630,13 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
         from app.services.material_ingestion_service import (
             material_ingestion_service as _mis, KEY_RECOGNITION_FIELDS,
         )
-        _rep = _mis.recognition_report(filled)
+        from app.domains import domain_of_state as _dos
+        _dom = _dos(state)
+        _rep = _mis.recognition_report(filled, domain=_dom)
         _rec = _rep.get("recognized", []) or []
         _miss = _rep.get("missing", []) or []
-        _total = len(KEY_RECOGNITION_FIELDS)
+        _total = len(_mis.RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
+                     else KEY_RECOGNITION_FIELDS)
         if _rec:
             _show = "、".join(f"{i['label']}＝{i['value']}" for i in _rec[:8])
             state.setdefault("logs", []).append(
@@ -2218,11 +2221,15 @@ async def get_recognition_report(session_id: str, user: User = Depends(get_curre
         if not str(k).startswith("_") and v not in (None, "", [], {}):
             src.setdefault(k, v)
 
-    rep = _mis.recognition_report(src)
+    from app.domains import domain_of_state as _dos
+    _dom = _dos(st)
+    rep = _mis.recognition_report(src, domain=_dom)
     return ApiResponse(message="识别核验完成", data={
+        "domain": _dom,
         "recognized": rep.get("recognized", []),
         "missing": rep.get("missing", []),
-        "total": len(KEY_RECOGNITION_FIELDS),
+        "total": len(_mis.RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
+                     else KEY_RECOGNITION_FIELDS),
         "uploaded_files": len((st.get("_uploaded_files") or [])),
         "material_files": len((st.get("_project_materials") or [])),
     })

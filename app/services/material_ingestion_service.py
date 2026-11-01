@@ -61,6 +61,21 @@ _DATE_RANGE_PAIRS = {
 }
 
 # 核验清单：这些是「用户到底有没有正确上传」的判据
+# 🔴 复垦的上传核验清单（2026-11-01）：原来不分域，复垦会话也弹「稳评责任单位 /
+#    问卷份数 / 群众支持率 / 座谈会日期」—— 那些是土地征收稳评的字段，复垦根本没有。
+RECLAMATION_RECOGNITION_FIELDS = [
+    ("project_name",            "项目名称"),
+    ("build_unit",              "建设单位（复垦义务人）"),
+    ("location",                "临时用地位置"),
+    ("area_m2",                 "临时用地面积"),
+    ("land_use_period",         "临时用地期限"),
+    ("land_classification",     "地类构成（勘测定界）"),
+    ("land_use",                "原土地利用类型"),
+    ("doc_reference",           "批复/备案文号"),
+    ("reclamation_direction",   "复垦方向"),
+    ("dynamic_total_investment", "动态总投资"),
+]
+
 KEY_RECOGNITION_FIELDS = [
     ("project_name",          "项目名称"),
     ("doc_reference",         "公告/批复文号"),
@@ -594,7 +609,8 @@ class MaterialIngestionService:
         return v.strip()
 
     @staticmethod
-    def recognition_report(source: Dict[str, Any]) -> Dict[str, List[Any]]:
+    def recognition_report(source: Dict[str, Any],
+                           domain: str = "stability") -> Dict[str, List[Any]]:
         """核验「关键信息有没有从上传材料里识别出来」。
 
         🔴 用户少传/传错时，系统此前**没有任何反馈** —— 一路生成到弹窗才逐项问，
@@ -606,9 +622,15 @@ class MaterialIngestionService:
         _alias = {
             "area_mu": ("area_mu", "area"),
             "org_name": ("org_name", "responsible_unit"),
+            # 复垦：勘测解析器出 area_m2，建设单位可能记成 project_unit
+            "area_m2": ("area_m2", "area"),
+            "build_unit": ("build_unit", "project_unit", "responsible_unit"),
+            "land_use_period": ("land_use_period", "land_use_start"),
         }
+        _fields = (RECLAMATION_RECOGNITION_FIELDS if domain == "reclamation"
+                   else KEY_RECOGNITION_FIELDS)
         recognized, missing = [], []
-        for key, label in KEY_RECOGNITION_FIELDS:
+        for key, label in _fields:
             _keys = _alias.get(key, (key,))
             val = ""
             for _k in _keys:

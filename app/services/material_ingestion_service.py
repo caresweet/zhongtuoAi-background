@@ -72,8 +72,8 @@ RECLAMATION_RECOGNITION_FIELDS = [
     ("land_classification",     "地类构成（勘测定界）"),
     ("land_use",                "原土地利用类型"),
     ("doc_reference",           "批复/备案文号"),
-    ("reclamation_direction",   "复垦方向"),
-    ("dynamic_total_investment", "动态总投资"),
+    # 注：复垦方向、动态总投资是**系统推算**的，不从材料认；放进核验清单
+    # 只会让用户以为「材料缺这两项」，故不列。
 ]
 
 KEY_RECOGNITION_FIELDS = [

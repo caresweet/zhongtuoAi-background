@@ -88,13 +88,57 @@ def survey_polygons(text: str) -> List[dict]:
     return out
 
 
-def collect_survey_polygons(materials: Sequence[dict]) -> List[dict]:
-    """跨材料收集，按 (点数, 面积) 去重，面积升序返回。"""
+def shapefile_polygons(rel_path: str, storage_dir: str) -> List[dict]:
+    """从上传的 Shapefile 读几何 → `[{points:(东,北), area_m2, count, source}]`。
+
+    🔴 2026-11-01 业主：「为什么没有之前测试的卫星图」。原因：卫星位置图只认
+       **勘测定界文本里的界址点坐标**，而井神项目给的是 Shapefile 红线 ——
+       几何就在 .shp 里，白白没利用上。这里直接读出来，坐标是「东坐标含 40 带号」，
+       与文本解析器同一口径，`satellite_map.points_to_lonlat` 可直接换算。
+    """
+    p = Path(storage_dir) / str(rel_path or "")
+    if not str(rel_path).lower().endswith(".shp") or not p.exists():
+        return []
+    try:
+        import shapefile as _shp
+        try:
+            reader = _shp.Reader(str(p), encoding="latin1")
+        except Exception:
+            reader = _shp.Reader(str(p))
+    except Exception as e:                      # pragma: no cover - 依赖缺失/坏文件
+        logger.warning(f"[复垦图件] 读取 Shapefile 失败 {rel_path}: {e}")
+        return []
+    out = []
+    try:
+        for sh in reader.shapes():
+            pts = [(float(x), float(y)) for x, y in (sh.points or [])]
+            if len(pts) < 3:
+                continue
+            a = polygon_area_m2(pts)
+            if a <= 1.0:
+                continue
+            out.append({"points": pts, "area_m2": round(a, 2),
+                        "count": len(pts), "source": Path(rel_path).name})
+    except Exception as e:                      # pragma: no cover
+        logger.warning(f"[复垦图件] 解析 Shapefile 失败 {rel_path}: {e}")
+    return out
+
+
+def collect_survey_polygons(materials: Sequence[dict], storage_dir: str = "") -> List[dict]:
+    """跨材料收集（文本界址点 + Shapefile 几何），按 (点数, 面积) 去重，面积升序返回。"""
     seen = set()
     out: List[dict] = []
     for m in (materials or []):
         if not isinstance(m, dict):
             continue
+        _src = str(m.get("source_path") or "")
+        if storage_dir and _src.lower().endswith(".shp"):
+            for poly in shapefile_polygons(_src, storage_dir):
+                key = (poly["count"], poly["area_m2"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(poly)
         for poly in survey_polygons(m.get("text_content") or ""):
             key = (poly["count"], poly["area_m2"])
             if key in seen:
@@ -269,7 +313,7 @@ def ensure_reclamation_figures(materials: Sequence[dict],
        图名里带「位置示意图」是**绑定第3章的关键词**（见 `RECLAMATION_IMAGE_SPECS[3]`）。
     """
     out: List[Dict[str, str]] = []
-    polys = collect_survey_polygons(materials)
+    polys = collect_survey_polygons(materials, storage_dir=storage_dir)
     _init_fonts()
 
     # 🔴 第1章「前言」不再出「各类土地面积关系图」（业主 2026-10-30：「前言部分
@@ -309,4 +353,9 @@ def ensure_reclamation_figures(materials: Sequence[dict],
 
     logger.info(f"[复垦图件] 已生成 {name}（{len(polys)} 个界址点多边形，"
                 f"复垦范围 {polys[0]['area_m2']:.2f} ㎡）")
+    # 🔴 告诉装配器：第3章已经有「位置示意图」了 —— 上传的红线/DWG 原始渲染
+    #    就别再顶到第3章（实测 2026-11-01 第3章印了两张同样的红线图）。
+    #    那些原始图仍按名归到附件17「主体项目用地红线图」。
+    if isinstance(filled, dict):
+        filled["_fig_location_generated"] = True
     return out + [{"path": f"images/{name}", "original_name": name}]

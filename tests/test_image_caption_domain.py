@@ -184,3 +184,27 @@ def test_gray_page_detection_splits_maps_from_photos(tmp_path):
 
     assert _looks_like_gray_page(p_gray) is True
     assert _looks_like_gray_page(p_color) is False
+
+
+def test_near_duplicate_images_are_deduped(tmp_path):
+    """同一份红线从 .shp 和 .dwg 各渲一张，像素几乎一致 → 只留一张。
+
+    实测 2026-11-01：第3章印了两张一模一样的红线图，图注都叫「项目地理位置示意图」。
+    """
+    from PIL import Image, ImageDraw
+    from app.services.image_catalog import build_image_catalog
+
+    def _redline(name, shift=0, dpi=100):
+        im = Image.new("RGB", (600, 800), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        pts = [(80 + shift, 100), (500 + shift, 120), (480, 700), (100, 680)]
+        d.polygon(pts, outline=(220, 40, 40), fill=(253, 226, 226))
+        p = str(tmp_path / name)
+        im.save(p, quality=90, dpi=(dpi, dpi))
+        return p
+
+    p1 = _redline("井神红线.shp.png")
+    p2 = _redline("井神红线.cad.png", shift=2, dpi=150)   # 同一图形，另一次渲染
+    cat = build_image_catalog([p1, p2], domain="reclamation")
+    ch3 = [i for i in cat["by_chapter"].get(3, [])]
+    assert len(ch3) == 1, f"近重复图应只留一张，实际 {len(ch3)}"

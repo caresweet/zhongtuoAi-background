@@ -54,6 +54,12 @@ async def resolve_template_path(domain: str, text: str) -> str:
         logger.warning(f"[模板] 查询 {domain} 模板失败：{e}")
         return ""
 
+    # 🔴 只认 docx：模板库里会放 PDF 范文（明远路、王元佳苑…），它们没有目录域/样式，
+    #    选中了只会让版式回落。挑选阶段就过滤，避免「挑中 PDF → 等于没模板」。
+    rows = [r for r in rows if str(getattr(r, "template_file_path", "") or "").lower().endswith(".docx")]
+    if not rows:
+        return ""
+
     best_region, best = pick_region_match(rows, text)
 
     if not best and domain in _REGION_FALLBACK_DOMAINS:

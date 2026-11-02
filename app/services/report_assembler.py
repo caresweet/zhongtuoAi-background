@@ -2445,6 +2445,14 @@ class ReportAssembler:
         if _anchor:
             _cim_a = getattr(self, '_chapter_image_map', {})
             _imgs_a = _cim_a.get(ch_num, [])
+            # 🔴 第3章：系统已出「位置示意图」时，跳过用户上传的**原始红线渲染**
+            #    （.shp.png / .cad.png）—— 它们与系统图同义，会印成两张同名图。
+            if int(ch_num) == 3 and ((self._session_state or {}).get("filled_data") or {}).get("_fig_location_generated"):
+                _raw = [i for i in _imgs_a
+                        if str((i or {}).get("path", "")).endswith((".shp.png", ".cad.png"))]
+                if _raw:
+                    _imgs_a = [i for i in _imgs_a if i not in _raw]
+                    logger.info(f"[配图] 第3章已有系统位置图，跳过原始红线渲染 {len(_raw)} 张")
             if _imgs_a:
                 # 🔴 复垦第3章的图序按样本：**位置示意图在前**、土地利用现状图在后
                 #    （图3-1 位置、图3-2 现状）。用户上传的图排在系统图前面，

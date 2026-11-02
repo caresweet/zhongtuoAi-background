@@ -303,6 +303,7 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
                     ai_lookup[p.get("path", "")] = ai_cat
 
     catalog = []
+    _seen_hashes = []      # [(ahash, path)] —— 近乎相同的图只留第一张
     all_paths = []
 
     for item in (uploaded_files or []):
@@ -418,6 +419,19 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         # 🔴 内容复核：被判成 photo 但实际是**灰度影像页**的，改判地图类
         if cat == "photo" and _looks_like_gray_page(path):
             cat = "map"
+
+        # 🔴 内容去重：同一份红线图纸既有 .shp 渲的、又有 .dwg 渲的，
+        #    两张像素几乎一致、会被当成两张「位置示意图」印两次（实测 2026-11-01）。
+        # ⚠️ **只对系统渲染图**（.shp.png / .cad.png / .dxf…）做判重：
+        #    调查表各页版面雷同，用像素哈希判重会误杀（实测 2026-11-02 掉了 4 页）。
+        _is_render = str(name).lower().endswith((".shp.png", ".cad.png", ".dxf.png", ".dwg.png"))
+        if _is_render:
+            _h = _ahash(path)
+            if _h is not None and any(_hamming(_h, _x) <= 8 for _x, _ in _seen_hashes):
+                logger.info(f"[图库] 近重复渲染图跳过: {name}")
+                continue
+            if _h is not None:
+                _seen_hashes.append((_h, path))
 
         display_name = _rule_label or _clean_display_name(name, cat)
 
@@ -549,6 +563,27 @@ def build_image_catalog(uploaded_files: List, ai_classifications: Optional[Dict]
         "catalog": catalog,
         "appendix": appendix,
     }
+
+
+def _ahash(path: str, size: int = 8):
+    """平均哈希（64 bit）：用来识别「同一张图渲了两遍」。失败返回 None。"""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            im = im.convert("L").resize((size, size))
+            px = list(im.getdata())
+        avg = sum(px) / len(px)
+        bits = 0
+        for i, v in enumerate(px):
+            if v >= avg:
+                bits |= (1 << i)
+        return bits
+    except Exception:
+        return None
+
+
+def _hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count("1")
 
 
 def _looks_like_gray_page(path: str) -> bool:

@@ -140,6 +140,88 @@ def _portrait_section(doc):
     return s
 
 
+_BID_TOP_TITLES = [
+    "（一）投标函", "（二）报价文件", "（三）资格证明文件",
+    "（四）技术条款及相关要求偏离表", "（五）技术商务部分评分导读表",
+    "（六）服务内容的详细说明及服务方案", "（七）项目人员配置清单", "（八）其他",
+]
+
+
+def _stamp_toc(path) -> bool:
+    """把目录域换成**带真实页码的静态条目**（用 LibreOffice 分页）。
+
+    只在机器上有 soffice 时执行；失败就保留目录域，不影响出报告。
+    """
+    import shutil as _sh
+    import subprocess
+    import tempfile
+    from pathlib import Path as _P
+    soffice = _sh.which("soffice")
+    if not soffice:
+        return False
+    path = _P(path)
+    tmp = _P(tempfile.mkdtemp(prefix="bidtoc_"))
+    try:
+        subprocess.run(
+            [soffice, "--headless", "--norestore", "--convert-to", "pdf",
+             "--outdir", str(tmp), str(path)],
+            check=True, capture_output=True, timeout=240)
+        pdf = tmp / f"{path.stem}.pdf"
+        if not pdf.exists():
+            return False
+        import fitz
+        src = fitz.open(str(pdf))
+        pages = {}
+        for title in _BID_TOP_TITLES:
+            # 跳过封面/目录页，按**整行等于标题**匹配，避免命中目录条目
+            for i in range(2, src.page_count):
+                lines = [ln.strip() for ln in src[i].get_text().splitlines()]
+                if title in lines:
+                    pages[title] = i          # 页码从 0 起，封面隐藏
+                    break
+        src.close()
+        if len(pages) < len(_BID_TOP_TITLES):
+            return False
+
+        from docx import Document
+        from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
+        from docx.shared import Cm
+        d = Document(str(path))
+        paras = d.paragraphs
+        ph = next((p for p in paras
+                   if "右键选择" in p.text or 'TOC \\o' in p._p.xml), None)
+        if ph is None:
+            # 已有静态目录：只刷新页码
+            _existing = [p for p in paras
+                         if any(p.text.startswith(t + "\t") for t in _BID_TOP_TITLES)]
+            if len(_existing) != len(_BID_TOP_TITLES):
+                return False
+            for q, title in zip(_existing, _BID_TOP_TITLES):
+                for r in list(q.runs):
+                    r._element.getparent().remove(r._element)
+                r = q.add_run(f"{title}\t{pages[title]}")
+                _set_font(r, size=12)
+            d.save(str(path))
+            return True
+        nxt = ph._p.getnext()
+        from docx.text.paragraph import Paragraph
+        anchor = Paragraph(nxt, ph._parent) if nxt is not None else None
+        for title in _BID_TOP_TITLES:
+            q = (anchor.insert_paragraph_before() if anchor is not None
+                 else ph.insert_paragraph_before())
+            q.paragraph_format.tab_stops.add_tab_stop(
+                Cm(15.0), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+            q.paragraph_format.space_after = 0
+            r = q.add_run(f"{title}\t{pages[title]}")
+            _set_font(r, size=12)
+        ph._p.getparent().remove(ph._p)
+        d.save(str(path))
+        return True
+    finally:
+        import shutil as _sh2
+        _sh2.rmtree(tmp, ignore_errors=True)
+
+
 def _add_toc(doc) -> None:
     """第二页目录：标题 + TOC 域（打开文档时自动更新页码）。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -817,7 +899,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
            [["报价", f"{_total_yuan} 元", big]],
            widths=[3.43, 5.33, 8.18], font_size=14,
            row_heights=[1.12, 2.89])
-    _p_two(doc, "投标人签名：", f"日期：{today}", size=14, indent=0.75)
+    _sig = _p_two(doc, "投标人签名：", f"日期：{today}", size=14, indent=0.75)
+    _sig.paragraph_format.space_before = Pt(18)
     _p(doc, "注：", size=10.5, indent=False)
     _p(doc, "①  投标报价应包含完成本服务项目发生的所有含税费用、支付给员工的工资和"
             "国家强制缴纳的各种社会保障资金，以及投标人认为需要的其他费用等；",
@@ -825,6 +908,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, "②  每一项服务仅接受一个价格，投标文件应对《开标一览表》中的全部服务进行投标，"
             "只投其中部分服务者，投标无效。", size=10.5, indent=False)
 
+    doc.add_page_break()
     _h(doc, "2、投标明细报价表：", 2)
     _p(doc, "2.1 明细报价表", size=14, align="center", indent=False)
     _p(doc, f"项目名称：{project}", indent=False)
@@ -834,6 +918,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _quote_detail_table(doc, _items, _total_yuan, big)
     _sig = _p(doc, f"投 标 人（签章）：{co_name}", indent=False)
     _sig.paragraph_format.left_indent = Cm(4.5)
+    _sig.paragraph_format.space_before = Pt(18)
     _sig2 = _p(doc, "投 标 人（签名）：", indent=False)
     _sig2.paragraph_format.left_indent = Cm(4.5)
     _p(doc, "注：", size=10.5, indent=False)
@@ -862,6 +947,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     if _legal_imgs:
         _p(doc, "法定代表人身份证复印件：", bold=True, indent=False)
         _image_row(doc, _legal_imgs)
+    doc.add_page_break()
 
     _h(doc, "2、法定代表人授权委托书：", 2)
     _p(doc, "法定代表人授权书", size=14, bold=True, align="center",
@@ -892,6 +978,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     if _agent_imgs and af["agent"] != af["legal"]:
         _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
         _image_row(doc, _agent_imgs)
+    doc.add_page_break()
 
     _h(doc, "3、资格性证明材料复印件：", 2)
     _p(doc, "资格性证明材料", size=14, align="center", indent=False)
@@ -1087,6 +1174,11 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
+    try:
+        if _stamp_toc(out):
+            logger.info("[投标文件] 目录已写入真实页码")
+    except Exception as e:
+        logger.warning(f"[投标文件] 目录页码写入失败，保留目录域: {e}")
     logger.info(f"[投标文件] 已生成 {out}（{len(people)} 人，报价 {small} 万元）")
     return out
 

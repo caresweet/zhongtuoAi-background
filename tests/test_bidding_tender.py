@@ -196,8 +196,11 @@ async def test_second_page_is_toc(tmp_path):
                              out_path=out, seed=2026, use_llm=False)
     d = Document(str(out))
     assert any(p.text.strip() == "目  录" for p in d.paragraphs)
-    assert 'TOC \\o "1-1"' in d.element.xml
-    assert d.settings.element.xml.find("updateFields") >= 0
+    # 有 soffice 时目录已写成静态条目（带页码）；没有则保留 TOC 域
+    texts = [p.text for p in d.paragraphs]
+    has_static = any(t.startswith("（一）投标函\t") for t in texts)
+    assert has_static or 'TOC \\o "1-1"' in d.element.xml
+    assert d.settings.element.xml.find("updateFields") >= 0 or has_static
     heads = [p.text for p in d.paragraphs if p.style.name == "Heading 1"]
     assert len(heads) == 8
     assert heads[0] == "（一）投标函" and heads[-1] == "（八）其他"

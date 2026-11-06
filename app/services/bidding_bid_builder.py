@@ -471,6 +471,38 @@ def _quote_items(project: str, total_yuan: int) -> List[Tuple[str, int]]:
     return list(zip(items, amounts))
 
 
+def _auth_fields(texts: Dict[str, str]) -> Dict[str, str]:
+    """从公司档案的《授权委托书》里拆出被授权代表信息（模板逐栏填写用）。"""
+    import datetime as _dt
+    src = texts.get("授权委托书") or ""
+
+    def grab(pat: str, default: str = "") -> str:
+        m = re.search(pat, src)
+        return (m.group(1) if m else default).strip()
+
+    legal = grab(r'法定代表人[：:]\s*([^\n；]+)') or "陈春"
+    agent = grab(r'受托人：.*?姓名\s*([^\s；，]+)') or "张红艳"
+    gender = grab(r'性别[：:]\s*([男女])') or "女"
+    birth = grab(r'出生日期[：:]\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)')
+    age = ""
+    m = re.search(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', birth)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        t = _dt.date.today()
+        age = str(t.year - y - ((t.month, t.day) < (mo, d)))
+    return {
+        "legal": legal,
+        "agent": agent,
+        "gender": gender,
+        "age": age,
+        "position": grab(r'职务[：:]\s*([^；\n]+)') or "项目经理",
+        "id_no": grab(r'身份证(?:号码)?[：:]\s*([0-9Xx]+)'),
+        "mobile": grab(r'(?:联系方式|手机号码)[：:]\s*(\d{5,})'),
+        "office": grab(r'办公电话[：:]\s*([0-9\-]+)') or "0517-83663008",
+        "address": grab(r'地址[：:]\s*([^\n]+)') or "淮安经济技术开发区海口路9号1幢1211室",
+    }
+
+
 async def build_bid_document(*, tender_path: str | Path, company_id: int,
                              price_wan: float, out_path: str | Path,
                              seed: Optional[int] = None,
@@ -614,28 +646,34 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"投标人（盖章）：{co_name}", indent=False)
     _p(doc, f"日期：{today}", indent=False)
 
-    _h(doc, "2. 法定代表人授权委托书", 2)
-    auth_text = texts.get("授权委托书") or ""
-    if auth_text:
-        auth_text = re.sub(r'致：.*', f"致：{purchaser}、{agency}：", auth_text, count=1)
-        auth_text = auth_text.replace("洪泽区2026年经营性地块土地征收报批综合服务（含征地社会稳定性风险评估）项目", project)
-        # 授权书日期用本次投标日期，不沿用素材里的旧日期（「出生日期」不动）
-        auth_text = re.sub(r'(?<!出生)日期：\s*\d{4}\s*[年.\-]\s*\d{1,2}\s*[月.\-]\s*\d{1,2}\s*日',
-                           f"日期：{today}", auth_text)
-        for para in auth_text.splitlines():
-            if para.strip():
-                _p(doc, para.strip(), align="justify")
-    else:
-        _p(doc, f"委托单位：{co_name}", indent=False)
-        _p(doc, "法定代表人：陈春", indent=False)
-        _p(doc, "受托人：张红艳（身份证号：320829198709070629）", indent=False)
-        _p(doc, f"兹委托受托人代表我公司参加{project}投标活动，全权办理投标、开标、"
-                "谈判、签约等事宜，委托期限至上述事宜处理完毕止。", align="justify")
+    _h(doc, "2、法定代表人授权委托书：", 2)
+    af = _auth_fields(texts)
+    _p(doc, "法定代表人授权书", size=16, bold=True, align="center",
+       indent=False, name="宋体")
+    _p(doc, f"日期：{today}", indent=False, align="right")
+    _p(doc, f"{purchaser}、{agency}：", indent=False)
+    _p(doc, f"{co_name}系中华人民共和国合法企业。法定地址：{af['address']}",
+       align="justify")
+    _p(doc, f"特授权{af['agent']}代表我公司（单位）全权办理针对{project}项目的投标、"
+            "参与开标、谈判、签约等具体工作，并签署全部有关的文件、协议及合同。",
+       align="justify")
+    _p(doc, "我公司（单位）对被授权代表人的签名负全部责任。", align="justify")
+    _p(doc, "在撤销授权的书面通知送达你处以前，本授权书一直有效，被授权代表签署的所有"
+            "文件（在授权书有效期内签署的）不因授权的撤销而失效。", align="justify")
+    _p(doc, "被授权代表人情况：", indent=False)
+    _p(doc, f"姓名：{af['agent']}        性别：{af['gender']}        "
+            f"年龄：{af['age']}        职务：{af['position']}", indent=False)
+    _p(doc, f"身份证号码：{af['id_no']}        手机号码：{af['mobile']}",
+       indent=False)
+    _p(doc, f"办公电话：{af['office']}        传真：无", indent=False)
+    _p(doc, f"通讯地址：{af['address']}", indent=False)
+    _p(doc, "被授权代表人签名：", indent=False)
+    _p(doc, f"单位名称（公章）：{co_name}", indent=False)
+    _p(doc, f"法定代表人签名：{af['legal']}", indent=False)
 
     # 授权书后贴被授权代表身份证正反面（招标模板与人工稿都在这一页）
     _id_imgs = _asset_images("身份证", limit=2)
     if _id_imgs:
-        _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
         for nm, data in _id_imgs:
             _img(doc, data, 14.0, nm)
 

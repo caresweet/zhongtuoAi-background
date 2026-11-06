@@ -160,3 +160,24 @@ async def test_quotation_tables_follow_tender_template(tmp_path):
 
     text = "\n".join(p.text for p in d.paragraphs)
     assert "2026年2月3日" not in text
+
+
+@pytest.mark.asyncio
+async def test_authorization_follows_tender_template(tmp_path):
+    """授权委托书按招标第六章模板逐栏出，不用素材里的旧“本授权书宣告”版式。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "授权书测试.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    text = "\n".join(p.text for p in Document(str(out)).paragraphs)
+    for kw in ("2、法定代表人授权委托书：", "法定代表人授权书",
+               "系中华人民共和国合法企业。法定地址：",
+               "特授权张红艳代表我公司（单位）全权办理针对",
+               "被授权代表人情况：",
+               "姓名：张红艳", "身份证号码：320829198709070629",
+               "办公电话：", "通讯地址：", "被授权代表人签名：",
+               "单位名称（公章）：江苏众拓测绘有限公司", "法定代表人签名：陈春"):
+        assert kw in text, kw
+    assert "本授权书宣告" not in text

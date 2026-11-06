@@ -122,3 +122,33 @@ async def test_cover_and_personnel_table_match_human_bid(tmp_path):
     vals = [[c.text for c in r.cells] for r in hdr.rows[1:]]
     assert vals[0][-1] == "CH-001"
     assert vals[1][-1] == "—"
+
+
+@pytest.mark.asyncio
+async def test_quotation_tables_follow_tender_template(tmp_path):
+    """开标一览表单位是元、标题行是「报价」；明细报价表按地块拆项且合计一致。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "报价测试.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    d = Document(str(out))
+
+    opening = next(t for t in d.tables
+                   if "内容（小写）" in " ".join(c.text for c in t.rows[0].cells))
+    row = [c.text.strip() for c in opening.rows[1].cells]
+    assert row == ["报价", "370000 元", "叁拾柒万元整"]
+
+    detail = next(t for t in d.tables
+                  if "分项总报价" in " ".join(c.text for c in t.rows[0].cells))
+    items = [[c.text.strip() for c in r.cells] for r in detail.rows[1:4]]
+    assert len(items) == 3
+    assert all("地块" in x[1] for x in items)
+    assert sum(int(x[4]) for x in items) == 370000
+    total_txt = " ".join(c.text for r in detail.rows[4:] for c in r.cells)
+    assert "（小写）370000 元" in total_txt
+    assert "叁拾柒万元整" in total_txt
+
+    text = "\n".join(p.text for p in d.paragraphs)
+    assert "2026年2月3日" not in text

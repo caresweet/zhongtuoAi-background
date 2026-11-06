@@ -437,6 +437,27 @@ def _price_text(price_wan: float) -> Tuple[str, str]:
     return f"{price_wan:.2f}", _upper_yuan(int(round(float(price_wan) * 10000)))
 
 
+def _quote_items(project: str, total_yuan: int) -> List[Tuple[str, int]]:
+    """按项目名里的地块拆「投标明细报价表」细项；拆不出就一行总价。
+
+    人工稿按地块分项（蜀浦路东西两侧 / 湖光中路南侧 / 航空产业园），
+    合计与开标一览表一致。金额按百元取整，尾差放最后一项。
+    """
+    name = str(project or "").strip()
+    name = re.sub(r'项目$', '', name)
+    name = re.sub(r'(土地征收|用地)?报批(综合)?服务$', '', name).strip()
+    parts = [p.strip() for p in re.split(r'[、及]', name) if p.strip()]
+    if not parts:
+        parts = ["用地报批服务"]
+    items = [f"{p}用地报批服务" for p in parts]
+    n = len(items)
+    if n == 1:
+        return [(items[0], total_yuan)]
+    each = (total_yuan // n) // 100 * 100
+    amounts = [each] * (n - 1) + [total_yuan - each * (n - 1)]
+    return list(zip(items, amounts))
+
+
 async def build_bid_document(*, tender_path: str | Path, company_id: int,
                              price_wan: float, out_path: str | Path,
                              seed: Optional[int] = None,
@@ -451,6 +472,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     people = personnel or select_bid_personnel(company_id=company_id, seed=seed)
     texts = _asset_texts(co_name)
     small, big = _price_text(price_wan)
+    _total_yuan = int(round(float(price_wan) * 10000))
     project = tender.get("project_name") or ""
     no = tender.get("project_no") or ""
     purchaser = tender.get("purchaser") or ""
@@ -501,7 +523,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         f"致{purchaser}、{agency}：",
         "我方收到你们招标文件，经仔细阅读和研究，我方决定参加投标。",
         f"1. 我方愿意按照招标文件的一切要求提供本项目服务，投标总价详见《开标一览表》，"
-        f"投标报价为人民币（大写）{big}（小写：￥{small}元）。",
+        f"投标报价为人民币（大写）{big}（小写：￥{_total_yuan}.00元）。",
         "2. 我方已对照招标要求，填写了投标服务偏离情况，详见《技术条款及相关要求偏离表》。",
         "3. 我方承诺本次采购项目清单中，若涉及强制采购节能产品或信息安全产品的，"
         "将按照招标文件及法律法规要求提供相关产品。",
@@ -535,26 +557,36 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"日期：{today}", indent=False)
     doc.add_page_break()
 
-    # ── （二）报价文件 ──
+    # ── （二）报价文件（照招标第六章模板）──
     _h(doc, "（二）报价文件", 1)
-    _h(doc, "1. 开标一览表", 2)
-    _p(doc, f"投标人名称（盖章）：{co_name}                        单位：元",
+    _h(doc, "1、开标一览表（格式）", 2)
+    _p(doc, f"投标人名称（盖章）：{co_name}                                  单位：元",
        indent=False, align="left")
     _table(doc, ["标题", "内容（小写）", "内容（大写）"],
-           [[project, small, big]], widths=[7.0, 6.0, 6.0])
-    _p(doc, "注：投标报价包含完成本服务项目发生的所有含税费用、支付给员工的工资和"
-            "国家强制缴纳的各种社会保障资金，以及投标人认为需要的其他费用等。",
+           [["报价", f"{_total_yuan} 元", big]], widths=[6.0, 6.0, 7.0])
+    _p(doc, "投标人签名：", indent=False)
+    _p(doc, f"日期：{today}", indent=False)
+    _p(doc, "注：", indent=False)
+    _p(doc, "1. 投标报价应包含完成本服务项目发生的所有含税费用、支付给员工的工资和"
+            "国家强制缴纳的各种社会保障资金，以及投标人认为需要的其他费用等；",
        size=10.5, indent=False)
-    _p(doc, "本报价为完成招标文件第三章全部服务内容的一次性总价，包含人员、交通、"
-            "办公、成果编制、税费及合同包含的全部风险责任。", align="justify")
+    _p(doc, "2. 每一项服务仅接受一个价格，投标文件应对《开标一览表》中的全部服务进行投标，"
+            "只投其中部分服务者，投标无效。", size=10.5, indent=False)
 
-    _h(doc, "2. 投标明细报价表", 2)
+    _h(doc, "2、投标明细报价表（格式）", 2)
     _p(doc, f"项目名称：{project}", indent=False)
     _p(doc, f"项目编号：{no}", indent=False)
+    _p(doc, "单位：元", indent=False, align="right")
+    _items = _quote_items(project, _total_yuan)
+    _rows = [[str(i), nm, "1", str(amt), str(amt)]
+             for i, (nm, amt) in enumerate(_items, 1)]
+    _rows.append(["合计", f"（小写）{_total_yuan} 元", "", "", ""])
+    _rows.append(["", f"（大写）{big}", "", "", ""])
     _table(doc, ["序号", "项目名称", "数量", "单价", "分项总报价"],
-           [["1", "用地报批服务（详见服务方案）", "1项", small, small],
-            ["合计", "", "", "", small]], widths=[2.0, 7.0, 2.5, 3.0, 3.0])
-    _p(doc, "注：明细报价表合计与《开标一览表》报价一致；每一项服务仅接受一个价格。",
+           _rows, widths=[1.8, 7.4, 1.8, 2.8, 3.2])
+    _p(doc, f"投标人（签章）：{co_name}", indent=False)
+    _p(doc, "投标人（签名）：", indent=False)
+    _p(doc, "注：明细报价表合计应与《开标一览表》报价一致；每一项服务仅接受一个价格。",
        size=10.5, indent=False)
     doc.add_page_break()
 
@@ -574,6 +606,9 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     if auth_text:
         auth_text = re.sub(r'致：.*', f"致：{purchaser}、{agency}：", auth_text, count=1)
         auth_text = auth_text.replace("洪泽区2026年经营性地块土地征收报批综合服务（含征地社会稳定性风险评估）项目", project)
+        # 授权书日期用本次投标日期，不沿用素材里的旧日期（「出生日期」不动）
+        auth_text = re.sub(r'(?<!出生)日期：\s*\d{4}\s*[年.\-]\s*\d{1,2}\s*[月.\-]\s*\d{1,2}\s*日',
+                           f"日期：{today}", auth_text)
         for para in auth_text.splitlines():
             if para.strip():
                 _p(doc, para.strip(), align="justify")
@@ -583,6 +618,13 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         _p(doc, "受托人：张红艳（身份证号：320829198709070629）", indent=False)
         _p(doc, f"兹委托受托人代表我公司参加{project}投标活动，全权办理投标、开标、"
                 "谈判、签约等事宜，委托期限至上述事宜处理完毕止。", align="justify")
+
+    # 授权书后贴被授权代表身份证正反面（招标模板与人工稿都在这一页）
+    _id_imgs = _asset_images("身份证", limit=2)
+    if _id_imgs:
+        _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
+        for nm, data in _id_imgs:
+            _img(doc, data, 14.0, nm)
 
     _h(doc, "3. 资格性证明材料复印件", 2)
     _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
@@ -703,7 +745,11 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
             _p(doc, key, bold=True, indent=False)
             for para in texts[key].splitlines():
                 if para.strip():
-                    _p(doc, para.strip(), align="justify")
+                    # 素材里的旧落款日期换成本次投标日期（「出生日期」不动）
+                    para = re.sub(
+                        r'(?<!出生)日期：\s*\d{4}\s*[年.\-]\s*\d{1,2}\s*[月.\-]\s*\d{1,2}\s*日',
+                        f"日期：{today}", para.strip())
+                    _p(doc, para, align="justify")
 
     # 🔴 招标文件明确「不接受联合体」时，补一份非联合体声明（人工稿有这份）
     if tender.get("no_consortium"):
@@ -712,10 +758,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                 "未以任何形式借用或挂靠其他单位资质；中标后由我单位独立履行合同义务，"
                 "不进行转包和违法分包。如有不实，愿承担相应法律责任。", align="justify")
 
-    # 身份证复印件
-    _h(doc, "6. 法定代表人及被授权代表身份证复印件", 2)
-    for nm, data in _asset_images("身份证", limit=6):
-        _img(doc, data, 10.0)
+    # 身份证复印件已按招标模板贴在「（三）2. 法定代表人授权委托书」之后
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

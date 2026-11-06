@@ -156,6 +156,7 @@ def _add_toc(doc) -> None:
     _set_font(run, size=12)
     begin = OxmlElement('w:fldChar')
     begin.set(_q('w:fldCharType'), 'begin')
+    begin.set(_q('w:dirty'), 'true')      # 强制打开时更新
     instr = OxmlElement('w:instrText')
     instr.set(_q('xml:space'), 'preserve')
     instr.text = 'TOC \\o "1-1" \\h \\z \\u'

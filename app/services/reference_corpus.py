@@ -218,6 +218,57 @@ def _derive_site_units(location: str) -> str:
     return s
 
 
+def _budget_slot(slot: str, filled: Dict[str, Any]) -> str:
+    """第 7 章的费用类占位符 ← 生成前算好的 `filled["_budget_estimate"]`。
+
+    🔴 2026-11-03 实测：meta 只声明了 numeric_slots 却没有字段映射，所有
+    `{{cost_*}}` 都被判 missing → **整句删除**，成稿第 7 章少了 7.1.3 整节、
+    7.2.4 少了「1）监测费」、7.2.5 少了三项金额。费用这里按字段直取，
+    不再走 `_SLOT_FIELDS`。
+    """
+    est = filled.get("_budget_estimate")
+    if not isinstance(est, dict) or not est:
+        return ""
+    mapping = {
+        "total_static": "static_total",
+        "total_dynamic": "dynamic_total",
+        "cost_construction": "construction",
+        "cost_other": "other",
+        "cost_monitor_manage": "monitor_care",
+        "cost_reserve": "reserve",
+        "cost_monitor": "monitor",
+        "cost_care": "care",
+        "cost_acceptance": "acceptance",
+        "cost_basic_reserve": "basic_reserve",
+        "cost_price_reserve": "price_reserve",
+        "cost_risk": "risk",
+    }
+    if slot in ("unit_static", "unit_dynamic"):
+        key = "static_total" if slot == "unit_static" else "dynamic_total"
+        total = _num(est.get(key))
+        if total <= 0:
+            return ""
+        mu = _num(filled.get("area_mu"))
+        if mu <= 0:
+            m2 = _num(filled.get("area_m2")) or _num(
+                (filled.get("land_classification") or {}).get("合计_m2")
+                if isinstance(filled.get("land_classification"), dict) else 0)
+            mu = m2 / 666.6667 if m2 else 0.0
+        return f"{total / mu:.2f}" if mu > 0 else ""
+    key = mapping.get(slot)
+    if not key:
+        return ""
+    v = _num(est.get(key))
+    return f"{v:.2f}" if v > 0 else ""
+
+
+def _num(v: Any) -> float:
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def resolve_slot_value(slot: str, filled: Dict[str, Any],
                        numeric_slots: Optional[set] = None,
                        slot_fields: Optional[Dict[str, tuple]] = None) -> Tuple[Optional[str], str]:
@@ -230,6 +281,21 @@ def resolve_slot_value(slot: str, filled: Dict[str, Any],
       missing  数值类缺失 → 调用方应**整句删除**
     """
     filled = filled or {}
+
+    # 🔴 费用类占位符直接取投资估算（见 _budget_slot 注释）
+    if slot.startswith(("cost_", "total_", "unit_")):
+        v = _budget_slot(slot, filled)
+        if v:
+            return v, "ok"
+
+    # 🔴 剥离/覆土厚度是设计参数（0.20 / 0.30 m 因项目而异）。范文写死 30cm，
+    #    照搬后与第 4/6 章按 0.20 m 算出的工程量打架（2026-11-03 实测）。
+    if slot == "topsoil_cm":
+        raw = _num(filled.get("topsoil_thickness"))
+        if raw <= 0:
+            return "", "missing"
+        cm = raw * 100.0 if raw <= 1.0 else raw
+        return f"{cm:g}", "ok"
 
     # 兜底从 facts 里取（meta 可给本域额外的 槽位→事实卡字段 映射）
     _fields = ({**slot_fields, **_SLOT_FIELDS} if slot_fields else _SLOT_FIELDS).get(slot, ())
@@ -543,6 +609,41 @@ def _strip_personal_phones(md: str) -> Tuple[str, int]:
     return out, len(hits)
 
 
+def _drop_heading_section(md: str, heading: str) -> str:
+    """删掉以 `heading` 开头的整节（到下一个同级或更高级标题为止）。"""
+    lines = md.splitlines()
+    out, skipping, level = [], False, 0
+    for ln in lines:
+        m = re.match(r'^(#{2,4})\s*(.+?)\s*$', ln)
+        if m and not skipping and m.group(2).startswith(heading):
+            skipping, level = True, len(m.group(1))
+            continue
+        if skipping:
+            if m and len(m.group(1)) <= level:
+                skipping = False
+            else:
+                continue
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _drop_unused_basic_farmland(md: str, filled: Dict[str, Any]) -> str:
+    """本项目不占永久基本农田时，删掉范文的 5.3.3「永久基本农田复垦措施」。
+
+    🔴 2026-11-03 实测：范文写的是「共占用永久基本农田 0.1917 hm²」，照搬后
+    这个数字又被面积替换成 2.3248 hm² —— 与 4.2.2「不涉及永久基本农田」正面冲突。
+    没有明确面积就**不写这一节**（人工稿也没有这一节）。
+    """
+    for k in ("basic_farmland_m2", "basic_farmland_ha", "basic_farmland_area"):
+        if _num(filled.get(k)) > 0:
+            return md
+    rows = ((filled.get("land_classification") or {}).get("rows") or [])
+    if any("基本农田" in str(r.get("一级地类") or "") + str(r.get("二级地类") or "")
+           for r in rows if isinstance(r, dict)):
+        return md
+    return _drop_heading_section(md, "5.3.3")
+
+
 def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
                               ref_id: str = None,
                               domain: str = "stability") -> ReferenceRenderResult:
@@ -605,6 +706,10 @@ def render_reference_markdown(chapter_no: int, filled: Dict[str, Any],
 
     # ④ 替换其余占位符
     md = _PH.sub(lambda m: values.get(m.group(1), ""), md)
+
+    # ④a 条件小节：不占永久基本农田时删 5.3.3（否则与 4.2.2 结论冲突）
+    if int(chapter_no) == 5 and meta.get("domain") == "reclamation":
+        md = _drop_unused_basic_farmland(md, filled)
 
     # ⑤b 第2章「（三）相关文件」**必须本项目化**：
     #     照搬源里那是白马湖风电项目的材料清单（独立选址论证报告 / 机位点红线图 /

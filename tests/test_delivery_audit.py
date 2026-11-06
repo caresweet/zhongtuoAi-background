@@ -94,3 +94,18 @@ def test_split_skips_quoted_and_short_text():
     short = "本项目位于淮安市洪泽区。"
     out2, n2 = split_long_sentences(short)
     assert out2 == short and n2 == 0
+
+
+def test_split_never_leaves_adverbial_clause_dangling():
+    """🔴 2026-11-02：状语从句被切成独立句（「…评价。结合当地规划确定的用途。」）。
+
+    宁可留长句，也不要语法不通的残句 —— 这是「读起来像人写的」的硬伤。
+    """
+    from app.validation.content_guardrails import split_long_sentences
+
+    s = ("项目组对复垦责任范围进行土地复垦适宜性评价，结合当地国土空间规划确定的用途"
+         "明确复垦方向、复垦标准和复垦措施，按照因地制宜、综合利用的原则安排复垦工程"
+         "并与临时用地使用进度相衔接")
+    out, _ = split_long_sentences(s)
+    for head in ("。结合", "。按照", "。根据", "。通过", "。在"):
+        assert head not in out, out

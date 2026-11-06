@@ -77,6 +77,11 @@ def _migrate_company_columns(conn):
     additions = {
         "leader_name": "ALTER TABLE companies ADD COLUMN leader_name VARCHAR(100)",
         "leader_title": "ALTER TABLE companies ADD COLUMN leader_title VARCHAR(100)",
+        # 报告表「方案编制单位」栏（2026-11-03）：从模板/人员统计表导入
+        "qualification_level": "ALTER TABLE companies ADD COLUMN qualification_level VARCHAR(50)",
+        "qualification_authority": "ALTER TABLE companies ADD COLUMN qualification_authority VARCHAR(100)",
+        "qualification_no": "ALTER TABLE companies ADD COLUMN qualification_no VARCHAR(100)",
+        "phone": "ALTER TABLE companies ADD COLUMN phone VARCHAR(40)",
     }
     for column, ddl in additions.items():
         if column not in cols:

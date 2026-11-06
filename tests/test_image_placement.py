@@ -49,3 +49,15 @@ def test_chapter_hint_binds_image():
     ch8 = catalog['by_chapter'].get(8, [])
     assert any(os.path.basename(i['path']) == 'a.jpg' for i in ch8), \
         '公示照片4 应绑定到第8章'
+
+
+def test_drop_location_dupes_keeps_only_non_location():
+    from app.services.report_assembler import drop_location_dupes
+    imgs = [
+        {"path": "images/图3-1 工程位置示意图.jpg", "label": "项目地理位置示意图"},
+        {"path": "images/human_图3-1.jpg", "original_name": "图3-1 工程位置示意图.jpg"},
+        {"path": "images/现状图.jpg", "original_name": "土地利用现状图.jpg"},
+    ]
+    keep, drop = drop_location_dupes(imgs)
+    assert len(drop) == 2
+    assert [x["path"] for x in keep] == ["images/现状图.jpg"]

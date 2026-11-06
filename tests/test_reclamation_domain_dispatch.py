@@ -49,7 +49,6 @@ def test_stability_catalog_values_unchanged():
     # 报告类型名（页眉/文件名用）
     assert cat.report_kind_name("stability") == "社会稳定风险评估报告"
     assert cat.report_kind_name(None) == "社会稳定风险评估报告"
-    assert cat.cover_type_line("stability") == "《社会稳定性风险评估》"
     assert cat.cover_fallback_title("stability") == "土地征收决策"
 
 
@@ -174,7 +173,7 @@ def test_stability_render_keeps_review_table_and_discards_ch3_llm_body(tmp_path)
     assert "评审表" in text                           # 评审表路径照走
     assert "LLMBODY" not in text                      # 第3章 LLM 正文照旧被丢弃
     assert "STABILITYBODY" in text                    # 其它章正文照写
-    assert "《社会稳定性风险评估》" in text           # 封面副标题未变
+    assert "社会稳定风险评估报告" in text              # 封面标题取项目自身标题
     assert "社会稳定风险评估报告" in out              # 文件名未变
     assert "附件清单" in text                         # 第14章附件照挂
 
@@ -628,17 +627,39 @@ def test_appendix_matcher_prefers_specific_name():
     assert M("随手拍的照片.jpg") == 0                     # 认不出 → 0（归附件22）
 
 
+def test_appendix_matcher_covers_image_material_names():
+    """2026-11-02：调查表/权利人意见/补偿证明等此前**只有图片按名归项**。
+
+    PDF 走的是 `RECLAMATION_APPENDIX_RULES`，那张表没有这几条 → `调查表.pdf`
+    整份落进附件22「其他」，而同一批页面的 `调查表_0N.jpg` 又进了附件9，
+    报告里同一份调查表印了两遍（业主实测）。
+    """
+    from app.agent.reclamation_definitions import match_reclamation_appendix as M
+    assert M("调查表.pdf") == 9
+    assert M("公众调查表.docx") == 9
+    assert M("权利人意见.jpg") == 10
+    assert M("补偿证明.jpg") == 14
+    assert M("复垦协议.jpg") == 6
+    assert M("临时用地合同1.jpg") == 5
+    assert M("临时用地复垦协议.pdf") == 6        # 专名优先：复垦协议 ≠ 临时用地协议
+
+
+def test_material_stem_key_groups_pdf_and_page_images():
+    """PDF 与逐页图片同名时，靠归一后的 stem 判断「是同一份材料」，避免重复入册。"""
+    from app.services.report_assembler import material_stem_key as K
+    assert K("调查表.pdf") == K("调查表_01.jpg") == K("调查表_07.jpg") == "调查表"
+    assert K("调查表_01_ab12cd34.jpg") == "调查表"
+    assert K("临时用地合同1.jpg") == "临时用地合同"
+
+
 def test_reclamation_render_has_appendices(tmp_path):
-    """复垦产物含第14部分附件：22 项清单 + 逐项标题；且不含稳评那套逐项名。"""
+    """复垦产物含第14部分附件；没材料的项**跳过**，不印「待补充」、不跳号。"""
     out, text = _render(tmp_path, "reclamation",
                         {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\nBODY\n"}},
                         {"project_name": "测试复垦项目"})
     assert "附件清单" in text
-    assert "附件3 编制单位资质证书" in text
-    assert "附件16 勘测报告" in text
-    assert "附件22 其他" in text
-    # 缺材料的项要显性标出来（业主口径：材料不要有漏的）
-    assert "附件1 土地复垦方案委托函（待补充）" in text
+    assert "本次未提供附件材料" in text
+    assert "（待补充）" not in text
     for _w in ("机构及人员资质材料", "拟征地公告", "专家评审", "稳评问卷调查表"):
         assert _w not in text, _w
 
@@ -647,20 +668,23 @@ def test_reclamation_render_has_appendices(tmp_path):
 # I. 业主 2026-10-10 报的五处（逐条对应）
 # ════════════════════════════════════════════════════════════
 
-def test_cover_type_line_and_date_per_domain():
-    """封面：复垦类型行**不带书名号**、落款第三行**无标签纯数字**。
+def test_cover_title_comes_from_project_title():
+    """封面标题不写死：复垦从 project_title 拆「工程名 + 方案名」。"""
+    import types
+    from app.services.report_assembler import ReportAssembler
 
-    样本封面实测（明远路、宁淮城际）：副标题写作「土地复垦方案报告书」
-    「临时用地土地复垦方案报告书」——**一律不带书名号**；落款第三行是
-    「2023  年  1  月」。带书名号的《社会稳定性风险评估》是稳评被业主点名的写法，
-    照抄到复垦封面上就是稳评格式（业主所指「封面第一页还是稳评的格式」）。
-    """
-    from datetime import datetime
-    d = datetime(2026, 10, 1)
-    assert cat.cover_type_line("reclamation") == "土地复垦方案报告书"
-    assert cat.cover_type_line("stability") == "《社会稳定性风险评估》"   # 稳评不动
-    assert cat.cover_date_parts("reclamation", d) == ("", "2026  年  10  月")
-    assert cat.cover_date_parts("stability", d) == ("报告编制日期：", "二〇二六年十月")
+    o = types.SimpleNamespace(_domain="reclamation")
+    lines = ReportAssembler._cover_title_lines(
+        o, {"project_title": "江苏盐业井神楚州张兴储气库工程三井组临时用地土地复垦方案"},
+        "江苏盐业井神楚州张兴储气库工程三井组临时用地")
+    assert lines == ["江苏盐业井神楚州张兴储气库工程",
+                     "三井组临时用地土地复垦方案"]
+    assert not any("报告书" in x for x in lines)
+
+    os_ = types.SimpleNamespace(_domain="stability")
+    assert ReportAssembler._cover_title_lines(
+        os_, {"project_title": "某某项目社会稳定风险评估报告"}, "某某项目") == [
+        "某某项目", "社会稳定风险评估报告"]
 
 
 def test_no_questionnaire_tables_for_reclamation(tmp_path):
@@ -768,7 +792,11 @@ def test_ch6_requirements_block_is_chapter_specific():
     assert "calc_earthwork" in b6
     assert "100m³" in b6
     # 单位那关不只靠提示词：见 `_normalize_qty_units`（模型实测把 100m³ 写成 100m）
-    for _ch in (1, 4, 7, 10):
+    # 第4/5章各有自己的专属段（2026-11-05 批注），也不该出现第6章那段
+    assert "本章专属要求（第4章" in cat.requirements_block("reclamation", 1000, 2000, 4)
+    assert "本章专属要求（第5章" in cat.requirements_block("reclamation", 1000, 2000, 5)
+    assert "calc_earthwork" not in cat.requirements_block("reclamation", 1000, 2000, 4)
+    for _ch in (1, 7, 10):
         assert "本章专属要求" not in cat.requirements_block("reclamation", 1000, 2000, _ch)
     # 不传章号 = 改动前逐字相同；稳评永远返回空串（它走内联正文）
     assert cat.requirements_block("reclamation", 1200, 1600) == \
@@ -883,6 +911,34 @@ def _render_doc_full(tmp_path, chapters, filled):
     return _D(str(tmp_path / "generated" / out.split("/")[-1]))
 
 
+def test_toc_keeps_title_and_drops_internal_section(tmp_path):
+    """目录必须保留「目 录」标题，且不能把模板 sdt 里的节属性一起搬进来。
+
+    2026-11-02 线上实测两处：
+      · 「目录俩字没了」—— 清旧条目时把模板 ps[1] 的标题段一并删了；
+      · 「第三页空白」—— 模板目录 sdt 自带 sectPr，后面再跟一个分页符 → 空页。
+    """
+    from pathlib import Path as _P
+    from lxml import etree as _et
+    _tpl = _P(__file__).resolve().parent.parent / "storage" / "templates" / \
+        "2c868be4f55aedd89004ada6e6f88fbc.docx"
+    if not _tpl.exists():
+        pytest.skip("复垦模板不在本机 storage 下")
+    from app.services.report_assembler import ReportAssembler
+    a = ReportAssembler(storage_dir=tmp_path)
+    out = a.assemble({"session_id": "t", "_domain": "reclamation",
+                      "template_path": str(_tpl),
+                      "chapters": {1: {"markdown": "# 前言\n\n## 1.1 编制背景及过程\n\n正文内容。"}},
+                      "filled_data": {"project_name": "X"}})
+    doc = Document(str(tmp_path / "generated" / out.split("/")[-1]))
+    sdt = next(el for el in doc.element.body.iterchildren()
+               if el.tag.split('}')[1] == 'sdt')
+    xml = _et.tostring(sdt, encoding="unicode")
+    _txt = ''.join(x.text or '' for x in sdt.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert "目录" in _txt.replace(" ", "")
+    assert "<w:sectPr" not in xml
+
+
 def test_ch1_drops_damage_table(tmp_path):
     """第1章**不排表**（业主 2026-10-31：「前言只写文字，不做数据分析」）。
 
@@ -958,7 +1014,9 @@ def test_report_form_render(tmp_path):
         elif el.tag == _q('w:tbl'):
             _tables.append(__import__('docx').table.Table(el, doc))
     _all_text = "\n".join(t.text for t in _titles)
-    assert "土地复垦方案报告表" in _all_text
+    assert "复垦方案报告表" in _all_text
+    # 🔴 章标题已经写了「11 复垦方案报告表」，正文不再重复一行大标题
+    assert "土地复垦方案报告表" not in _all_text
     # 四个竖排分节名（逐字换行）
     _joined = "\n".join("".join(c.text for c in tb.rows[0].cells) for tb in _tables)
     for _sec in ("项目概况", "方案编制单位", "复垦区土地利用现状", "复垦土地面积", "投资估算"):
@@ -988,6 +1046,8 @@ _CH4_MD = ("# 土地复垦方向可行性分析\n\n"
 
 _CH4_FILLED = {
     "project_name": "测试复垦项目", "area_m2": 8070.0,
+    # 设计参数由项目给（不再套范文默认）；本用例按 20cm 验算
+    "topsoil_thickness": "20",
     "land_classification": {"合计_m2": 8070.0, "rows": [
         {"一级地类": "耕地（01）", "二级地类": "水田（0101）", "面积_m2": 478.0},
         {"一级地类": "水域及水利设施用地（11）", "二级地类": "沟渠（1107）", "面积_m2": 74.0},
@@ -1180,6 +1240,126 @@ def test_report_form_merges_same_unit_in_staff_rows(tmp_path):
     assert len([x for x in _xmls if "<w:vMerge/>" in x]) >= 2, "后续行应是合并续格"
 
 
+def test_report_form_merged_unit_cell_keeps_single_copy(tmp_path):
+    """合并「单位」列后**只保留一个单位名**（业主 2026-11-02）。
+
+    早先只做 `merge()` 没有清段落，Word 里同一格竖排 8 行单位名 ——
+    「合并同类项的时候只要保留一个」。
+    """
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    d = collect_form_data(
+        {"project_name": "测试复垦项目", "area_m2": 8070.0},
+        {"name": "江苏众拓项目代理咨询有限公司"},
+        [{"姓名": f"人员{i}", "职称/职务": "工程师", "专业": "土管"} for i in range(5)])
+    doc = _DD()
+    render_report_form(doc, d, {})
+    tb = doc.tables[1]
+    _unit_texts = [c.text.strip() for r in tb.rows for c in r.cells
+                   if "江苏众拓" in c.text]
+    assert _unit_texts, "主要编制人员的「单位」列应有单位名"
+    assert max(t.count("江苏众拓") for t in set(_unit_texts)) == 1, _unit_texts
+
+
+def test_report_form_has_no_dash_placeholders(tmp_path):
+    """报告表空白格**留空**，不印「—」（业主 2026-11-02：「不需要 '-' 代替」）。"""
+    from app.services.reclamation_report_form import collect_form_data, render_report_form
+    from docx import Document as _DD
+    doc = _DD()
+    render_report_form(doc, collect_form_data(
+        {"project_name": "X", "area_m2": 8070.0}, {"name": "Y"}, []), {})
+    _cells = {c.text.strip() for t in doc.tables for r in t.rows for c in r.cells}
+    assert "—" not in _cells and "-" not in _cells, _cells
+
+
+def test_reclaim_rate_is_computed_not_hardcoded():
+    """土地复垦率 = 拟复垦面积 ÷ 损毁面积 × 100（不再写死 100）。"""
+    from app.services.reclamation_report_form import collect_form_data, _reclaim_area_rows
+    fd = {"project_name": "X", "area_m2": 10000,
+          "land_classification": {"rows": [
+              {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 8000},
+              {"一级地类": "林地", "二级地类": "乔木林地", "面积_m2": 1500}]}}
+    rows = _reclaim_area_rows(collect_form_data(fd, {"name": "Y"}, []))
+    _rate_row = rows[-1]
+    assert _rate_row[0][0] == "土地复垦率（%）"
+    assert _rate_row[1][0] == "95", _rate_row        # 9500 / 10000 = 95%
+    # 地类合计与损毁面积相等 → 100（去掉小数尾巴）
+    fd["land_classification"]["rows"][1]["面积_m2"] = 2000
+    rows = _reclaim_area_rows(collect_form_data(fd, {"name": "Y"}, []))
+    assert rows[-1][1][0] == "100"
+
+
+def test_reclamation_need_fields_are_form_fields_only():
+    """复垦只问报告表「项目概况」那一小批，绝不混进稳评的 `org_name` 等字段。"""
+    from app.agent.chapter_catalog import chapter_need_fields_for
+    _keys = {f[0] for f in chapter_need_fields_for("reclamation", 3)}
+    assert {"project_name", "project_unit", "unit_address", "legal_rep"} <= _keys
+    assert "org_name" not in _keys and "household_count" not in _keys
+    assert chapter_need_fields_for("reclamation", 4) == []
+
+
+def test_ch4_land_use_table_has_numbers_not_boilerplate(tmp_path):
+    """表4-2 由系统出数：格子里是地类名和数字，不是「以勘测定界成果」话术。
+
+    2026-11-02 业主截图：表头写成「面积()」，数据行全是「以勘测定界成果」。
+    """
+    md = ("# 第4章 土地复垦方向可行性分析\n\n## 4.2 复垦区土地利用状况\n\n"
+          "表4-2 临时用地土地利用现状统计表\n\n"
+          "| 序号 | 地类名称 | 面积() | 占总面积比例(%) | 备注 |\n"
+          "|---|---|---|---|---|\n"
+          "| 1 | 以勘测定界成果 | 以勘测定界成果 | 以勘测定界成果 | 地类以现状调查确认结果为准 |\n")
+    filled = {"project_name": "X", "area_m2": 23248,
+              # 评价单元由用户提供（每次跟甲方沟通确定），不再由地类反推
+              "land_use_zones": "施工便道 2.3248公顷 压占 重度 水田、沟渠",
+              "land_classification": {"合计_m2": 23248, "rows": [
+                  {"一级地类": "农用地", "二级地类": "水田", "面积_m2": 22215},
+                  {"一级地类": "农用地", "二级地类": "沟渠", "面积_m2": 1033}]}}
+    _, text = _render(tmp_path, "reclamation", {4: {"markdown": md}}, filled)
+    assert "面积（hm2）" in text
+    assert "水田" in text and "2.2215" in text
+    assert "以勘测定界成果" not in text
+    assert "合计" in text and "100" in text
+
+
+def test_ch4_evaluation_unit_tables_rendered_from_land_class(tmp_path):
+    """第4章「评价单元土地损毁/复垦方向」两张表由系统出数（2026-11-02 线上实测全空）。
+
+    评价单元的面积与原地类都来自勘测定界地类表；损毁方式/程度取事实卡，
+    没有就按临时用地施工的样本口径（压占/重度/待复垦）。
+    """
+    md = ("# 第4章 土地复垦方向可行性分析\n\n## 4.1 土地损毁分析与评定\n\n"
+          "表4-7 评价单元土地损毁情况表\n\n| 评价单元 | 单元类型 |\n|---|---|\n|  |  |\n\n"
+          "## 4.4 土地复垦适宜性评价\n\n"
+          "表4-10 评价单元复垦方向表\n\n| 序号 | 评价单元 |\n|---|---|\n|  |  |\n")
+    filled = {"project_name": "X", "area_m2": 23248,
+              # 评价单元由用户提供（每次跟甲方沟通确定），不再由地类反推
+              "land_use_zones": "施工便道 2.3248公顷 压占 重度 水田、沟渠",
+              "land_classification": {"合计_m2": 23248, "rows": [
+                  {"一级地类": "农用地", "二级地类": "水田", "面积_m2": 22215},
+                  {"一级地类": "农用地", "二级地类": "沟渠", "面积_m2": 1033}]}}
+    _, text = _render(
+        tmp_path, "reclamation", {4: {"markdown": md}}, filled,
+        extra_state={"report_title": "ZX9、ZX10井施工便道临时用地土地复垦方案"})
+    assert "评价单元土地损毁情况表" in text
+    assert "施工便道" in text                       # 评价单元名称取功能地块
+    assert "2.3248" in text                         # 面积来自地类合计
+    assert "水田、沟渠" in text                     # 占用原土地类型/复垦方向
+    assert "工程措施、生物化学措施" in text
+
+
+def test_report_form_placeholders_show_daibuchong():
+    """用户**跳过**的字段，报告表里显示「待补充」（业主 2026-11-02）。"""
+    from app.services.reclamation_report_form import collect_form_data
+    fd = {"project_name": "X",
+          "_placeholders": {"unit_address": "待补充", "location": "待补充",
+                            "legal_rep": "待补充", "area_m2": "待补充"}}
+    d = collect_form_data(fd, {"name": "Y"}, [])
+    assert d["单位地址"] == "待补充"
+    assert d["项目位置"] == "待补充"
+    assert d["法人代表"] == "待补充"
+    assert d["项目区面积"] == "待补充"
+
+
 def test_report_form_labels_share_one_font_size(tmp_path):
     """段名竖排的字号统一（早先按字数分 11/9/7.5 三档，一列里大小不一）。"""
     import re as _re
@@ -1253,7 +1433,7 @@ def test_reclaim_area_rate_spans_two_columns(tmp_path):
     render_report_form(doc, collect_form_data(
         {"project_name": "X", "area_m2": 8070.0,
          "land_classification": {"合计_m2": 8070.0, "rows": [
-             {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 478.0}]}},
+             {"一级地类": "耕地", "二级地类": "水田", "面积_m2": 8070.0}]}},
         {"name": "Y"}, []), {})
     tb = next(t for t in doc.tables
               if "复垦土地面积" in "".join(c.text for c in t.rows[0].cells).replace("\n", ""))
@@ -1467,14 +1647,19 @@ def test_quantity_model_matches_sample_numbers():
     有机物 4.04 t / 翻耕 0.266 ha。本项目地类算出来应当落在同一量级。
     """
     from app.services.reclamation_quantities import build_quantity_rows
-    q = {r["name"]: r["qty"] for r in build_quantity_rows({"land_classification": _MY_LC})}
+    _f = {"land_classification": _MY_LC,
+          # 设计参数由项目给；本用例按明远样本口径验算
+          "topsoil_thickness": "20", "hard_area_m2": 2727,
+          "hard_surface_type": "混凝土面层+垫层",
+          "surface_thickness_cm": "15", "cushion_thickness_cm": "10"}
+    q = {r["name"]: r["qty"] for r in build_quantity_rows(_f)}
     assert q["表土剥离"] == 5.378          # 2689 m² × 0.20 m
     assert q["表土回填"] == 5.378
     assert q["混凝土面层拆除"] == 4.0905   # 2727 m² × 0.15 m
     assert q["垫层清除"] == 2.727          # 2727 m² × 0.10 m
     assert q["垃圾外运"] == 6.8175         # 面层 + 垫层
     assert q["土地翻耕"] == 0.2689
-    assert q["田面平整"] == 80.7           # 8070 m² / 100
+    assert q["田面平整"] == 26.89          # 可剥离地类 2689 m² / 100
     assert q["沟渠疏通"] == 1.11           # 74 m² × 1.5 / 100
     assert q["土壤培肥（有机肥）"] == 4.0335   # 0.2689 ha × 15 t/ha
     assert q["土壤培肥（复合肥）"] == 0.2017   # 0.2689 ha × 0.75 t/ha
@@ -1501,14 +1686,39 @@ def test_enrich_writes_service_years_and_earthwork():
     """生成前把工程量/年限写进 filled_data（事实卡与表6-1 共用）。"""
     from app.services.reclamation_quantities import (
         QUANTITY_ROWS_KEY, enrich_filled_data)
-    fd = {"project_name": "某复垦项目", "area_m2": 8070.0, "land_classification": _MY_LC}
+    fd = {"project_name": "某复垦项目", "area_m2": 8070.0,
+          "land_classification": _MY_LC, "topsoil_thickness": "20",
+          "hard_surface_type": "混凝土面层+垫层", "hard_area_m2": 2727,
+          "surface_thickness_cm": "15", "cushion_thickness_cm": "10",
+          "land_use_months": "24"}
     assert enrich_filled_data(fd) is True
     assert fd[QUANTITY_ROWS_KEY] and len(fd[QUANTITY_ROWS_KEY]) == 10
-    # 材料里没有年限 → 按模板口径（占用 24 + 复垦 1 + 管护 6 = 30 个月）
-    assert fd["service_years"] == "30 个月"      # 必须带单位（否则模型写成「30 年」）
-    assert fd["construct_period"] == "24 个月"
+    # 🔴 服务年限不再套范文默认值；没问到时就不写（报告显示「待补充」）
+    assert "service_years" not in fd
+    assert fd["construct_period"] == "24 个月"       # 取材料里的用地期限
     assert "表土剥离 537.8 m³" in fd["earthwork_volume"]
-    assert fd["topsoil_thickness"] == "0.20"
+    # 第 1 章 1.2.5 要直接引用四项费用；缺这句时模型会写「监测与管护费万元」
+    # （conftest 默认停用预算服务，故这里只在有估算时断言；helper 另有单测）
+    if fd.get("_budget_estimate"):
+        assert fd["investment_summary"].startswith("静态总投资")
+        assert "监测与管护费" in fd["investment_summary"]
+        assert "预备费" in fd["investment_summary"]
+
+
+def test_investment_summary_from_estimate():
+    """第 1/7 章的「四项费用」汇总句必须完整，不能留「监测与管护费万元」。"""
+    from app.services.reclamation_budget_bridge import BudgetEstimate
+    from app.services.reclamation_quantities import _apply_investment_summary
+
+    est = BudgetEstimate(construction=29.15, other=4.70, monitor_care=18.49,
+                         basic_reserve=3.14, price_reserve=5.75, risk=0.58,
+                         static_total=56.06, dynamic_total=61.81)
+    fd = {}
+    _apply_investment_summary(fd, est)
+    assert "静态总投资56.06万元" in fd["investment_summary"]
+    assert "动态总投资61.81万元" in fd["investment_summary"]
+    assert "监测与管护费18.49万元" in fd["investment_summary"]
+    assert "预备费9.47万元" in fd["investment_summary"]
 
 
 def test_ch6_quantity_table_is_system_rendered(tmp_path):
@@ -1519,7 +1729,8 @@ def test_ch6_quantity_table_is_system_rendered(tmp_path):
            "| 序号 | 工程或费用名称 | 单位 | 数量 |\n| --- | --- | --- | --- |\n"
            "| 1 | 表土剥离 | 100m³ | 999.9 |\n")
     from app.services.reclamation_quantities import QUANTITY_ROWS_KEY, build_quantity_rows
-    filled = {"project_name": "某复垦项目", "land_classification": _MY_LC}
+    filled = {"project_name": "某复垦项目", "land_classification": _MY_LC,
+              "topsoil_thickness": "20"}
     filled[QUANTITY_ROWS_KEY] = build_quantity_rows(filled)
     doc = _render_doc_full(tmp_path, {6: {"markdown": _md}}, filled)
     tb = _table_by_header(doc, "工程或费用名称")
@@ -1588,17 +1799,6 @@ def test_appendix_image_keeps_full_width(tmp_path):
     assert int(ext.get('cy')) / 360000 > 10, "附件页应保持大图"
 
 
-def test_area_chart_is_landscape(tmp_path):
-    """第1章「各类土地面积关系图」：横版出图（宽 > 高），数据取自地类面积。"""
-    from PIL import Image as PILImage
-    from app.services.reclamation_figures import _draw_area_chart
-    out = tmp_path / "chart.jpg"
-    ok = _draw_area_chart({"land_classification": _MY_LC}, out, "各类土地面积关系图")
-    assert ok is True
-    with PILImage.open(out) as im:
-        assert im.width > im.height * 1.3
-
-
 # ════════════════════════════════════════════════════════════
 # L. 复垦专用的系统表渲染器**不得接管稳评**
 # ════════════════════════════════════════════════════════════
@@ -1637,3 +1837,57 @@ def test_reclamation_renderer_tolerates_str_land_classification():
         doc, "表4-2 临时用地土地利用现状统计表", 4) is False
     assert a._render_reclamation_system_table(
         doc, "表1-1 临时用地拟损毁土地情况表", 1) is True   # 第1章按面积兜底仍成立
+
+
+def test_enrich_converts_service_years_years_to_months():
+    """Excel 填的 3.0（年）要变成「36 个月」，不能写成「3.0 个月」。"""
+    from app.services.reclamation_quantities import enrich_filled_data
+    fd = {"project_name": "某复垦项目", "area_m2": 8070.0,
+          "land_classification": _MY_LC, "topsoil_thickness": "20",
+          "hard_surface_type": "混凝土面层+垫层", "hard_area_m2": 2727,
+          "surface_thickness_cm": "15", "service_years": 3.0,
+          "land_use_months": "24"}
+    assert enrich_filled_data(fd) is True
+    assert fd["service_years"] == "36 个月"
+
+
+def test_form_excerpt_covers_whole_chapter_without_ellipsis():
+    """报告表的工作计划/保障措施 = 整章正文，不截断、不加「……」。"""
+    from app.services.report_assembler import ReportAssembler
+
+    body = "".join(f"第{i}段正文，说明复垦工作的组织与实施。" for i in range(1, 120))
+    md = "# 10 保障措施\n\n" + body
+    txt = ReportAssembler._excerpt({10: {"markdown": md}}, 10, 8000)
+    assert "……" not in txt
+    assert txt.startswith("第1段正文")
+    assert txt.endswith("第119段正文，说明复垦工作的组织与实施。")
+
+
+def test_form_basis_comes_from_body_711():
+    """报告表「测算依据」取正文 7.1.1 原文，不再是一段写死的静态清单。"""
+    from app.services.report_assembler import ReportAssembler
+
+    md = ("### 7.1.1 投资估算编制依据\n\n"
+          "1）《江苏省土地综合整治工程建设规范》；\n"
+          "2）《江苏省土地综合整治项目预算定额标准》2023年修订；\n\n"
+          "### 7.1.2 土地复垦费用构成\n\n费用包括工程施工费。\n")
+    got = ReportAssembler._section_prose({7: {"markdown": md}}, 7, "投资估算编制依据")
+    assert got == ("1）《江苏省土地综合整治工程建设规范》；\n"
+                   "2）《江苏省土地综合整治项目预算定额标准》2023年修订；")
+    assert "TD/T 1031.1" not in got
+
+
+def test_chapter_requirements_carry_comment_rules():
+    """批注口径进入第4/5/6章提示词。"""
+    from app.agent.reclamation_definitions import render_reclamation_requirements
+
+    ch4 = render_reclamation_requirements(1000, 2000, 4)
+    assert "占用耕地不可避免" in ch4 and "表4-2" in ch4 and "90 分以上" in ch4
+    ch5 = render_reclamation_requirements(1000, 2000, 5)
+    assert "道路工程" in ch5 and "恢复水利" in ch5 and "图6-1" in ch5
+    ch6 = render_reclamation_requirements(1000, 2000, 6)
+    assert "表土堆放区面积 × 1.5" in ch6
+    assert "垫层清理面积 = 临时用地总面积 − 表土堆放区面积" in ch6
+    assert "没有计算公式，是估列值" in ch6
+    # 其他章不带这些专属段
+    assert "表4-2" not in render_reclamation_requirements(1000, 2000, 3)

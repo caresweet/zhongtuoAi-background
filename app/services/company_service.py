@@ -29,7 +29,8 @@ PLACEHOLDER = "待填写"
 _COMPANY_FIELDS = (
     "id", "name", "is_internal", "short_name",
     "intro_text", "implement_unit", "business_license_no",
-    "qualification_text", "address", "contact",
+    "qualification_text", "qualification_level", "qualification_authority",
+    "qualification_no", "phone", "address", "contact",
     # 🔴 评审表「稳评实施单位·负责人 / 职务」—— 按公司走（每家负责人不同）
     "leader_name", "leader_title",
 )

@@ -249,54 +249,6 @@ def _draw_location_map(polygons: List[dict], out_png: Path, title: str) -> bool:
     return True
 
 
-def _draw_area_chart(filled: dict, out_png: Path, title: str) -> bool:
-    """画「各类土地面积关系图」：按勘测定界地类出**横版柱状图**（第1章用）。
-
-    数与第4章 表4-4 / 第1章 表1-1 同源（`land_classification`），不另算。
-    样本里只有「污水处理厂」那份有这张图（图1-1），属可选图；取不到地类就不出。
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    lc = (filled or {}).get("land_classification") or {}
-    rows = [r for r in (lc.get("rows") or []) if isinstance(r, dict)]
-    if not rows:
-        return False
-    _labels, _areas = [], []
-    for r in rows:
-        try:
-            _m2 = float(str(r.get("面积_m2") or 0).replace(",", ""))
-        except Exception:
-            _m2 = 0.0
-        if _m2 <= 0:
-            continue
-        _n = f"{r.get('一级地类') or ''}" + (f"\n{r.get('二级地类')}" if r.get("二级地类") else "")
-        _labels.append(_n)
-        _areas.append(_m2 / 10000.0)
-    if not _areas:
-        return False
-
-    _init_fonts()
-    fig, ax = plt.subplots(figsize=(10.0, 5.6))       # 🔴 横版：宽 > 高
-    bars = ax.bar(range(len(_areas)), _areas, color="#2E75B6", width=0.62)
-    ax.set_xticks(range(len(_labels)))
-    ax.set_xticklabels(_labels, fontsize=11)
-    ax.set_ylabel("面积（公顷）", fontsize=11)
-    ax.set_title(title, fontsize=15)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    for b, v in zip(bars, _areas):
-        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.4f}",
-                ha="center", va="bottom", fontsize=10)
-    ax.set_ylim(0, max(_areas) * 1.18)
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200)
-    plt.close(fig)
-    return True
-
-
 # ═══════════════════════════════════════════════════════════════
 # 对外入口
 # ═══════════════════════════════════════════════════════════════
@@ -334,10 +286,14 @@ def ensure_reclamation_figures(materials: Sequence[dict],
     _ok = False
     try:
         from app.services.satellite_map import render_location_figure
+        # 🔴 行政区位（业主 2026-11-02：「地理位置示意图要有行政区位」）：
+        #    取材料里的「土地座落/项目位置」（如「淮安市淮安区」），图上写进标题条，
+        #    并在左上角出县域尺度的小图，项目位置用**五角星**标出。
+        _admin = str((filled or {}).get("location") or "").strip()
         _ok = render_location_figure(
             polys[0]["points"], str(png),
             cache_dir=str(Path(storage_dir) / "satellite_tiles"),
-            title="工程位置示意图")
+            title="工程位置示意图", admin_text=_admin)
     except Exception as e:                       # pragma: no cover
         logger.warning(f"[复垦图件] 卫星底图出图失败，退回几何示意图: {e}")
         _ok = False

@@ -50,6 +50,16 @@ async def lifespan(app: FastAPI):
     (settings.STORAGE_DIR / "images").mkdir(parents=True, exist_ok=True)
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 🔴 HITL 暂停点落 SQLite：用户填到一半、服务重启（部署）后仍能「接着跑」。
+    #    以前用 MemorySaver，重启即丢 → resume 抛
+    #    `InvalidUpdateError: Must write to at least one of ['__root__']`（2026-11-02 线上）。
+    try:
+        from app.services.report_workflow import workflow_runner
+        await workflow_runner.use_sqlite_checkpoints(
+            str(settings.DATA_DIR / "workflow_checkpoints.db"))
+    except Exception as e:
+        logger.warning(f"HITL 暂停点持久化初始化失败（回落内存）：{e}")
+
     # Pre-warm cleaning cache: extract text from all active templates & docs
     try:
         import asyncio as _asyncio
@@ -132,6 +142,11 @@ async def lifespan(app: FastAPI):
 
     yield
     # Shutdown: cleanup temp files
+    try:
+        from app.services.report_workflow import workflow_runner
+        await workflow_runner.close()
+    except Exception:
+        pass
     import shutil
     temp_dir = settings.STORAGE_DIR / "temp"
     if temp_dir.exists():
@@ -174,7 +189,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 from fastapi import Depends
 from app.deps import get_current_user, require_admin, require_staff
 from app.models.user import User
-from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning, bidding_screening, ocr_review, check_rules, approval, public_stats, company, admin, client_logs
+from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning, bidding_screening, bidding_bid, ocr_review, check_rules, approval, public_stats, company, admin, client_logs
 
 PUBLIC_ROUTERS = [
     auth.router,                   # /login /register 公开；/me /refresh 自身要求登录
@@ -209,7 +224,7 @@ USER_ROUTERS = [
 #    （`authStore.isStaff`，依据 `user.company_is_internal`）—— 两边必须逐条对齐。
 ADMIN_ROUTERS = [
     knowledge.router, knowledge_chat.router,      # 知识库 + 知识问答（审核/学习）
-    learning.router, bidding_screening.router,
+    learning.router, bidding_screening.router, bidding_bid.router,
     ocr_review.router, check_rules.router, approval.router,
     admin.router,                                 # 账号/公司管理
 ]

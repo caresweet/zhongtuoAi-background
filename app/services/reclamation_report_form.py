@@ -25,7 +25,9 @@
 | 投资估算费用构成 | `reclamation_budget_bridge` → budget-maker（127.0.0.1:8765）按第6章工程量现算 |
 | 工作计划 / 保障措施 | 第8章、第10章正文（摘录，不另编） |
 
-**抽不到的**一律留空、不印「待填写」这类占位符（业主硬约束）。
+**抽不到的一律不猜**：公司资质（发证机关/等级/联系人/电话）与人员职称/专业
+会先走弹窗补问（`RECLAMATION_NEED_FIELDS` + 动态人员字段），问不到标「待补充」；
+签名栏留空给人手签。
 """
 
 from __future__ import annotations
@@ -56,29 +58,68 @@ def _months(v: Any) -> str:
     return s if ("个月" in s or "年" in s) else f"{s} 个月"
 
 
-def _person_rows(personnel: Sequence[dict], unit_name: str, limit: int = 8) -> List[List[str]]:
-    """主要编制人员**数据行**（姓名｜职称/职务｜专业｜单位｜签名，签名留给手签）。"""
+def _txt_number(v: Any) -> float:
+    """数值型字段 → float（能容忍「23248 ㎡」「23,248」这类写法）；取不到返回 0.0。"""
+    s = _txt(v)
+    if not s:
+        return 0.0
+    m = re.search(r'-?\d+(?:\.\d+)?', s.replace(',', ''))
+    try:
+        return float(m.group(0)) if m else 0.0
+    except Exception:
+        return 0.0
+
+
+def _person_rows(personnel: Sequence[dict], unit_name: str, limit: int = 8,
+                 filled: Optional[dict] = None) -> List[List[str]]:
+    """主要编制人员**数据行**（姓名｜职称/职务｜专业｜单位｜签名，签名留给手签）。
+
+    人员库里那几行可能只有姓名（证书扫描件入库时没有职称/专业），
+    这时用弹窗补问的值（`filled["_person_title_<姓名>"]` / `_person_major_<姓名>`）；
+    仍没有就写「待补充」，不印空白让客户以为是漏排。
+    """
+    fd = filled or {}
     out: List[List[str]] = []
     for p in list(personnel or [])[:max(3, limit)]:
         name = _txt(p.get("姓名"))
         if not name:
             continue
-        out.append([name, _txt(p.get("职称/职务")), _txt(p.get("专业")), unit_name, ""])
+        title = (_txt(p.get("职称/职务"))
+                 or _txt(fd.get(f"_person_title_{name}")) or "待补充")
+        major = (_txt(p.get("专业"))
+                 or _txt(fd.get(f"_person_major_{name}")) or "待补充")
+        out.append([name, title, major, unit_name, ""])
     while len(out) < 3:                      # 样本至少留 3 行（含空行给手填）
         out.append(["", "", "", "", ""])
     return out
+
+
+def _field(fd: dict, key: str, default: str = "") -> str:
+    """取值；用户**跳过**的字段一律显示「待补充」（业主 2026-11-02）。"""
+    if key in ((fd or {}).get("_placeholders") or {}):
+        return "待补充"
+    return _txt((fd or {}).get(key)) or default
 
 
 def collect_form_data(filled: dict, company: dict, personnel: Sequence[dict]) -> Dict[str, Any]:
     """把各事实源收敛成报告表要用的字段（缺的留空，不猜）。"""
     fd = filled or {}
     co = company or {}
+    _ph = fd.get("_placeholders") or {}
     _area_m2 = 0.0
     try:
         _area_m2 = float(str(fd.get("area_m2") or 0).replace(",", "")) or 0.0
     except Exception:
         _area_m2 = 0.0
-    _ha = f"{_area_m2 / 10000.0:.4f}" if _area_m2 else ""
+    # 🔴 报告表「项目区面积」是**主体工程+临时用地**的项目区面积（人工稿井神：
+    #    8.0762 hm² 永久用地，不是 2.3248 临时用地）。材料/弹窗给了 project_area_m2
+    #    就用它，否则退回临时用地面积。
+    _proj_area = 0.0
+    try:
+        _proj_area = float(str(fd.get("project_area_m2") or 0).replace(",", "")) or 0.0
+    except Exception:
+        _proj_area = 0.0
+    _ha = f"{(_proj_area or _area_m2) / 10000.0:.4f}" if (_proj_area or _area_m2) else ""
 
     # 图幅号：材料里有形如 I50H118163 的值
     _sheet = ""
@@ -90,39 +131,60 @@ def collect_form_data(filled: dict, company: dict, personnel: Sequence[dict]) ->
     except Exception:
         pass
 
-    _invest = _txt(fd.get("project_investment"))
+    _invest = _field(fd, "project_investment")
     _invest_u = _txt(fd.get("project_investment_unit")) or "万元"
 
     lc = fd.get("land_classification") or {}
     return {
-        "项目名称": _txt(fd.get("project_name")),
-        "单位名称": _txt(fd.get("project_unit")) or _txt(fd.get("land_user_unit")),
-        "单位地址": _txt(fd.get("unit_address")),
-        "法人代表": "",                    # 材料的「法人代表」属于别的单位，宁缺勿错
-        "联系电话": _txt(fd.get("contact_phone")),
-        "单位性质": "",
-        "项目性质": _txt(fd.get("construction_nature")),
-        "项目位置": _txt(fd.get("location")),
-        "项目区面积": f"{_ha} 公顷" if _ha else "",
-        "投资规模": f"{_invest} {_invest_u}".strip() if _invest else "",
+        "项目名称": _field(fd, "project_name"),
+        # 单位名称 = 用地单位（复垦义务人）。优先取抽取到的单位全称，其次材料里
+        # 补出来的 `build_unit`（`fix_reclamation_fields`）。全称不做任何缩写。
+        "单位名称": (_field(fd, "project_unit") or _field(fd, "land_user_unit")
+                     or _field(fd, "build_unit")),
+        "单位地址": _field(fd, "unit_address"),
+        # 🔴 表里的「法人代表」是**用地单位**的法人。只在用户/材料明确给了
+        #    `legal_rep` 时才用；材料里抓到的别的单位法代宁可空着。
+        "法人代表": _field(fd, "legal_rep"),
+        "联系电话": _field(fd, "contact_phone"),
+        "单位性质": _field(fd, "unit_nature"),
+        "项目性质": _field(fd, "construction_nature"),
+        "项目位置": _field(fd, "location"),
+        "项目区面积": ("待补充" if "area_m2" in _ph
+                       else (f"{_ha} 公顷" if _ha else "")),
+        "投资规模": ("待补充" if "project_investment" in _ph
+                     else (f"{_invest} {_invest_u}".strip() if _invest else "")),
         "图幅号": _sheet,
-        "生产年限": _months(fd.get("construct_period")),
-        "服务年限": _months(fd.get("service_years")),
+        "生产年限": ("待补充" if "construct_period" in _ph
+                     else _months(fd.get("construct_period"))),
+        "服务年限": ("待补充" if "service_years" in _ph
+                     else _months(fd.get("service_years"))),
         # 编制单位
         "编制单位名称": _txt(co.get("name")),
         "编制单位法人": _txt(co.get("leader_name")),
         "资质证书名称": _txt(co.get("qualification_text")),
-        "资质等级": "",
-        "发证机关": "",
-        "证书编号": _txt(co.get("business_license_no")),
-        "编制单位联系人": _txt(co.get("contact")),
-        "编制单位电话": "",
+        # 🔴 公司档案只有名称/资质/法人；发证机关、等级、联系人、电话资料里没有，
+        #    由弹窗补问（`RECLAMATION_NEED_FIELDS[3]`），问到就写，问不到标「待补充」。
+        "资质等级": (_txt(co.get("qualification_level"))
+                     or _field(fd, "qualification_level") or "待补充"),
+        "发证机关": (_txt(co.get("qualification_authority"))
+                     or _field(fd, "qualification_authority") or "待补充"),
+        # 证书编号优先用资质证书编号（模板里的 Z2064）；没有再回落到营业执照号
+        "证书编号": (_txt(co.get("qualification_no"))
+                     or _txt(co.get("business_license_no"))),
+        "编制单位联系人": (_txt(co.get("contact"))
+                           or _field(fd, "company_contact") or "待补充"),
+        "编制单位电话": (_txt(co.get("phone"))
+                         or _field(fd, "company_phone") or "待补充"),
         # 地类
         "地类行": lc.get("rows") or [],
         "地类合计_m2": float(lc.get("合计_m2") or 0),
         "area_m2": _area_m2,
+        # 损毁面积（复垦率的分子分母口径）：材料给了单独字段就用，否则按
+        # 「临时用地范围即复垦责任范围」取项目面积（样本就是这个口径）。
+        "损毁面积_m2": (_txt_number(fd.get("damage_area_m2")) or _area_m2),
         "单位名称_编制": _txt(co.get("name")),
-        "人员行": _person_rows(personnel, _txt(co.get("name"))),
+        # 🔴 范文报告表「主要编制人员」就是 3 行 —— 复垦最多 3 人
+        "人员行": _person_rows(personnel, _txt(co.get("name")), limit=3, filled=fd),
         "永久建设用地_ha": _txt(fd.get("permanent_build_area")) or "",
     }
 
@@ -268,7 +330,12 @@ def _merge_equal_runs(table, grid_col: int, first_row: int = 0) -> None:
             j += 1
         if j - i > 1:
             try:
-                table.cell(i, grid_col).merge(table.cell(j - 1, grid_col))
+                _m = table.cell(i, grid_col).merge(table.cell(j - 1, grid_col))
+                # 🔴 `merge()` 会把各格的段落**一并搬进来** —— 不清掉就成了
+                #    「江苏众拓…」竖向重复 8 行（业主 2026-11-02：「合并同类项只要保留一个」）。
+                for _p in list(_m.paragraphs)[1:]:
+                    _p._p.getparent().remove(_p._p)
+                _fill_cell(_m, txt)
             except Exception:
                 pass
         i = j
@@ -409,17 +476,28 @@ def _reclaim_area_rows(data: Dict[str, Any]) -> List[List[Tuple[str, int]]]:
         [("土地类型", 2), ("面积（公顷）", 2)],
         [("一级地类", 1), ("二级地类", 1), ("已复垦", 1), ("拟复垦", 1)],
     ]
-    _total = 0.0
+    _total_m2 = 0.0
     for r in (data.get("地类行") or []):
-        _ha = float(r.get("面积_m2") or 0) / 10000.0
-        _total += _ha
+        _m2 = float(r.get("面积_m2") or 0)
+        _total_m2 += _m2
         out.append([(_txt(r.get("一级地类")), 1), (_txt(r.get("二级地类")), 1),
-                    ("", 1), (f"{_ha:.4f}", 1)])
-    out.append([("合计", 2), ("", 1), (f"{_total:.4f}", 1)])
-    _rate = 100 if _total > 0 else ""
+                    ("", 1), (f"{_m2 / 10000.0:.4f}", 1)])
+    out.append([("合计", 2), ("", 1), (f"{_total_m2 / 10000.0:.4f}", 1)])
+    # 🔴 复垦率**算出来**，不写死 100：复垦率 = 拟复垦面积 ÷ 损毁面积 × 100。
+    #    损毁面积取「复垦责任范围内土地损毁及占用面积」那张表的合计（同源 area_m2）；
+    #    两边任一为 0 就留空（不印 0、不印「—」——业主 2026-11-02：
+    #    「表格中空白的部分不需要 "-" 代替」）。
+    _damage_m2 = 0.0
+    try:
+        _damage_m2 = float(data.get("损毁面积_m2") or data.get("area_m2") or 0)
+    except Exception:
+        _damage_m2 = 0.0
+    _rate = ""
+    if _total_m2 > 0 and _damage_m2 > 0:
+        _rate = f"{_total_m2 / _damage_m2 * 100:.1f}".rstrip("0").rstrip(".")
     # 样本 p58 下节末行：土地复垦率占 一级地类+二级地类 两格，100 占
     # 已复垦+拟复垦 两格（业主 2026-10-12：「100应该占两列」）。
-    out.append([("土地复垦率（%）", 2), (f"{_rate}", 2)])
+    out.append([("土地复垦率（%）", 2), (_rate, 2)])
     return out
 
 
@@ -444,16 +522,8 @@ def render_report_form(doc, data: Dict[str, Any], chapters: Dict[str, Any] | Non
     W_DAMAGE = (2.00, 1.69, 4.76, 3.38, 1.61, 2.20)
     W_COST = (2.00, 4.53, 4.88, 4.23)
 
-    # 表头
-    _p = doc.add_paragraph()
-    _p.alignment = 1                     # CENTER
-    _r = _p.add_run("土地复垦方案报告表")
-    _r.bold = True
-    _r.font.size = Pt(16)
-    from docx.oxml.ns import qn as _q
-    if _r._element.rPr is not None and _r._element.rPr.rFonts is not None:
-        _r._element.rPr.rFonts.set(_q('w:eastAsia'), "黑体")
-
+    # 🔴 不再单独印「土地复垦方案报告表」大标题 —— 装配器已经先加了章标题
+    #    「11 复垦方案报告表」，这里再印一行就是同页两条标题（业主 2026-11-04 实测）。
     d = data
     # ① 项目概况
     _section_table(doc, "项目概况", [

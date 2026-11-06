@@ -12,7 +12,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Dict, List
-from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.database.auth_db import get_auth_db
@@ -242,17 +242,94 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     #    只能走**视觉**。按页图 md5 缓存，重跑不重复烧 token。
     if (state.get("_domain") or "stability") == "reclamation":
         try:
-            from app.services.land_class_extract import extract_land_classification
+            from app.services.land_class_extract import (
+                extract_land_classification, is_land_class_material,
+                read_land_class_xlsx, read_survey_meta_xlsx,
+            )
             _fd = state.setdefault("filled_data", {})
+            if not (_fd.get("land_classification")
+                    and _fd.get("permanent_land_classification")):
+                # ① 勘界 Excel / 土地分类面积汇总表 优先：确定性、零 token。井神材料里就给了
+                #    `井神临时用地勘界报告.xlsx`（《土地分类面积表》），以前完全没用上。
+                _seen_xlsx: set = set()
+                _xlsx_cands: list = []
+
+                def _add_xlsx_cand(_sp, _name):
+                    _sp = str(_sp or "")
+                    if not _sp.lower().endswith((".xlsx", ".xlsm", ".xls")):
+                        return
+                    if not is_land_class_material(str(_name or "")):
+                        return
+                    _p = next((c for c in (Path(_sp), settings.STORAGE_DIR / _sp,
+                                           settings.STORAGE_DIR / "images" / Path(_sp).name)
+                               if c.exists()), None)
+                    if _p and str(_p) not in _seen_xlsx:
+                        _seen_xlsx.add(str(_p))
+                        _xlsx_cands.append((_p, str(_name or _p.name)))
+
+                for _m in existing_materials:
+                    if isinstance(_m, dict):
+                        _add_xlsx_cand(_m.get("source_path"), _m.get("source_name"))
+                # 🔴 上传/解析在后台跑：用户经常材料还没入库就点生成，
+                #    这时 `_project_materials` 里没有刚传的勘界 Excel，地类为空 →
+                #    第6章工程量、第7章投资估算、报告表费用构成全空（2026-11-03 线上）。
+                #    Excel 读取是确定性的、不依赖入库，直接扫 `_uploaded_files`。
+                for _uf in (state.get("_uploaded_files") or []):
+                    if isinstance(_uf, dict):
+                        _add_xlsx_cand(_uf.get("path"), _uf.get("original_name"))
+                    else:
+                        _add_xlsx_cand(_uf, os.path.basename(str(_uf)))
+
+                for _p, _nm in _xlsx_cands:
+                    # ①a 制式《土地分类面积汇总表》：主体用地 → 表4-3，临时用地 → 表4-4
+                    try:
+                        from app.services.land_summary_excel import read_land_summary
+                        _sum = read_land_summary(str(_p))
+                    except Exception as _se:
+                        logger.info(f"[地类汇总] {_nm} 读取跳过: {_se}")
+                        _sum = None
+                    if _sum and _sum.get("rows"):
+                        _key = ("permanent_land_classification"
+                                if _sum.get("kind") == "permanent"
+                                else "land_classification")
+                        if not _fd.get(_key):
+                            _fd[_key] = {"rows": _sum["rows"],
+                                         "合计_m2": _sum["合计_m2"],
+                                         "source": _sum.get("source")}
+                            logger.info(
+                                f"[地类汇总] 《{_nm}》→ {_key}："
+                                f"{len(_sum['rows'])} 类，合计 {_sum['合计_m2']} ㎡")
+                        continue
+                    # 《勘测界定表》里的封面级事实（土地座落/单位地址/单位性质/界址点数）
+                    # 与地类表同在一份 Excel —— 资料里有的就不再问用户。
+                    for _k, _v in (read_survey_meta_xlsx(str(_p)) or {}).items():
+                        if _v and not str(_fd.get(_k) or "").strip():
+                            _fd[_k] = _v
+                    _lc = read_land_class_xlsx(str(_p))
+                    if (_lc or {}).get("rows") and not _fd.get("land_classification"):
+                        _fd["land_classification"] = _lc
+                        if _lc.get("权属单位") and not _fd.get("land_ownership"):
+                            _fd["land_ownership"] = _lc["权属单位"]
+                        state["_project_material_facts"] = {
+                            **(state.get("_project_material_facts") or {}),
+                            "land_classification": _lc.get("rows"),
+                        }
+                        logger.info(
+                            f"[地类] Excel 读数《{_nm}》："
+                            f"{len(_lc['rows'])} 类，合计 {_lc.get('合计_m2')} ㎡")
+                        break
             if not _fd.get("land_classification"):
                 _cands = []
                 for _m in existing_materials:
                     if not isinstance(_m, dict):
                         continue
                     _n = str(_m.get("source_name") or "")
-                    if not any(k in _n for k in ("勘测定界", "勘测")):
+                    # 🔴 文件名判据统一在 `is_land_class_material`（勘界图/现状图/宗地图…）
+                    if not is_land_class_material(_n):
                         continue
                     _sp = str(_m.get("source_path") or "")
+                    if not _sp.lower().endswith(".pdf"):
+                        continue
                     _p = next((c for c in (Path(_sp), settings.STORAGE_DIR / _sp,
                                            settings.STORAGE_DIR / "images" / Path(_sp).name)
                                if c.exists()), None)
@@ -285,6 +362,19 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
             import logging as _lg
             _lg.getLogger(__name__).warning(f"[地类] 勘测定界地类抽取跳过: {_lce}")
 
+    # 🔴 复垦：优先读用户上传的《复垦基础资料》Excel。
+    #    这张表是业主在《1井神安井组复垦报告11.2》的 49 条批注基础上定的取数清单：
+    #    功能分区、地类、设计参数、投资、服务年限、公众参与、附件一次填完。
+    #    必须排在工程量预计算**之前** —— 表 6-1 / 表 7-5 要用它的设计参数。
+    if (state.get("_domain") or "stability") == "reclamation":
+        try:
+            from app.services.reclamation_intake import apply_intake_from_state
+            _n_intake = apply_intake_from_state(state)
+            if _n_intake:
+                logger.info(f"[基础资料] 已读取复垦基础资料 Excel：{_n_intake} 项")
+        except Exception as _ie:
+            logger.warning(f"[基础资料] 读取失败（不影响出报告）: {_ie}")
+
     # 🔴 复垦：工程量与投资估算**在生成前**就算好并写回 filled_data。
     #    第6章正文、表6-1、表7-3/7-4、报告表「费用构成」全部读这一份 ——
     #    业主 2026-10-26：「每次生成的报告计算出来的数字都应该是一样的」，
@@ -292,7 +382,13 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     if (state.get("_domain") or "stability") == "reclamation":
         try:
             from app.services.reclamation_quantities import enrich_filled_data
-            _ok = enrich_filled_data(state.setdefault("filled_data", {}))
+            from app.services.reclamation_cost_excel import resolve_cost_excel
+            _mats = ((state.get("_project_materials") or [])
+                     + (state.get("_uploaded_files") or []))
+            _cx = resolve_cost_excel(state.setdefault("filled_data", {}), _mats)
+            if _cx:
+                logger.info(f"[投资估算Excel] 使用用户资料：{_cx}")
+            _ok = enrich_filled_data(state["filled_data"], cost_excel=_cx)
             logger.info(f"[工程量] 预计算{'完成' if _ok else '跳过（无地类数据）'}")
         except Exception as _qe:
             logger.warning(f"[工程量] 预计算失败（不影响出报告）: {_qe}")
@@ -629,13 +725,14 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
     try:
         from app.services.material_ingestion_service import (
             material_ingestion_service as _mis, KEY_RECOGNITION_FIELDS,
+            RECLAMATION_RECOGNITION_FIELDS,
         )
         from app.domains import domain_of_state as _dos
         _dom = _dos(state)
         _rep = _mis.recognition_report(filled, domain=_dom)
         _rec = _rep.get("recognized", []) or []
         _miss = _rep.get("missing", []) or []
-        _total = len(_mis.RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
+        _total = len(RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
                      else KEY_RECOGNITION_FIELDS)
         if _rec:
             _show = "、".join(f"{i['label']}＝{i['value']}" for i in _rec[:8])
@@ -696,6 +793,265 @@ async def analyze_intent(request: dict):
             "user_input": user_input,
             "intent": intent,
             "domain": domain,
+            "guide": guide,
+        },
+    )
+
+
+def _template_text(path: Path, ext: str) -> str:
+    """模板文件 → 文本（docx 段落+表格 / pdf 前 10 页）。取不到返回空。"""
+    try:
+        if ext == ".docx":
+            from docx import Document
+            d = Document(str(path))
+            parts = [p.text.strip() for p in d.paragraphs if p.text.strip()]
+            for tb in d.tables:
+                for row in tb.rows:
+                    parts.append("\t".join(c.text.strip() for c in row.cells))
+            return "\n".join(parts)[:30000]
+        if ext == ".pdf":
+            import fitz
+            with fitz.open(str(path)) as d:
+                return "\n".join(p.get_text() for p in d[:10])[:30000]
+        if ext == ".doc":
+            import subprocess as _sp
+            r = _sp.run(["antiword", str(path)], capture_output=True, timeout=20)
+            return (r.stdout or b"").decode("utf-8", "ignore")[:30000]
+    except Exception as e:
+        logger.warning(f"[模板分析] 文本抽取失败 {path}: {e}")
+    return ""
+
+
+def _detect_template_domain(text: str, filename: str = "") -> str:
+    """模板文本 → 报告域（复垦优先：稳评文本里也会出现「征地」）。"""
+    blob = f"{filename}\n{text}"
+    if any(k in blob for k in ("土地复垦", "复垦方案", "复垦报告", "临时用地复垦")):
+        return "reclamation"
+    if any(k in blob for k in ("社会稳定风险", "稳评", "风险评估报告")):
+        return "stability"
+    if any(k in blob for k in ("投标文件", "招标文件", "技术标", "商务标")):
+        return "bidding"
+    # 结构词打分（规则见 content_rules/template_analysis.md）：
+    # 关键词全不中时用「复垦方向/表土剥离/风险源/利益相关者」这类**结构词**判，
+    # 比单个「征地」稳，也不会被封面上的泛称带偏。
+    try:
+        from app.services.template_rules import score_domains
+        _dom, _score = score_domains(blob)
+        if _dom and _score >= 2:
+            return _dom
+    except Exception as e:
+        logger.info(f"[模板分析] 结构词判域跳过: {e}")
+    try:
+        from app.domains import detect_domain
+        return detect_domain(message=blob[:6000]) or "stability"
+    except Exception:
+        return "stability"
+
+
+def _template_title(text: str, filename: str = "") -> str:
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if 4 <= len(s) <= 80 and any(k in s for k in ("报告", "方案", "评估", "标书")):
+            return s
+    return Path(filename or "").stem
+
+
+@router.post("/analyze-template", response_model=ApiResponse)
+async def analyze_template_upload(
+    file: UploadFile = File(...),
+    register_as_template: bool = Form(True),
+    region_override: str = Form(""),
+):
+    """上传一份报告模板 → 识别报告类型（域）/地区/模板名；默认登记为该地区模板。
+
+    业主 2026-11-03：「把分析需求变成上传模板分析用户想要生成的报告模板。」
+    业主 2026-11-04：「识别这个报告的地区是哪儿，不一定是淮安区，把它作为
+    那个地区的模板使用。」——所以这里除了识别域，还要识别**地区**，并把
+    docx 登记进 `templates` 表（domain + region），下次同地区直接命中。
+    """
+    import uuid as _uuid
+
+    name = os.path.basename(file.filename or "template")
+    ext = Path(name).suffix.lower()
+    if ext not in (".docx", ".pdf", ".doc"):
+        raise HTTPException(status_code=400,
+                            detail="只支持 .docx / .pdf / .doc 报告模板")
+    raw = await file.read()
+    if len(raw) > 60 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="模板文件不能超过 60MB")
+
+    rel = f"templates/user_{_uuid.uuid4().hex}{ext}"
+    dest = Path(settings.STORAGE_DIR) / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+
+    text = _template_text(dest, ext)
+    domain = _detect_template_domain(text, name)
+    title = _template_title(text, name)
+
+    # 地区识别：先看用户手填，再按报告正文/文件名自动识别
+    from app.services.region_detect import detect_region
+    _region_info = detect_region(f"{title}\n{text}", name)
+    region = (region_override or "").strip() or str(_region_info.get("region") or "")
+
+    # 模板库参考（同域 + 地区命中）
+    matched = None
+    try:
+        from app.database.knowledge_db import async_session as _ks
+        from app.models.knowledge import Template
+        from sqlalchemy import select
+        from app.services.template_selector import pick_region_match
+        async with _ks() as db:
+            rows = (await db.execute(
+                select(Template).where(Template.is_active == True,
+                                       Template.domain == domain))).scalars().all()
+        region_hit, best = pick_region_match(rows, f"{name}\n{text}")
+        if best:
+            matched = {"id": best.id, "name": best.name, "region": region_hit or ""}
+    except Exception as e:
+        logger.info(f"[模板分析] 模板库匹配跳过: {e}")
+
+    # 登记为该地区模板（只登记 docx：PDF 没有目录域/样式，不能当版式模板）
+    registered = None
+    register_reason = ""
+    if register_as_template:
+        if not region:
+            register_reason = "未识别到地区，未登记"
+        elif ext != ".docx":
+            register_reason = "只登记 docx 模板，PDF 仅作范文"
+        else:
+            try:
+                from app.database.knowledge_db import async_session as _ks
+                from app.models.knowledge import Template
+                from sqlalchemy import select
+                _cat = "复垦方案" if domain == "reclamation" else "稳评报告"
+                async with _ks() as db:
+                    _exist = (await db.execute(
+                        select(Template).where(
+                            Template.template_file_path == rel,
+                            Template.domain == domain,
+                        ))).scalars().first()
+                    if _exist:
+                        _exist.region = region
+                        _exist.is_active = True
+                        tpl = _exist
+                    else:
+                        tpl = Template(
+                            name=f"{region}{_cat}模板（上传）",
+                            description=f"用户上传模板，自动识别地区：{region}",
+                            category=_cat,
+                            domain=domain,
+                            region=region,
+                            template_file_path=rel,
+                            analysis_status="completed",
+                            file_size=len(raw),
+                            is_active=True,
+                        )
+                        db.add(tpl)
+                    await db.commit()
+                    await db.refresh(tpl)
+                registered = {
+                    "id": tpl.id, "name": tpl.name, "domain": domain,
+                    "region": region, "path": rel, "is_active": True,
+                }
+                logger.info(f"[模板分析] 已登记地区模板：{region}/{domain} → {rel}")
+            except Exception as e:
+                register_reason = f"登记失败：{e}"
+                logger.warning(f"[模板分析] 登记地区模板失败: {e}")
+
+    # 复垦模板：上传时就生成逐节三色画像，生成报告时直接注入章节 prompt
+    profile_analysis = {}
+    if ext == ".docx" and domain == "reclamation":
+        try:
+            from app.services.reclamation_template_profile import (
+                ensure_profile, template_analysis_summary)
+            _prof = ensure_profile(dest, domain)
+            profile_analysis = template_analysis_summary(_prof)
+        except Exception as e:
+            logger.warning(f"[模板画像] 上传时构建失败（生成时会再试）: {e}")
+
+    # 章结构对账：这份模板缺哪章、多哪章（规则来自 content_rules/template_analysis.md）
+    structure = {}
+    rule_count = 0
+    style = {}
+    try:
+        from app.services.template_rules import check_structure, rules_for
+        if ext == ".docx":
+            structure = check_structure(dest, domain)
+        rule_count = len(rules_for(domain))
+    except Exception as e:
+        logger.info(f"[模板分析] 结构对账跳过: {e}")
+    # 版式画像：标题/正文/表格的字体字号从模板里反读（生成时按它排版）
+    try:
+        from app.services.template_style_profile import load_style_profile, style_summary
+        if ext == ".docx":
+            style = style_summary(load_style_profile(dest))
+    except Exception as e:
+        logger.info(f"[模板分析] 版式识别跳过: {e}")
+
+    # 🔴 逐节「批注式分析」：类型（不变/换数/重写/条件段）、换什么、从哪取、公式、
+    #    模板原值。落盘到 data/template_case_analysis/，并返回给前端供编制人员确认。
+    case_analysis = {}
+    try:
+        from app.services.template_case_analysis import (
+            analyze_template_file, save_analysis,
+        )
+        _ca = analyze_template_file(dest, domain=domain, name=title, region=region)
+        _plan = {}
+        if ext == ".docx":
+            try:
+                from app.services.template_table_copy import chapter_table_plan
+                for _ch in range(1, 15):
+                    _p = chapter_table_plan(str(dest), _ch)
+                    if _p:
+                        _plan[_ch] = _p
+            except Exception:
+                _plan = {}
+        _jp = save_analysis(_ca, table_plan=_plan)
+        case_analysis = {
+            "counts": _ca.get("counts") or {},
+            "chapters": _ca.get("chapters") or 0,
+            "section_count": len(_ca.get("sections") or []),
+            "report_path": str(_jp.with_suffix(".md")),
+            "sections": [
+                {"no": s.get("no"), "title": s.get("title"), "kind": s.get("kind"),
+                 "replace": s.get("replace"), "source": s.get("source"),
+                 "formula": s.get("formula"),
+                 "keys": [k.get("label") for k in (s.get("keys") or [])]}
+                for s in (_ca.get("sections") or [])
+            ],
+        }
+        logger.info(f"[模板分析] 批注式分析：{len(case_analysis['sections'])} 节 → {_jp}")
+    except Exception as e:
+        logger.warning(f"[模板分析] 批注式分析失败（不影响登记）: {e}")
+
+    from app.agent.chapter_catalog import chapter_titles, report_kind_name
+    guide = dict(REPORT_MATERIAL_GUIDE.get(domain) or {})
+    return ApiResponse(
+        message="模板分析完成",
+        data={
+            "domain": domain,
+            "domain_label": report_kind_name(domain),
+            "template_title": title,
+            "template_path": rel,
+            "detected_chars": len(text),
+            "detected_region": region,
+            "region_evidence": _region_info.get("evidence", ""),
+            "region_candidates": _region_info.get("candidates", []),
+            "registered_template": registered,
+            "register_reason": register_reason,
+            "matched_template": matched,
+            "structure_check": structure,
+            "rule_count": rule_count,
+            # 从模板反读的版式：一级/二级/三级标题、正文、表格的字体字号
+            "style_profile": style,
+            # 复垦：这份模板要换哪些数据、哪些小节要按本项目资料重写
+            "required_data": profile_analysis.get("data_slots", []),
+            "rewrite_sections": profile_analysis.get("rewrite_sections", []),
+            "section_counts": profile_analysis.get("section_counts", {}),
+            # 逐节批注式分析（不变/换数/重写/条件段 + 来源/公式/原值）
+            "case_analysis": case_analysis,
+            "chapters": list(chapter_titles(domain).values()),
             "guide": guide,
         },
     )
@@ -840,6 +1196,15 @@ async def start_generation(
     # Templates in DB are only used as formatting/style reference.
     template_id = 0
     template_path = ""
+    # 🔴 用户上传了模板（/analyze-template 返回的路径）→ 本会话按这份模板出稿
+    try:
+        _tp = str(getattr(request, "template_path", "") or "").strip()
+        if _tp:
+            _abs = Path(str(file_service.get_absolute_path(_tp)))
+            if _abs.exists():
+                template_path = _tp
+    except Exception as _te:
+        logger.warning(f"[模板] 用户模板路径无效，回落内置结构: {_te}")
     templates = []  # Initialize before try block
 
     # Resolve and pin the report domain before any template/knowledge lookup.
@@ -2212,6 +2577,7 @@ async def get_recognition_report(session_id: str, user: User = Depends(get_curre
 
     from app.services.material_ingestion_service import (
         material_ingestion_service as _mis, KEY_RECOGNITION_FIELDS,
+        RECLAMATION_RECOGNITION_FIELDS,
     )
     src: dict = {}
     for k, v in (st.get("_project_material_facts") or {}).items():
@@ -2228,7 +2594,7 @@ async def get_recognition_report(session_id: str, user: User = Depends(get_curre
         "domain": _dom,
         "recognized": rep.get("recognized", []),
         "missing": rep.get("missing", []),
-        "total": len(_mis.RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
+        "total": len(RECLAMATION_RECOGNITION_FIELDS if _dom == "reclamation"
                      else KEY_RECOGNITION_FIELDS),
         "uploaded_files": len((st.get("_uploaded_files") or [])),
         "material_files": len((st.get("_project_materials") or [])),
@@ -2605,7 +2971,29 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                 _shared_logs.append("🔄 继续生成（从暂停点恢复）...")
                 user_responses = dict(state.get("_pending_responses", {}))
                 user_responses["_thread_id"] = state.get("_wf_thread_id", "")
-                wf_state = await workflow_runner.resume(sid, user_responses)
+                try:
+                    wf_state = await workflow_runner.resume(sid, user_responses)
+                except Exception as _resume_err:
+                    # 🔴 暂停点只存在进程内存（MemorySaver）里 —— **服务一重启就没了**。
+                    #    此时 resume 拿到的是不存在的 thread，LangGraph 抛
+                    #    `InvalidUpdateError: Must write to at least one of ['__root__']`
+                    #    （2026-11-02 线上复垦实测：用户点完「跳过」整单直接失败）。
+                    #    用户填的内容已经并进 `filled_data`，兜底按当前资料从头跑一遍，
+                    #    比把用户卡死在「失败」上强。
+                    if type(_resume_err).__name__ not in (
+                            "InvalidUpdateError", "EmptyInputError"):
+                        raise
+                    _log.warning(f"[WORKFLOW] 暂停点已失效（服务重启过），改为重新生成: {_resume_err}")
+                    _shared_logs.append("⚠️ 暂停点已失效（服务重启过），已按你填的资料重新生成")
+                    state["_is_resume"] = False
+                    state["_wf_thread_id"] = ""
+                    wf_state = await workflow_runner.start(
+                        session_id=sid,
+                        report_title=report_title,
+                        materials_dir=materials_dir,
+                        project_context=project_context,
+                        existing_state=state,  # 用户填的值都在 filled_data 里
+                    )
             else:
                 # 🔴 Fresh start: run full LangGraph workflow
                 wf_state = await workflow_runner.start(
@@ -2648,6 +3036,9 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                     state["_workflow_logs"] = wf_state.get("logs", _shared_logs)
                     state["_wf_thread_id"] = wf_state.get("_thread_id", "")
                     session.state = state
+                    # 🔴 立即落盘：`_wf_thread_id` 是新旧进程找到同一个 SQLite 暂停点的钥匙，
+                    #    不写 sessions.json 的话，重启后照样 resume 不了（2026-11-02）。
+                    report_service._save_sessions()
                     return
                 elif isinstance(interrupt_data, dict) and interrupt_data.get("type") == "gap_review":
                     # 🔴 生成后缺口核对：正文里 agent 用遁词圆过去的那些地方，请用户补真实内容。
@@ -2664,6 +3055,7 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                     state["_workflow_logs"] = wf_state.get("logs", _shared_logs)
                     _shared_logs.append(f"⏸️ 正文有 {len(_gaps)} 处缺少素材支撑，请补充或确认保持")
                     session.state = state
+                    report_service._save_sessions()
                     return
                 elif isinstance(interrupt_data, dict) and interrupt_data.get("type") == "human_review":
                     # 🔴 人工复核检查点：章节被推入人工队列，暂停等待前端提交意见/审批
@@ -2679,6 +3071,7 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
                     _shared_logs.append(f"⏸️ {len(interrupt_data.get('chapters',[]))} 个章节需人工复核（{ch_list}），请查看违规并提交意见/审批后继续")
                     state["_workflow_logs"] = _shared_logs
                     session.state = state
+                    report_service._save_sessions()
                     try:
                         await ws_manager.send(sid, "phase_change", {
                             "phase": "human_review",
@@ -2748,8 +3141,13 @@ async def _run_workflow_bg(sid: str, session, uploaded: list, report_title: str,
             session.state = state
 
             # Persist to DB
+            # 🔴 不要再在这里 `from ... import report_service` —— 函数里只要有任何一处
+            #    给 `report_service` 赋值/导入，Python 就把它当**局部变量**，
+            #    前面中断分支的 `report_service._save_sessions()` 会抛
+            #    `UnboundLocalError: cannot access local variable 'report_service'`
+            #    （2026-11-03 线上复垦实测：弹窗一暂停就整单失败）。
+            #    模块顶部已导入，直接用全局即可。
             try:
-                from app.services.report_service import report_service
                 await report_service.persist_report(session)
             except: pass
 

@@ -1243,8 +1243,25 @@ _MAX_SPLITS_PER_SENT = 2
 # 🔴 后半句以这些词开头时**不断**：那是目的/结果状语从句，
 #    断了会得到「……为及时复垦利用被损毁的土地。促进土地集约节约利用。」这种碎句
 #    （实测 2026-10-31 第1章）。
-_NO_SPLIT_HEADS = ("促进", "实现", "达到", "确保", "保障", "推动", "提高", "增强",
-                   "使", "从而", "进而", "最终", "确保", "防止", "避免")
+_NO_SPLIT_HEADS = (
+    # 结果/目的类：切在它们前面，后半句就成了没主语的残句
+    "促进", "实现", "达到", "确保", "保障", "推动", "提高", "增强",
+    "使", "从而", "进而", "最终", "防止", "避免",
+    # 🔴 状语/介词短语开头（2026-11-02 实测）：在逗号处切开会产出
+    #    「…进行适宜性评价。结合当地国土空间规划确定的用途。」这种残句 ——
+    #    第 8 轮产物 7 章共 24 处。**宁可留长句，也不要语法不通的短句**。
+    "结合", "按", "依照", "根据", "依据", "通过", "对于", "针对",
+    "鉴于", "随着", "基于", "本着", "围绕", "经过", "由", "从", "在", "对",
+    # 🔴 动宾续写（2026-11-03 对照人工稿实测）：这些词开头的半句是上一句谓语的
+    #    延续（「…损毁程度。合理确定复垦时间」「…使用期满后。立即组织施工」），
+    #    切成独立句就是病句。宁可留长句。
+    "合理", "恢复", "减少", "立即", "完成", "组织", "开展", "编制", "实施",
+    "采取", "采用", "进行", "形成", "构成", "确定", "制定", "提出", "建立",
+    "加强", "严格", "落实", "做好", "完善", "规范", "健全", "统一", "优化",
+    "缓解", "减轻", "保证", "维护", "保持", "满足", "符合", "控制", "降低",
+    "增加", "扩大", "缩小", "分析", "研究", "推进", "深化", "执行", "遵守",
+    "将", "把", "与", "和", "及", "或", "等",
+)
 
 _OPEN_BRACKETS = "「『（(《《【“"
 _CLOSE_BRACKETS = "」』）)）》】”"
@@ -1308,6 +1325,173 @@ def split_long_sentences(md: str, max_len: int = _MAX_SENT_LEN):
     return "\n".join(out_lines), n
 
 
+# 🔴 断句的「事后修补」（2026-11-03 对照人工稿）：
+#    旧版断句把逗号直接换成句号，后半句以动词/动宾开头时就是病句：
+#    「并根据临时用地的损毁时间、损毁性质和损毁程度。合理确定复垦时间…」
+#    断句逻辑已经补了「哪些词开头不能断」，但**已经生成/已落库的文本**仍带病；
+#    这里做一次确定性回并：句号后面紧跟下列续写词时，把句号还原成逗号。
+_MERGE_HEADS = (
+    "合理", "恢复", "减少", "立即", "完成", "组织", "开展", "编制", "实施",
+    "采取", "采用", "进行", "形成", "构成", "确定", "制定", "提出", "建立",
+    "加强", "严格", "落实", "做好", "缓解", "减轻", "维护", "保持", "满足",
+    "符合", "控制", "降低", "增加", "扩大", "缩小", "推进", "深化", "执行",
+    "遵守", "保证",
+)
+
+
+def merge_broken_sentences(md: str):
+    """把被断句切坏的「…。动词…」回并成「…，动词…」，返回 `(新文本, 处数)`。
+
+    只处理同一段落内的正文行；标题/表格/图片行原样保留。
+    """
+    if not md:
+        return md, 0
+    n = 0
+    out = []
+    for line in md.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("|") or s.startswith("!["):
+            out.append(line)
+            continue
+        for h in _MERGE_HEADS:
+            pat = "。" + h
+            if pat in line:
+                k = line.count(pat)
+                line = line.replace(pat, "，" + h)
+                n += k
+        out.append(line)
+    return "\n".join(out), n
+
+
+# 面积单位换算自检：模型常把「22215 平方米，折合 2.3248 公顷」写错
+# （用总面积而不是分项面积）。这里按 1 公顷 = 10000 ㎡、1 亩 = 666.6667 ㎡ 重算。
+_AREA_CONV_RE = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(?:平方米|㎡|m2|m²)\s*[，,]?\s*'
+    r'(?:折合|约合|约|合|相当于)?\s*'
+    r'(\d+(?:\.\d+)?)\s*(公顷|hm2|hm²|ha|亩)'
+)
+
+
+def fix_area_conversions(md: str):
+    """修正「X 平方米，折合 Y 公顷/亩」里的换算错误，返回 `(新文本, 处数)`。"""
+    if not md:
+        return md, 0
+    n = 0
+
+    def _repl(m):
+        nonlocal n
+        raw, conv, unit = m.group(1), float(m.group(2)), m.group(3)
+        try:
+            v = float(raw)
+        except ValueError:
+            return m.group(0)
+        if v <= 0:
+            return m.group(0)
+        right = v / 10000.0 if unit in ("公顷", "hm2", "hm²", "ha") else v / 666.6667
+        # 换算正确（误差 < 0.5% 或 1 个末位）就不动
+        if abs(conv - right) <= max(0.0005, right * 0.005):
+            return m.group(0)
+        n += 1
+        return m.group(0).replace(m.group(2), f"{right:.4f}".rstrip("0").rstrip("."), 1)
+
+    return _AREA_CONV_RE.sub(_repl, md), n
+
+
+# 「23248 平方米，合 2.3248 公顷」「0.2325 公顷（合 2325 平方米）」——
+# 基础信息里同句换算属于多余解释（业主 2026-11-04：「这些基础资料不需要有
+# 多余的场地大小解释」）。正文保留第一个面积，删掉「，合…」这段。
+_AREA_EXPL_RE = re.compile(
+    r'(\d[\d,.]*\s*(?:平方米|㎡|m2|m²|公顷|hm2|hm²|ha|亩))'
+    r'\s*[，,（(]?\s*(?:折合|约合|合|相当于)\s*'
+    r'\d[\d,.]*\s*(?:平方米|㎡|m2|m²|公顷|hm2|hm²|ha|亩)\s*[）)]?'
+)
+
+
+_PROJECT_NAME_PLAN_RE = re.compile(
+    r'(项目名称\s*[：:]\s*)([^。；\n]*?)(?:土地复垦方案|复垦方案)(?=[。；\n]|$)')
+
+
+def strip_project_name_plan_suffix(md: str):
+    """「项目名称：XX工程三井组临时用地土地复垦方案」→ 去掉方案后缀。
+
+    方案名是报告标题，不是项目名（业主 2026-11-04）。只改「项目名称：」字段，
+    正文里正常的「编制…土地复垦方案」不动。
+    """
+    if not md:
+        return md, 0
+    n = 0
+
+    def _repl(m):
+        nonlocal n
+        n += 1
+        return m.group(1) + m.group(2).rstrip(" ，,、")
+
+    return _PROJECT_NAME_PLAN_RE.sub(_repl, md), n
+
+
+def drop_area_explanations(md: str):
+    """删掉同句的面积换算解释，只保留第一个面积。返回 (新文本, 处数)。"""
+    if not md:
+        return md, 0
+    n = 0
+    out = []
+    for line in md.splitlines():
+        # 表格里的换算列/单元格保留（表头要求时是有用的）
+        if line.lstrip().startswith("|"):
+            out.append(line)
+            continue
+        new = _AREA_EXPL_RE.sub(lambda m: m.group(1), line)
+        if new != line:
+            n += 1
+            # 清掉替换后可能留下的「，，」「，。」之类
+            new = re.sub(r'[，,]\s*([。；;])', r'\1', new)
+            new = re.sub(r'[，,]\s*[，,]', '，', new)
+        out.append(new)
+    return "\n".join(out), n
+
+
+# 「复垦区总面积为 2.3248 公顷」——后面通常紧跟「包括永久性建设用地 8.0762 公顷
+# 和临时用地 2.3248 公顷」，总数应为两者之和。实测模型会拿临时用地面积当总数
+# （2026-11-04 测试稿：总数 2.3248，分项却是 8.0762 + 2.3248）。
+_RE_AREA_TOTAL = re.compile(
+    r'(复垦区总面积[^。；\n]{0,8}?)(\d+(?:\.\d+)?)(\s*(?:公顷|hm2|hm²|hm))')
+
+
+def fix_reclamation_area_total(md: str, filled: dict):
+    """复垦区总面积按资料改正（= 永久性建设用地 + 临时用地）。返回 (新文本, 处数)。
+
+    `filled` 没有 project_area_m2 / 两项面积时**不动**——没有依据就不改数。
+    """
+    if not md or not isinstance(filled, dict):
+        return md, 0
+    try:
+        total_m2 = float(str(filled.get("project_area_m2") or 0).replace(",", ""))
+    except (TypeError, ValueError):
+        total_m2 = 0.0
+    if total_m2 <= 0:
+        try:
+            total_m2 = (float(str(filled.get("permanent_area_m2") or 0))
+                        + float(str(filled.get("area_m2") or 0)))
+        except (TypeError, ValueError):
+            total_m2 = 0.0
+    if total_m2 <= 0:
+        return md, 0
+    total_ha = f"{total_m2 / 10000.0:.4f}"
+    n = 0
+    out = []
+    for line in md.splitlines():
+        if line.lstrip().startswith("|") or "复垦区总面积" not in line:
+            out.append(line)
+            continue
+        new = _RE_AREA_TOTAL.sub(
+            lambda m: f"{m.group(1)}{total_ha}{m.group(3)}", line)
+        if new != line:
+            n += 1
+        out.append(new)
+    return "\n".join(out), n
+
+
+
 # 🔴 前言里引用不存在的表（业主 2026-10-31 实测：「上表所列临时用地总面积…」
 #    但第1章按新口径**不排表**，读者找不到「上表」）。
 _TABLE_REF_RE = re.compile(
@@ -1328,23 +1512,338 @@ def strip_table_references(md: str) -> str:
     return ''.join(out)
 
 
-def polish_chapters(chapters: Dict[Any, Dict[str, Any]], domain: str | None = None):
-    """装配前的确定性润色：去重复段 + 断长句（复垦第1章另去「上表」引用）。
+_UNIT_NUM_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(公顷|hm2|hm²|平方米|㎡|亩|万元)')
+_DOC_NO_RE = re.compile(r'[一-龥]{2,10}〔\d{4}〕\s*\d+\s*号')
+_PLACE_NAME_RE = re.compile(r'[一-龥]{2,10}(?:村|镇|街道|社区|小区|大道|路|苑|安置区)')
+_PLACE_STOP = {
+    "项目区", "复垦区", "临时用地", "施工便道", "道路", "公路", "铁路",
+    "农村道路", "生产路", "田间路", "小区", "社区", "行政区", "开发区",
+    # 泛指村组，不是具体地名（「所在村安排1人管护」里的「所在村」不能当地名换）
+    "所在村", "本村", "该村", "各村", "每个村", "全村", "邻村", "周边村",
+    "行政村", "自然村", "村组", "村民组", "项目村",
+    # 道路类型不是地名（「G2高速公路」里只该保留 G2，不能把「速公路」当村名换掉）
+    "高速公路", "速公路", "高速", "省道", "国道", "干道", "村道", "乡道",
+    "主干道", "次干道", "环路", "大道",
+    # 🔴 通用名词（2026-11-03 对照人工稿实测）：这些词以「村/镇/街道/路」收尾，
+    #    会被地名正则误捕，替换成项目地址后就成了病句 ——
+    #    「充分听取当地乡镇（街道）」→「淮安市淮安区（街道）」；
+    #    「0.5km 外的农村道路」→「0.5km 淮安市淮安区」；
+    #    「田间道路明确专人管护」→「淮安市淮安区明确专人管护」；
+    #    「自然资源、农业农村、水利」→「自然资源、淮安市淮安区、水利」。
+    "当地乡镇", "乡镇", "城镇", "农业农村", "农田", "田间道路", "农村道路",
+    "周边农田原有道路", "原有道路", "原有田间道路", "田间生产道路",
+    "交通运输", "交通道路", "市政道路", "乡村道路", "生产道路",
+}
+# 候选地名里出现下列词素 → 一定不是专名，不做替换
+_PLACE_BAD_PARTS = (
+    "当地", "原有", "周边", "其他", "相关", "各级", "各个", "乡镇", "城镇",
+    "城市", "农村", "农田", "田间", "道路", "公路", "交通", "水利", "电力",
+    "施工", "生产", "行政", "开发", "农业", "乡村", "主要", "部分",
+)
+_VILLAGE_PAIR_RE = re.compile(
+    r'[一-龥]{2,8}(?:镇|村|街道|社区)到[一-龥]{2,8}(?:镇|村|街道|社区)之间')
+_PLACE_LEAD = ("本项目位于", "项目位于", "位于", "地处", "本项目", "项目",
+               "工程位于", "本工程", "在", "于")
+
+
+_DOC_LEAD = ("批复文号为", "批复文号", "文号为", "文号", "编号为", "编号",
+             "批复为", "批复", "同意", "为")
+
+
+def _trim_doc_no(tok: str) -> str:
+    """去掉文号前粘上的标签（「批复文号为苏复垦〔2023〕8号」→「苏复垦〔2023〕8号」）。"""
+    t = str(tok or "")
+    changed = True
+    while changed:
+        changed = False
+        for p in _DOC_LEAD:
+            if t.startswith(p) and len(t) - len(p) >= 5:
+                t = t[len(p):]
+                changed = True
+    return t
+
+
+def _trim_place(tok: str) -> str:
+    """去掉地名前面粘上的动词/指示词（「项目位于明远路」→「明远路」）。"""
+    t = str(tok or "")
+    changed = True
+    while changed:
+        changed = False
+        for p in _PLACE_LEAD:
+            if t.startswith(p) and len(t) - len(p) >= 3:
+                t = t[len(p):]
+                changed = True
+    return t
+
+
+def _num_any(v) -> float:
+    try:
+        return float(str(v).replace(",", "").replace("，", "").strip())
+    except Exception:
+        return 0.0
+
+
+def scrub_sample_facts(md: str, filled: dict, sample_text: str,
+                       user_text: str = ""):
+    """把范文里残留的**数字/地名/文号**换成用户资料；用户没有就写「待补充」。
+
+    业主 2026-11-02：「范文的数字、地名、面积、文号全部用用户提供的新报告的资料
+    填充，如果没有让人工介入填写，人工选择跳过的，就是占位文字『待补充』。」
+
+    只处理三类可判定对象，避免误伤正文：
+      · 带单位的数量（公顷/平方米/㎡/亩/万元）—— 范文数值而用户资料里没有的；
+      · 行政区/地名（…村/镇/街道/路/苑 等）—— 范文独有、用户资料里没有的；
+      · 项目文号（XX〔2026〕1号）—— 范文独有、且**不在书名号内**的（政策引用不动）。
+
+    返回 `(新文本, 替换处数)`。
+    """
+    if not md or not sample_text:
+        return md, 0
+    import json as _json
+    filled = filled or {}
+    user_corpus = _json.dumps(filled, ensure_ascii=False) + "\n" + str(user_text or "")
+    sample_text = str(sample_text)
+    loc = str(filled.get("location") or "").strip() or "项目区"
+    doc_default = str(filled.get("doc_reference") or "").strip() or "待补充"
+    area_m2 = _num_any(filled.get("area_m2"))
+    area_mu = _num_any(filled.get("area_mu")) or (area_m2 / 666.6667 if area_m2 else 0.0)
+    invest = _num_any(filled.get("project_investment"))
+    _lat = _num_any(filled.get("_centroid_lat"))
+    _lon = _num_any(filled.get("_centroid_lon"))
+    n = 0
+
+    # ── ⓪ 坐标：模型常把「33°16′33.45″」写成 `33163345`（符号丢失、数字连成串）──
+    _bad_coord = re.compile(
+        r'北纬\s*[^。；，]{0,20}?\d{7,}\s*[、,，]\s*东经\s*[^。；，]{0,20}?\d{7,}')
+
+    def _coord_repl(m):
+        nonlocal n
+        n += 1
+        if _lat and _lon:
+            return f"北纬 {_lat:.6f}°、东经 {_lon:.6f}°"
+        return "项目区范围内"
+
+    md = _bad_coord.sub(_coord_repl, md)
+
+    # ── ⓪.5 「A镇到B镇之间」：整段换成项目区范围，别把两个镇名各换一遍 ──
+    def _pair_repl(m):
+        nonlocal n
+        tok = m.group(0)
+        if tok in user_corpus:
+            return tok
+        n += 1
+        return "项目区范围内"
+
+    md = _VILLAGE_PAIR_RE.sub(_pair_repl, md)
+
+    # ── ① 项目文号 ──
+    def _doc_repl(m):
+        nonlocal n
+        tok = m.group(0)
+        core = _trim_doc_no(tok)
+        if core in user_corpus or core not in sample_text:
+            return tok
+        # 「批复文号为XX〔2023〕8号」—— 已经明确是项目文号，直接换
+        if core != tok:
+            n += 1
+            return tok.replace(core, doc_default, 1)
+        _prev = md[max(0, m.start() - 40):m.start()]
+        # 政策文号常见写法：《…通知》（自然资规〔2019〕1号）—— 紧跟在
+        # 「（/《」后面的不是项目文号，绝不能换。
+        if _prev.rstrip().endswith(("（", "(", "《")):
+            return tok
+        # 只有**项目批复语境**里的文号才换（批复/文号/批准/备案/核准/许可/同意）；
+        # 正文里随口引用的政策文号保持原样。
+        if not re.search(r'(批复|文号|批准|备案|核准|许可|同意)', _prev[-25:]):
+            return tok
+        n += 1
+        return doc_default
+
+    md = _DOC_NO_RE.sub(_doc_repl, md)
+
+    # ── ② 地名 ──
+    def _is_place(t: str) -> bool:
+        """候选串是不是**专名**：以村/镇/街道/路等收尾，且不含通用词素。"""
+        if len(t) < 3 or t in _PLACE_STOP:
+            return False
+        return not any(bad in t for bad in _PLACE_BAD_PARTS)
+
+    _sample_places = {
+        _trim_place(t) for t in _PLACE_NAME_RE.findall(sample_text)
+        if _is_place(_trim_place(t))
+    }
+
+    def _place_repl(m):
+        nonlocal n
+        tok = m.group(0)
+        base = _trim_place(tok)
+        if (base in _PLACE_STOP or tok in user_corpus or base in user_corpus
+                or base not in _sample_places):
+            return tok
+        n += 1
+        # 「项目位于明远路」→ 只换地名本身，保留前面的动词
+        return tok.replace(base, loc, 1) if base != tok else loc
+
+    md = _PLACE_NAME_RE.sub(_place_repl, md)
+
+    # ── ③ 带单位的数量 ──
+    def _num_repl(m):
+        nonlocal n
+        num, unit = m.group(1), m.group(2)
+        # 🔴 「1.61 万元/亩」是**单位面积投资**，不是项目总投资 ——
+        #    2026-11-03 测试稿：这个 1.61 被换成了项目总投资 651003.92。
+        _tail = m.string[m.end():m.end() + 6].lstrip()
+        if unit == "万元" and (_tail.startswith("/亩") or _tail.startswith("/公顷")
+                               or _tail.startswith("/hm")):
+            return m.group(0)
+        if num in user_corpus or num not in sample_text:
+            return m.group(0)
+        val = ""
+        if unit in ("公顷", "hm2", "hm²") and area_m2 > 0:
+            val = f"{area_m2 / 10000.0:.4f}"
+        elif unit in ("平方米", "㎡") and area_m2 > 0:
+            val = f"{area_m2:.0f}"
+        elif unit == "亩" and area_mu > 0:
+            val = f"{area_mu:.2f}"
+        elif unit == "万元" and invest > 0:
+            val = f"{invest:.2f}"
+        if not val:
+            val = "待补充"
+        n += 1
+        return f"{val} {unit}"
+
+    md = _UNIT_NUM_RE.sub(_num_repl, md)
+    return md, n
+
+
+def clean_broken_placeholders(md: str):
+    """清掉模型把「待补充」塞进句子后造成的病句（保留正常的字段级占位）。
+
+    2026-11-02 线上实测：
+        「在待补充之间」→「在项目区范围内」
+        「待补充四通八达」→「项目区周边四通八达」
+        「G2待补充」「309待补充，」→ 去掉多余的待补充，保留编号
+    返回 `(新文本, 清理处数)`。
+    """
+    if not md or "待补充" not in md:
+        return md, 0
+    n = 0
+    for pat, repl in (
+        (r'在待补充之间', '在项目区范围内'),
+        (r'待补充(?=四通八达)', '项目区周边'),
+        (r'(?<=[A-Za-z0-9])待补充', ''),
+        (r'待补充(?=[、，。；）)])', ''),
+    ):
+        md, k = re.subn(pat, repl, md)
+        n += k
+    return md, n
+
+
+def ensure_section_headings(md: str, chapter_no: int, domain: str = "reclamation"):
+    """补齐被模型漏掉的一级小节标题（如「4.5 水土资源平衡分析」）。
+
+    🔴 2026-11-03 对照人工稿实测：成稿直接从 4.4.4 跳到 4.5.1，
+       「4.5」这一级标题缺失 —— 目录里 4.5.1 挂到了 4.4 下面。
+       只补 `X.Y` 级（更深一级本来就该存在），不动正文。
+    """
+    if not md or domain != "reclamation":
+        return md, 0
+    try:
+        from app.agent.reclamation_definitions import RECLAMATION_CHAPTER_DEFINITIONS
+        secs = ((RECLAMATION_CHAPTER_DEFINITIONS.get(int(chapter_no)) or {})
+                .get("sections") or [])
+    except Exception:
+        return md, 0
+    lines = md.splitlines()
+    n = 0
+    for sec in secs:
+        m = re.match(r'^(\d+(?:\.\d+)*)\s+(.+)$', str(sec).strip())
+        if not m or m.group(1).count(".") != 1:
+            continue
+        num, title = m.group(1), m.group(2).strip()
+        # 🔴 复垦参照件的层级整体下移一格（`## 5.1` 渲染前已是 `### 5.1`），
+        #    只认 `##` 会把已有的 5.1 当成缺失、再插一条重复标题 ——
+        #    随后整节被去重逻辑删掉（2026-11-03 测试稿 5.1.1~5.1.6 全没了）。
+        has_h2 = any(re.match(r'^#{2,4}\s*' + re.escape(num) + r'(?!\.)\s', ln.strip())
+                     for ln in lines)
+        if has_h2:
+            continue
+        for i, ln in enumerate(lines):
+            if re.match(r'^#{3,4}\s*' + re.escape(num) + r'\.', ln.strip()):
+                lines.insert(i, f"## {num} {title}")
+                n += 1
+                break
+    return "\n".join(lines), n
+
+
+def polish_chapters(chapters: Dict[Any, Dict[str, Any]], domain: str | None = None,
+                    filled: Dict[str, Any] | None = None,
+                    sample_text: str = "", user_text: str = ""):
+    """装配前的确定性润色：去重复段 + 断长句 + 范文残留清理。
 
     返回 `(chapters, 统计dict)`。
     """
     chapters, dup_n = dedup_chapters(chapters)
     split_n = 0
-    for ch in chapters.values():
+    scrub_n = 0
+    ph_n = 0
+    merge_n = 0
+    conv_n = 0
+    area_expl_n = 0
+    pname_n = 0
+    area_total_n = 0
+    sec_n = 0
+    for _ch_no, ch in chapters.items():
         if not isinstance(ch, dict):
             continue
         md = str(ch.get("markdown") or "")
         if not md:
             continue
+        try:
+            _md0, _sn0 = ensure_section_headings(md, int(_ch_no), domain or "")
+        except (TypeError, ValueError):
+            _md0, _sn0 = md, 0
+        if _sn0:
+            ch["markdown"] = md = _md0
+            sec_n += _sn0
         new_md, k = split_long_sentences(md)
         if k:
             ch["markdown"] = new_md
             split_n += k
+        # 🔴 范文残留：数字/地名/文号 → 用户资料或「待补充」
+        if sample_text:
+            _md2, _sn = scrub_sample_facts(ch.get("markdown") or "", filled or {},
+                                           sample_text, user_text)
+            if _sn:
+                ch["markdown"] = _md2
+                scrub_n += _sn
+        _md3, _pn = clean_broken_placeholders(ch.get("markdown") or "")
+        if _pn:
+            ch["markdown"] = _md3
+            ph_n += _pn
+        # 🔴 断句留下的病句回并 + 面积换算自检
+        _md4, _mn = merge_broken_sentences(ch.get("markdown") or "")
+        if _mn:
+            ch["markdown"] = _md4
+            merge_n += _mn
+        _md5, _cn = fix_area_conversions(ch.get("markdown") or "")
+        if _cn:
+            ch["markdown"] = _md5
+            conv_n += _cn
+        _md6, _en = drop_area_explanations(ch.get("markdown") or "")
+        if _en:
+            ch["markdown"] = _md6
+            area_expl_n += _en
+        _md7, _qn = strip_project_name_plan_suffix(ch.get("markdown") or "")
+        if _qn:
+            ch["markdown"] = _md7
+            pname_n += _qn
+        # 🔴 复垦区总面积 = 永久性建设用地 + 临时用地（模型常拿临时用地面积当总数）
+        if domain == "reclamation":
+            _md8, _tn = fix_reclamation_area_total(ch.get("markdown") or "", filled or {})
+            if _tn:
+                ch["markdown"] = _md8
+                area_total_n += _tn
     # 🔴 复垦第1章**没有表** → 正文里的「上表/如表」引用一律清掉（否则读者找不到表）
     if domain == "reclamation":
         _ch1 = chapters.get(1) or chapters.get("1")
@@ -1353,4 +1852,9 @@ def polish_chapters(chapters: Dict[Any, Dict[str, Any]], domain: str | None = No
             _new = strip_table_references(_md)
             if _new != _md:
                 _ch1["markdown"] = _new
-    return chapters, {"dedup": dup_n, "split": split_n}
+    return chapters, {"dedup": dup_n, "split": split_n,
+                      "scrub": scrub_n, "placeholder_clean": ph_n,
+                      "merge": merge_n, "area_fix": conv_n,
+                      "area_expl": area_expl_n, "pname": pname_n,
+                      "area_total": area_total_n,
+                      "sections_added": sec_n}

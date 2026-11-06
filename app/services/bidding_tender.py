@@ -1,0 +1,279 @@
+# -*- coding: utf-8 -*-
+"""招标文件解析 + 投标人员抽取（投标文件生成的前半段）。
+
+业主 2026-11-05 的写法口径：
+  1. 先熟读招标文件：项目信息、资格条件、人员要求、评分办法、**投标文件格式在哪一章**；
+  2. 按招标要求的格式逐项出投标文件（不同项目格式章节不同，不能写死）；
+  3. 人员从公司人员库里按招标要求**随机抽**（负责人1 + 组员3 的最低配置），
+     并带上职称证书/社保证明等图片；
+  4. 人工案例里比招标格式多出来的内容（业绩、体系认证、人员证书、技术方案等）
+     按用户确认的清单加入。
+
+本模块只做「读懂招标文件 + 选人」，生成 docx 见 `bidding_bid_builder.py`。
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 文本抽取
+# ═══════════════════════════════════════════════════════════════
+def extract_text(path: str | Path) -> str:
+    p = Path(str(path))
+    suffix = p.suffix.lower()
+    try:
+        if suffix == ".docx":
+            from docx import Document
+            d = Document(str(p))
+            parts = [x.text.strip() for x in d.paragraphs if x.text.strip()]
+            for tb in d.tables:
+                for row in tb.rows:
+                    parts.append("\t".join(c.text.strip() for c in row.cells))
+            return "\n".join(parts)
+        if suffix == ".pdf":
+            import fitz
+            with fitz.open(str(p)) as d:
+                return "\n".join(pg.get_text() for pg in d)
+        if suffix == ".doc":
+            import subprocess
+            for cmd in (["textutil", "-convert", "txt", "-stdout", str(p)],
+                        ["antiword", str(p)],
+                        ["libreoffice", "--headless", "--convert-to", "txt",
+                         "--outdir", "/tmp", str(p)]):
+                try:
+                    r = subprocess.run(cmd, capture_output=True, timeout=40)
+                    out = (r.stdout or b"").decode("utf-8", "ignore")
+                    if out.strip():
+                        return out
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"[招标解析] 文本抽取失败 {p}: {e}")
+    return ""
+
+
+def _clean(s: str) -> str:
+    return re.sub(r'[ \t　]+', " ", str(s or "")).strip()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 招标文件解析
+# ═══════════════════════════════════════════════════════════════
+_UNIT = r'([0-9]+(?:\.[0-9]+)?)\s*万元'
+
+
+def parse_tender(path: str | Path) -> Dict[str, Any]:
+    """招标文件 → 结构化要求（项目信息/资格/人员/评分/投标文件格式）。"""
+    text = extract_text(path)
+    lines = [_clean(x) for x in text.splitlines()]
+    blob = "\n".join(lines)
+
+    def grab(pat: str, default: str = "") -> str:
+        m = re.search(pat, blob)
+        return _clean(m.group(1)) if m else default
+
+    # ── 项目信息 ──
+    project_name = grab(r'项目名称[:：]\s*(.+)')
+    if not project_name:
+        # 封面式：第一行就是项目名
+        for ln in lines[:20]:
+            if ln and ("项目" in ln and len(ln) > 8 and "编号" not in ln):
+                project_name = ln
+                break
+    project_no = grab(r'项目编号[:：]\s*([^\s，,]+)')
+    purchaser = grab(r'采\s*购\s*人[:：]\s*(.+)')
+    agency = grab(r'采购代理机构[:：]\s*(.+)')
+    budget = grab(r'本项目预算为[:：]?\s*' + _UNIT)
+    max_price = grab(r'最高限价[为:：]?\s*' + _UNIT) or budget
+
+    # ── 资格条件（2.1 段，①~⑦）──
+    qualifications: List[str] = []
+    q0 = blob.find("应具备下列资格条件")
+    if q0 >= 0:
+        seg = blob[q0:q0 + 1200]
+        for m in re.finditer(r'([①-⑦])\s*([^\n]{2,120})', seg):
+            s = _clean(m.group(2))
+            if s and s not in qualifications:
+                qualifications.append(s)
+    if not qualifications:
+        for m in re.finditer(r'([①-⑦])\s*([^\n]{4,80}?(?:资质|证书|信用|联合体)[^\n]{0,40})',
+                             blob):
+            s = _clean(m.group(2))
+            if s and s not in qualifications:
+                qualifications.append(s)
+
+    # ── 人员配置最低要求 ──
+    staff_min: Dict[str, int] = {}
+    m = re.search(r'人员不得少于[:：]?\s*(.{0,80})', blob)
+    if m:
+        seg = m.group(1)
+        for role, n in re.findall(r'(项目负责人|项目组成员|技术负责人|组员)\s*([0-9]+)\s*名', seg):
+            staff_min[role] = int(n)
+    if not staff_min:
+        staff_min = {"项目负责人": 1, "项目组成员": 3}
+
+    # ── 评分办法里的关键口径（只在评审办法那一章里找）──
+    scoring: List[str] = []
+    sc0 = -1
+    for i, ln in enumerate(lines):
+        if re.match(r'^第四章\s*[（(【]?\s*(评审|评标)方法', ln) and not re.search(r'-\s*\d+\s*-$', ln):
+            sc0 = i
+            break
+    if sc0 >= 0:
+        sc_lines = lines[sc0:sc0 + 250]
+        for ln in sc_lines:
+            if re.match(r'^第五章', ln):
+                break
+            if 6 <= len(ln) <= 200 and ln not in scoring:
+                scoring.append(ln)
+
+    # ── 投标文件格式：定位「投标文件格式」所在的章（跳过目录行）──
+    fmt_chapter, fmt_start = "", -1
+    for i, ln in enumerate(lines):
+        if re.search(r'投标文件格式|响应文件格式', ln):
+            # 目录行带页码（- 49 -）的不是正文位置
+            if re.search(r'-\s*\d+\s*-$', ln) or "目\s*录" in ln:
+                continue
+            _nxt = " ".join(lines[i + 1:i + 4])
+            if ("投标文件" in _nxt or "响应文件" in _nxt or "（一）" in _nxt
+                    or ln.startswith("第六章") or ln.startswith("第")):
+                fmt_chapter, fmt_start = ln, i
+                break
+    if fmt_start < 0:
+        for i, ln in enumerate(lines):
+            if ln.startswith("第六章") and re.search(r'-\s*\d+\s*-$', ln) is None:
+                fmt_chapter, fmt_start = ln, i
+                break
+
+    fmt_sections: List[Dict[str, Any]] = []
+    if fmt_start >= 0:
+        seen = set()
+        for ln in lines[fmt_start:fmt_start + 500]:
+            if re.match(r'^第[一二三四五六七八九十]+章', ln) and ln != fmt_chapter:
+                break
+            m = re.match(r'^[（(]\s*([一二三四五六七八九十]+)\s*[)）]\s*([^\n]{2,40})', ln)
+            if m:
+                no, title = m.group(1), _clean(m.group(2))
+                key = (no, title)
+                if key not in seen:
+                    seen.add(key)
+                    fmt_sections.append({"no": no, "title": title, "level": 1})
+                continue
+            m2 = re.match(r'^([0-9]{1,2})[、.．]\s*([^\n]{2,40})$', ln)
+            m3 = re.match(r'^[（(]\s*([0-9]{1,2})\s*[)）]\s*([^\n]{2,40}?)[（(]?格式', ln)
+            if m3:
+                fmt_sections.append({"no": m3.group(1), "title": _clean(m3.group(2)),
+                                     "level": 2})
+                continue
+            if (m2 and fmt_sections
+                    and re.search(r'(表|函|书|清单|说明)$', m2.group(2))
+                    and not re.search(r'(我方|贵方|如果|同意|愿意|承诺)', m2.group(2))):
+                fmt_sections.append({"no": m2.group(1), "title": _clean(m2.group(2)),
+                                     "level": 2})
+
+    # ── 采购内容（第三章 项目技术要求）──
+    scope = ""
+    for i, ln in enumerate(lines):
+        if re.match(r'^第三章\s*(项目技术要求|采购需求|服务要求)', ln) and not re.search(r'-\s*\d+\s*-$', ln):
+            scope = _clean(" ".join(x for x in lines[i + 1:i + 25] if x))[:1200]
+            break
+
+    # ── 其他硬约束 ──
+    no_consortium = "不接受联合体" in blob
+    sme_required = "中小企业" in blob and ("专门面向" in blob or "中小企业声明" in blob)
+
+    return {
+        "source": str(path),
+        "project_name": project_name,
+        "project_no": project_no,
+        "purchaser": purchaser,
+        "agency": agency,
+        "budget_wan": budget,
+        "max_price_wan": max_price,
+        "qualifications": qualifications,
+        "staff_min": staff_min,
+        "scoring_points": scoring,
+        "scope": scope,
+        "format_chapter": fmt_chapter,
+        "format_sections": fmt_sections,
+        "no_consortium": no_consortium,
+        "sme_required": sme_required,
+        "text_chars": len(text),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 人员抽取（满足招标最低配置，随机）
+# ═══════════════════════════════════════════════════════════════
+_SENIOR = ("正高级", "高级")
+_MIDDLE = ("中级", "工程师")
+
+
+def _title_rank(title: str) -> int:
+    t = str(title or "")
+    if "正高级" in t:
+        return 3
+    if "高级" in t:
+        return 2
+    if "中级" in t or t.strip() == "工程师":
+        return 1
+    return 0
+
+
+def _major_ok(major: str, fields=("土地", "测绘", "规划", "国土", "地理")) -> bool:
+    return any(k in str(major or "") for k in fields)
+
+
+def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int = 3,
+                         seed: Optional[int] = None) -> List[Dict[str, Any]]:
+    """按招标最低配置从公司人员库**随机**抽人。
+
+    负责人：土地类/测绘类高级及以上优先，其次任意高级；
+    组员：土地/测绘/规划/国土相关专业，职称不限（优先中级及以上）。
+    """
+    import json
+    import sqlite3
+    from pathlib import Path as _P
+
+    db = _P(__file__).resolve().parents[2] / "data" / "knowledge_base.db"
+    conn = sqlite3.connect(str(db))
+    rows = conn.execute(
+        "select id,name,gender,age,education,major,title,certs from company_personnel "
+        "where company_id=? order by sort_order,id", (company_id,)).fetchall()
+    conn.close()
+    people = [{"id": r[0], "name": r[1], "gender": r[2], "age": r[3], "education": r[4],
+               "major": r[5], "title": r[6],
+               "certs": json.loads(r[7] or "[]") if r[7] else []}
+              for r in rows if r[1]]
+    rng = random.Random(seed)
+
+    # 负责人评分只认「土地类或测绘类」高级职称（规划类只算组员分）
+    seniors = [p for p in people if _title_rank(p["title"]) >= 2
+               and any(k in str(p["major"] or "") for k in ("土地", "测绘"))]
+    if not seniors:
+        seniors = [p for p in people if _title_rank(p["title"]) >= 2]
+    leaders = seniors or [p for p in people
+                          if any(k in str(p["major"] or "") for k in ("土地", "测绘"))]
+    if not leaders:
+        return []
+    chosen = [rng.choice(leaders)]
+    chosen[0]["role"] = "项目负责人"
+
+    pool = [p for p in people if p not in chosen]
+    mid = [p for p in pool if _title_rank(p["title"]) >= 1 and _major_ok(p["major"])]
+    pool = mid or [p for p in pool if _major_ok(p["major"])] or pool
+    for p in rng.sample(pool, min(members, len(pool))):
+        p = dict(p)
+        p["role"] = "项目组成员"
+        chosen.append(p)
+    # 组员按“高级→中级→其他”排序，便于阅读（不改变抽取结果）
+    tail = sorted(chosen[1:], key=lambda p: -_title_rank(p["title"]))
+    return [chosen[0]] + tail

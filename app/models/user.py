@@ -34,6 +34,11 @@ class Company(Base):
     implement_unit = Column(String(255), nullable=True, default="")
     business_license_no = Column(String(100), nullable=True, default="")
     qualification_text = Column(Text, nullable=True, default="")
+    # 报告表「方案编制单位」栏的其余资质信息（模板/统计表导入，2026-11-03）
+    qualification_level = Column(String(50), nullable=True, default="")
+    qualification_authority = Column(String(100), nullable=True, default="")
+    qualification_no = Column(String(100), nullable=True, default="")
+    phone = Column(String(40), nullable=True, default="")
     address = Column(String(255), nullable=True, default="")
     contact = Column(String(100), nullable=True, default="")
 

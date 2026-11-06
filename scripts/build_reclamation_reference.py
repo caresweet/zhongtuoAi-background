@@ -178,6 +178,66 @@ def to_text(lines: List[str]) -> str:
     return md.strip()
 
 
+def swap_sections(md: str, h1: str, h2: str, h3: str) -> str:
+    """交换 h1/h2 两节的正文（标题不动）。
+
+    🔴 源样本第 2 章把「政策文件」和「标准规范」的条目放反了：
+    2.3.2 政策文件 下面是 TD/T、GB/T 规程，2.3.3 标准规范 下面是部委通知。
+    人工稿（井神 11.2）是正确口径，照搬前先换回来，否则成稿编制依据分类是错的。
+    """
+    lines = md.split("\n")
+    idx = {}
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        for key, head in (("a", h1), ("b", h2), ("c", h3)):
+            if s.startswith(head):
+                idx[key] = i
+    if not all(k in idx for k in ("a", "b", "c")):
+        return md
+    a, b, c = idx["a"], idx["b"], idx["c"]
+    body_a = lines[a + 1:b]
+    body_b = lines[b + 1:c]
+    return "\n".join(lines[:a + 1] + body_b + [lines[b]] + body_a + lines[c:])
+
+
+def normalize_ch7_acceptance(md: str) -> str:
+    """把 7.2.4「3）复垦验收」里写死的 4.2/4.8/1 万换成一个计算引擎占位符。
+
+    🔴 源样本三项金额是它自己的市场价；照搬进别的项目后，与表7-5
+    「四 监测与管护费」算出来的数字对不上（实测成稿写 1.94 万，正文却列 10 万）。
+    """
+    start = md.find("3）复垦验收")
+    end = md.find("### 7.2.5")
+    if start < 0 or end <= start:
+        return md
+    block = ("3）复垦验收\n\n"
+             "复垦工作完成后，由复垦义务人委托专业机构开展土壤污染状况调查与耕地质量评定，"
+             "并编制复垦验收报告，相关费用合计{{cost_acceptance}}万元。\n\n")
+    return md[:start] + block + md[end:]
+
+
+def normalize_ch5_thickness(md: str) -> str:
+    """剥离/覆土厚度写死 30cm → 设计参数占位符（各项目 0.20/0.30 不同）。"""
+    md = md.replace(
+        "表土剥离厚度为30cm，表土堆放高度约2.5m，堆放过程中应避免污染及水土流失，表土覆盖厚度为30cm。",
+        "表土剥离厚度为{{topsoil_cm}}cm，表土堆放高度约2.5m，"
+        "堆放过程中应避免污染及水土流失，表土覆盖厚度为{{topsoil_cm}}cm。")
+    md = md.replace(
+        "将先期剥离的表层熟土均匀回覆至临时用地范围内耕地上，覆土厚度为30cm。",
+        "将先期剥离的表层熟土均匀回覆至临时用地范围内耕地上，覆土厚度为{{topsoil_cm}}cm。")
+    return md
+
+
+def normalize_ch5_subheads(md: str) -> str:
+    """5.1.x 在源 docx 里是正文样式，渲染出来不在目录里 → 提升为三级标题。"""
+    out = []
+    for ln in md.split("\n"):
+        s = ln.strip()
+        m = re.match(r'^(\d+\.\d+\.\d+)\s*(.+)$', s)
+        out.append(f"### {m.group(1)} {m.group(2)}" if (m and not s.startswith("#")) else ln)
+    return "\n".join(out)
+
+
 def main() -> int:
     src = Path(SRC_DOCX)
     if not src.exists():
@@ -196,6 +256,14 @@ def main() -> int:
         md = to_text(raw[n]["lines"])
         md = _apply(TOKEN_MAP, md)
         md = _apply(NUMERIC_TOKEN_MAP, md)
+        if n == 2:
+            md = swap_sections(md, "### 2.3.2 政策文件",
+                               "### 2.3.3 标准规范", "### 2.3.4 其他技术资料")
+        if n == 7:
+            md = normalize_ch7_acceptance(md)
+        if n == 5:
+            md = normalize_ch5_thickness(md)
+            md = normalize_ch5_subheads(md)
         title = raw[n]["lines"][0][2:].strip()
         title = re.sub(r'^\d+\s+', '', title)
         chapters[str(n)] = {

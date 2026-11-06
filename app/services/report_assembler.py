@@ -12,7 +12,7 @@ from typing import Dict, List, Any, Optional
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from lxml import etree
@@ -20,7 +20,7 @@ from app.agent.chapter_catalog import (
     all_chapters, total_chapters, chapter_title,
     has_review_table, appendix_chapter_no, appendix_kind,
     uses_company_archive_images,
-    report_kind_name, cover_type_line, cover_fallback_title,
+    report_kind_name, cover_fallback_title,
     front_matter_labels,
     front_matter_order,
     cover_org_value,
@@ -30,6 +30,8 @@ from app.agent.chapter_catalog import (
     has_questionnaire_tables,
     injects_audit_comments,
     report_form_chapter_no,
+    request_letter_chapter_no,
+    figures_chapter_no,
     body_image_anchor,
     typography,
     chapter_heading_text, chapter_title_own_page, is_chapter_heading_text,
@@ -420,6 +422,188 @@ _PDF_DOC_LABELS = [
 ]
 
 
+def demote_deep_headings(md: str) -> tuple:
+    """把**四级及更深**的编号标题降成正文引导「n）标题」。
+
+    业主口径（2026-11-04）：「最多不要有四级标题，我更倾向于 1）2）3）这种」。
+    复垦模板里 4.4.2.1～4.4.2.5 这种四段编号，不再做成标题，改成加粗引导行。
+    返回 `(新文本, 处数)`。
+    """
+    n = 0
+
+    def _rep(m):
+        nonlocal n
+        n += 1
+        num, title = m.group(1), m.group(2).strip()
+        return f"{num.rsplit('.', 1)[-1]}）{title}"
+
+    out = re.sub(r'^#{2,6}\s*(\d+(?:\.\d+){3,})\s*(.+)$', _rep, str(md or ""),
+                 flags=re.MULTILINE)
+    return out, n
+
+
+def align_headings_to_template(md: str, allowed: dict) -> tuple:
+    """把章节标题对齐模板：编号在模板里的**改成模板标题**，不在的降为「n）」引导行。
+
+    模型常自行加小节（实测：模板 3.1 项目简介下没有 3.1.5～3.1.7，
+    5.1 下没有 5.1.2～5.1.6），也会把 5.1.1 写成别的名（模板是「复垦质量要求」，
+    模型写成「清理工程标准」）。模板有画像时逐条对齐，成稿目录才和人工报告一致。
+    `allowed` 为 `{编号: 模板标题}`。返回 `(新文本, 调整处数)`。
+    """
+    if not allowed:
+        return md, 0
+    n = 0
+    _text = str(md or "")
+    existing = set(re.findall(r'^#{2,6}\s*(\d+(?:\.\d+)+)\s', _text, flags=re.MULTILINE))
+    title_to_no = {str(v).strip(): k for k, v in allowed.items() if str(v).strip()}
+
+    def _rep(m):
+        nonlocal n
+        hashes, num, title = m.group(1), m.group(2), m.group(3).strip()
+        want = str(allowed.get(num) or "").strip()
+        if want:
+            new_line = f"{hashes} {num} {want}"
+            if new_line != m.group(0):
+                n += 1
+            return new_line
+        # 编号不在模板里、但标题正好是模板某节 → 归位到模板编号
+        _t = re.sub(r'^\d+(?:\.\d+)+\s*', '', title).strip()
+        _want_no = title_to_no.get(_t)
+        if _want_no and _want_no not in existing:
+            existing.add(_want_no)
+            n += 1
+            return f"{hashes} {_want_no} {_t}"
+        n += 1
+        last = num.rsplit('.', 1)[-1]
+        return f"{last}）{title.rstrip('：:').strip()}"
+
+    out = re.sub(r'^(#{2,6})\s*(\d+(?:\.\d+)+)\s*(.+)$', _rep, str(md or ""),
+                 flags=re.MULTILINE)
+    return out, n
+
+
+def strip_bare_structure_tables(md: str) -> str:
+    """删掉第4章「无表题、表头是地类/复垦前后」的重复结构对比表。
+
+    模型偶尔只写「表4-6」这一行当表题，`strip_md_tables_by_caption` 匹配不到
+    标题关键词，最后与系统补渲的结构对比表印成两张（2026-11-05 实测）。
+    """
+    lines = str(md or "").splitlines()
+    out, i = [], 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if re.match(r'^\*{0,2}表\s*4\s*[-—]\s*\d+\s*\*{0,2}$', s):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            hdr = lines[j].strip() if j < len(lines) else ""
+            end = j
+            while end < len(lines) and lines[end].strip().startswith('|'):
+                end += 1
+            if (hdr.startswith('|') and '地类名称' in hdr
+                    and ('复垦前' in hdr or '复垦后' in hdr)):
+                i = end
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def strip_md_tables_by_caption(md: str, keywords: tuple) -> str:
+    """删掉 markdown 里「表题含 keyword」的整张表（表题行 + 紧随的表格块）。
+
+    🔴 2026-11-02 线上实测：第4章「评价单元土地损毁情况表 / 复垦方向表」模型只写了
+       表头和空行 —— 数据明明可以算。这两张改由系统出数，模型那张**必须删掉**，
+       否则报告里同一张表出现两次（一张空、一张有数）。
+    """
+    lines = str(md or "").splitlines()
+    out, i = [], 0
+    while i < len(lines):
+        s = lines[i].strip()
+        cap = re.sub(r'^\*{1,2}|\*{1,2}$', '', s).strip()
+        if (re.match(r'^表\s*\d+[-—]\d+', cap)
+                and any(k in cap for k in keywords)):
+            i += 1
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    # 🔴 必须保留原末尾换行：装配器的表题捕获依赖「行尾空行」触发 flush，
+    #    去掉后最后一张表的 `pending_caption` 会丢（实测表3-1 不再被识别、整张印出来）。
+    _tail = "\n" if str(md or "").endswith("\n") else ""
+    return "\n".join(out) + _tail
+
+
+def material_stem_key(name: str) -> str:
+    """材料名归一（判断「PDF 与逐页图片是不是同一份材料」用）。
+
+    `调查表_01.jpg` / `调查表_02.jpg` / `调查表.pdf` / `调查表_01_ab12cd34.jpg`
+    全部归到 `调查表`；`临时用地合同1.jpg` 归到 `临时用地合同`。
+    """
+    s = os.path.splitext(os.path.basename(str(name or "")))[0]
+    s = re.sub(r'[_\-\s]*[0-9a-f]{8,}$', '', s, flags=re.I)   # 落盘时追加的 hash
+    s = re.sub(r'[_\-\s]*\d{1,3}$', '', s)                    # 末尾页号
+    return s.strip().lower()
+
+
+# 用户上传红线的「原始渲染」——与系统卫星位置图同义，正文只留系统图。
+_RAW_REDLINE_SUFFIXES = (".shp.png", ".cad.png")
+
+
+def split_raw_redline(imgs):
+    """把一组图分成 (保留, 原始红线渲染)。
+
+    系统卫星图存在时才调用；卫星图不在时用户红线就是唯一的图，不能丢。
+    """
+    imgs = list(imgs or [])
+    raw = [i for i in imgs
+           if str((i or {}).get("path", "")).endswith(_RAW_REDLINE_SUFFIXES)]
+    return [i for i in imgs if i not in raw], raw
+
+
+_LOCATION_LABEL_KEYS = ("位置示意图", "工程位置")
+
+
+def is_location_figure(item) -> bool:
+    """这张图是不是「位置示意图」类（系统图与用户/样本图同义，只能留一张）。"""
+    if isinstance(item, dict):
+        label = (item.get("label") or item.get("name")
+                 or item.get("original_name") or item.get("path") or "")
+    else:
+        label = item
+    text = str(label or "")
+    return any(k in text for k in _LOCATION_LABEL_KEYS)
+
+
+def drop_location_dupes(imgs):
+    """系统位置图已生成时，把其他「位置示意图」类图摘掉。返回 (保留, 摘掉)。"""
+    keep, drop = [], []
+    for it in list(imgs or []):
+        (drop if is_location_figure(it) else keep).append(it)
+    return keep, drop
+
+
+def drop_raw_redline_from_ch3(by_chapter) -> int:
+    """系统卫星图存在时，把原始红线渲染从**第3章正文图位**摘掉（附件仍保留）。
+
+    图片目录的正文配额是「每类最多 2 张、按输入顺序取」——用户上传的两张
+    原始红线会先把位置图名额吃光，系统卫星图被挤掉，正文只剩白底红线图。
+    返回摘掉的张数。
+    """
+    if not by_chapter:
+        return 0
+    key = 3 if 3 in by_chapter else ("3" if "3" in by_chapter else None)
+    if key is None:
+        return 0
+    keep, raw = split_raw_redline(by_chapter.get(key))
+    if raw:
+        by_chapter[key] = keep
+    return len(raw)
+
+
 class ReportAssembler:
     """Assembles generated chapter markdown into a properly formatted DOCX report."""
 
@@ -447,10 +631,17 @@ class ReportAssembler:
         self._chapter_image_counter = {}  # 🔴 图号统一计数器：章 → 已插入图数
         self._session_state = state  # 🔴 供系统标准表（表3-1/表3-3）渲染读取 survey_analysis
         self._system_rendered_tables = set()  # 🔴 系统渲染的标准表，_fill_table_data 不得覆盖
+        # 🔴 这些表的空白格**保持空白**（表4-2 的逐个地块/合计行 —— 模板本来就是空格，
+        #    填「—」会把「地块面积」栏弄得像缺数）
+        self._keep_blank_tables = set()
         # 🔴 系统补渲表的**完整表题**（复垦第4章分析表）——`_dedup_table_titles`
         #    对它们**不重编号**：那几张的表号是按样本定的（表4-8/4-11/4-12/4-13），
         #    重编成 表4-1… 之后与样本对不上（复审的人按样本查表号）。稳评恒为空集。
         self._system_caption_exact: set = set()
+        # 🔴 完整表题（去掉「表N-M」前缀）→ 系统定死的表号。模型照题名手写了同一张表、
+        #    但编号写错时（表4-11 写成 表4-1），按题名找回系统表号，不再参与顺序重编。
+        #    2026-11-03 实测：表土资源平衡被编成 表4-1、复垦前后对比被编成 表4-3。
+        self._system_caption_by_title: dict = {}
         # 🔴 已被系统表**占号**的章号→表号（如 4 → {8, 11, 12, 13}）：LLM 手写表
         #    重编号时跳过这些号，免得占掉样本表号。稳评恒为空字典。
         self._system_caption_nums: dict = {}
@@ -494,11 +685,65 @@ class ReportAssembler:
         self._filled = filled
         # 第7章投资估算要回头读**第6章**的工程量表，所以整份章节也留一份
         self._chapters = chapters
+        # 🔴 模板版式画像：标题/正文/表格的字体字号从模板 docx 反读，
+        #    读不到才回落到按域常量（业主 2026-11-04：「能不能自己识别」）。
+        self._tpl_style = None
+        _tp = str(state.get("template_path") or "")
+        if _tp:
+            try:
+                from app.services.template_style_profile import load_style_profile
+                _abs_tp = _tp
+                if not Path(_abs_tp).exists():
+                    from app.services.file_service import file_service
+                    _abs_tp = str(file_service.get_absolute_path(_tp))
+                self._tpl_style = load_style_profile(_abs_tp)
+            except Exception as e:
+                logger.info(f"[版式] 模板画像读取跳过: {e}")
 
         # 🔴 报告域：决定本报告按哪个域的章节目录装配（章号/标题/是否有评审表章/
         #    是否有附件章）。缺省回落稳评 —— 老调用点（脚本）不传 `_domain` 时
         #    行为与改动前完全一致。
         self._domain = domain_of_state(state)
+        # 🔴 复垦第4章的分析表由系统出数（见 `reclamation_ch4_tables`）——
+        #    模型写的同题表先把整张删掉，否则会出现一张空表 + 一张系统表。
+        #    ⚠️ 必须放在 `self._domain` 赋值**之后**（之前取到的是默认 stability）。
+        #    🔴 删除清单按**本次真正能算出来的表**动态生成（2026-11-04 实测：
+        #       写死三张时，模型的「表土资源平衡表 / 复垦方向表」没被删，又因表号
+        #       撞上系统表被 `_caption_key` 判重丢弃 —— 两边都不出，整张表消失）。
+        if self._domain == "reclamation":
+            _strip_titles = ("临时用地土地利用现状统计表",
+                             "评价单元土地损毁情况表", "评价单元复垦方向表")
+            try:
+                from app.services.reclamation_ch4_tables import build_ch4_tables
+                _built4 = build_ch4_tables(
+                    filled, title=str(state.get("report_title") or ""),
+                    plan=self._template_ch4_plan())
+                _extra = tuple(
+                    re.sub(r'^表\s*\d+\s*[-—]\s*\d+\s*', '',
+                           str((t or {}).get("caption") or "")).strip()
+                    for _, t in _built4)
+                _strip_titles = tuple(dict.fromkeys(
+                    [t for t in _extra if t] + list(_strip_titles)))
+            except Exception as e:
+                logger.info(f"[表4-x] 动态删除清单生成失败，用默认三张: {e}")
+            for _k, _ch in (chapters or {}).items():
+                if isinstance(_ch, dict) and _ch.get("markdown"):
+                    _ch["markdown"] = strip_md_tables_by_caption(
+                        _ch["markdown"], _strip_titles)
+                    if str(_k) == "4":
+                        _ch["markdown"] = strip_bare_structure_tables(_ch["markdown"])
+                    # 🔴 第8章「表8-1 费用安排表」：模型常把**模板的旧数字**（14.35/4.58/
+                    #    115.91）整张抄过来。系统能按本次投资估算出表时，先把模型那张删掉
+                    #    （业主 2026-11-05：表里的数必须跟着本项目走）。
+                    if str(_k) == "8" and (filled or {}).get("_cost_workbook"):
+                        _ch["markdown"] = strip_md_tables_by_caption(
+                            _ch["markdown"], ("土地复垦费用安排表",))
+                    # 🔴 第7章同理：上传了投资估算 Excel 时，表7-3/7-4/7-5 由系统按 Excel 出，
+                    #    模型手写的那几张（数字来自范文）整张删掉。
+                    if str(_k) == "7" and (filled or {}).get("_cost_workbook"):
+                        _ch["markdown"] = strip_md_tables_by_caption(
+                            _ch["markdown"],
+                            ("工程施工费估算表", "其他费用估算表", "土地复垦投资估算表"))
         _chapters = all_chapters(self._domain)   # 本域章号列表
         _total = total_chapters(self._domain)    # 本域总章数
 
@@ -523,6 +768,28 @@ class ReportAssembler:
             except Exception as _se:
                 logger.warning(f"[风险指数] 一致性修正跳过: {_se}")
 
+        # 🔴 复垦：先从上传的 Shapefile 算**项目中心经纬度**，供正文坐标校正用
+        #    （模型会把「33°16′33.45″」写成 `33163345` 这种连串）。
+        if self._domain == "reclamation" and not filled.get("_centroid_lat"):
+            try:
+                from app.config import settings as _settings
+                from app.services.reclamation_figures import shapefile_polygons
+                from app.services.satellite_map import points_to_lonlat
+                for _f in (state.get("_uploaded_files") or []):
+                    _p = _f.get("path") if isinstance(_f, dict) else _f
+                    if not str(_p).lower().endswith(".shp"):
+                        continue
+                    _polys = shapefile_polygons(str(_p), str(_settings.STORAGE_DIR))
+                    if _polys:
+                        _ll = points_to_lonlat(_polys[0]["points"])
+                        filled["_centroid_lon"] = round(sum(x for x, _ in _ll) / len(_ll), 6)
+                        filled["_centroid_lat"] = round(sum(y for _, y in _ll) / len(_ll), 6)
+                        logger.info(f"[坐标] 项目中心 {filled['_centroid_lat']}, "
+                                    f"{filled['_centroid_lon']}")
+                        break
+            except Exception as _ce:
+                logger.warning(f"[坐标] 计算项目中心失败（跳过坐标校正）: {_ce}")
+
         # 🔴 正文去重（两域通用）：模型偶尔把同一句/同一段连写两遍
         #    （实测：「…涉及户数50户。50户。补偿方案制定应…」）。只删逐字重复与秃噜嘴的残句。
         # 🔴 顺带断长句：交付体检实测「60 字以上长句」占了不合格段落的绝大多数
@@ -530,11 +797,29 @@ class ReportAssembler:
         #    断点只取引号/括号外的中文逗号，前后各留 ≥15 字，一句最多断两处。
         try:
             from app.validation.content_guardrails import polish_chapters
-            chapters, _polish = polish_chapters(chapters, self._domain)
+            # 🔴 范文残留清理要拿「库内所有范文正文」当比对源：
+            #    范文里的数字/地名/文号若没被用户资料覆盖，换成用户值或「待补充」。
+            _sample = ""
+            try:
+                from app.services.template_section_library import sample_corpus
+                _sample = sample_corpus(self._domain or "stability")
+            except Exception as _se:
+                logger.warning(f"[范文残留] 取范文语料失败（跳过清理）: {_se}")
+            _user_text = str(state.get("_pdf_raw_text") or "")
+            if not _user_text:
+                _user_text = "\n".join(
+                    str((m or {}).get("text_content") or "")
+                    for m in (state.get("_project_materials") or [])
+                    if isinstance(m, dict))
+            chapters, _polish = polish_chapters(
+                chapters, self._domain, filled=filled,
+                sample_text=_sample, user_text=_user_text)
             if _polish.get("dedup"):
                 logger.info("[去重] 去掉相邻重复句/段 %d 处", _polish["dedup"])
             if _polish.get("split"):
                 logger.info("[断句] 拆开超长句 %d 处", _polish["split"])
+            if _polish.get("scrub"):
+                logger.info("[范文残留] 替换为项目数据/「待补充」%d 处", _polish["scrub"])
         except Exception as _de:
             logger.warning(f"[去重/断句] 跳过: {_de}")
 
@@ -704,6 +989,11 @@ class ReportAssembler:
                 chapters[ch_num]["markdown"] = md
 
         doc = Document()
+        # 🔴 默认样式先按模板字体写好，避免未显式设字体的段落落回 MS 明朝等主题字体
+        try:
+            self._apply_document_fonts(doc)
+        except Exception as _dfe:
+            logger.warning(f"[版式] 默认字体设置失败: {_dfe}")
         self._setup_page(doc)
 
         # ── 前置件（**按域取清单**）──
@@ -721,7 +1011,7 @@ class ReportAssembler:
             implement_unit = filled.get("implement_unit", "") or self._cv("implement_unit")
             self._add_cover_page(doc, doc_ref, project_name,
                                  cover_org_value(self._domain, filled, org_name),
-                                 location, implement_unit)
+                                 location, implement_unit, filled=filled)
 
         # 公司资质（无图片则跳过）
         if "qualifications" in _front:
@@ -743,7 +1033,9 @@ class ReportAssembler:
         #    参照件结构：封面 → 资质/简介 → 目录 → 第一章…第十四章
         _add_page_break(doc)
         self._add_toc(doc, chapters, template_path=state.get("template_path"))
-        _add_page_break(doc)   # 🔴 目录后另起一页，评审表从新页开始
+        # 🔴 目录后**不再补分页符**：下一章的章标题页用「新节（新页）」开头，
+        #    再补一个分页符就是「先跳一页、再分节跳一页」→ 目录后多一页空白
+        #    （业主 2026-11-02：「第三页没有内容空白的」）。
 
         # 注：评审表是**第3章**（参照件《白马湖…报告》结构），
         #     在下面的章节循环里于 ch_num == 3 时渲染。
@@ -823,6 +1115,29 @@ class ReportAssembler:
             except Exception as _fe:
                 logger.warning(f"[报告表] 渲染失败，跳过（不影响出报告）: {_fe}")
 
+        # ── 第12部分「请示」/ 第13部分「图件」（复垦专有）──
+        _req_no = request_letter_chapter_no(self._domain)
+        if _req_no is not None:
+            self._current_chapter = _req_no
+            self._add_chapter_title_page(
+                doc, _cn_num(_req_no), self._get_chapter_title(_req_no),
+                chapter_number=_req_no)
+            try:
+                from app.services.reclamation_request_letter import render_request_letter
+                render_request_letter(doc, filled)
+            except Exception as _le:
+                logger.warning(f"[请示] 渲染失败，跳过（不影响出报告）: {_le}")
+        _fig_no = figures_chapter_no(self._domain)
+        if _fig_no is not None:
+            self._current_chapter = _fig_no
+            self._add_chapter_title_page(
+                doc, _cn_num(_fig_no), self._get_chapter_title(_fig_no),
+                chapter_number=_fig_no)
+            try:
+                self._add_reclamation_figures(doc, filled)
+            except Exception as _fge:
+                logger.warning(f"[图件] 渲染失败，跳过（不影响出报告）: {_fge}")
+
         _appendix_no = appendix_chapter_no(self._domain)
         if _appendix_no is not None:
             self._current_chapter = _appendix_no
@@ -836,6 +1151,8 @@ class ReportAssembler:
         # ── Post-generation review: fix common issues ──
         self._pre_assembly_review(doc, filled)
         self._post_generation_fix(doc, filled)
+        self._drop_duplicate_sections(doc)
+        self._dedup_headings(doc)
         self._dedup_table_titles(doc)
         self._dedup_duplicate_tables(doc)
         # ── Fill tables with computed project data ──
@@ -912,6 +1229,19 @@ class ReportAssembler:
                         logger.warning(f"   · 第{_ch}章 {_g.get('detail', '')}")
         except Exception as _ge:
             logger.warning(f"缺口检测跳过: {_ge}")
+
+        # 🔴 复垦：模型手写的「复垦前后结构对比」与系统表重复时只留系统那张
+        if self._domain == "reclamation":
+            try:
+                self._dedup_structure_tables(doc)
+            except Exception as _dse:
+                logger.warning(f"结构对比表去重跳过: {_dse}")
+
+        # 🔴 表格内容统一上下左右居中（必须在表格增删都结束之后）
+        try:
+            self._center_all_tables(doc)
+        except Exception as _cte:
+            logger.warning(f"表格居中跳过: {_cte}")
 
         # 🔴 审核元信息写入 Word 批注（必须在 doc.save() 前的最后阶段，防止后续重写 run 导致批注错位）
         try:
@@ -1072,6 +1402,72 @@ class ReportAssembler:
                             self._set_cell(row.cells[2], '0')
                             self._set_cell(row.cells[3], '0.0%')
 
+    def _drop_duplicate_sections(self, doc):
+        """同一章内**整节重复**的，删后出现的那一整段（含标题与表）。
+
+        2026-11-03 测试稿实测：第 4 章模型先写完 4.6/4.7，又重写了一遍 4.6/4.2/4.7；
+        第 5/7 章各有一个紧邻的重复标题。只按「章内标题首次出现」判重：
+        重复标题及其到下一个同级/更高级标题之间的内容全部删除。
+        """
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        body = doc.element.body
+        cur_ch = None
+        seen: set = set()
+        drop = False
+        drop_level = 0
+        for child in list(body.iterchildren()):
+            if child.tag == qn('w:p'):
+                p = Paragraph(child, doc)
+                t = p.text.strip()
+                m = re.match(r'Heading\s+(\d)', p.style.name) if t else None
+                if not m:
+                    if drop:
+                        body.remove(child)
+                    continue
+                lvl = int(m.group(1))
+                if lvl == 1:
+                    cur_ch = t
+                    seen = set()
+                    drop = False
+                    continue
+                if drop:
+                    if lvl <= drop_level:
+                        drop = False          # 这一节结束，当前标题照常处理
+                    else:
+                        body.remove(child)
+                        continue
+                key = (cur_ch, t)
+                if key in seen:
+                    drop, drop_level = True, lvl
+                    body.remove(child)
+                    continue
+                seen.add(key)
+            elif drop:
+                body.remove(child)
+
+    def _dedup_headings(self, doc):
+        """删掉**紧挨着重复**的同一标题（参照件 + 模型各写了一次）。
+
+        2026-11-03 测试稿实测：「5.2 预防控制措施」「7.2 估算成果」各出现两次 ——
+        模型在参照件标题后又补了一个同名标题。只处理连续重复，不动正文。
+        """
+        last = None
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if not t:
+                continue
+            if p.style.name.startswith("Heading"):
+                if t == last:
+                    p.clear()
+                    p.text = ""
+                else:
+                    last = t
+            else:
+                last = None
+
     def _dedup_table_titles(self, doc):
         """Remove duplicate table titles, fix numbering, remove strays, and clean tables."""
         import re
@@ -1125,6 +1521,22 @@ class ReportAssembler:
                 if t in seen_titles:
                     p.clear()
                     p.text = ''
+                elif (getattr(self, '_system_caption_by_title', {}) or {}).get(
+                        re.sub(r'^表\s*\d+\s*[-—]\s*\d+([-—]\d+)?\s*', '', t).strip()):
+                    # 🔴 题名与系统表相同、只是编号写错 → 按样本表号改回来，
+                    #    不参与顺序重编（否则 表4-11 会被编成 表4-1，与 4-1 冲突）
+                    _fixed = self._system_caption_by_title[
+                        re.sub(r'^表\s*\d+\s*[-—]\s*\d+([-—]\d+)?\s*', '', t).strip()]
+                    _new_title = re.sub(r'^表\s*\d+\s*[-—]\s*\d+([-—]\d+)?',
+                                        _fixed, t, count=1)
+                    if _new_title != t:
+                        p.clear()
+                        _run = p.add_run(_new_title)
+                        try:
+                            if p.runs and p.runs[0].bold:
+                                _run.bold = True
+                        except: pass
+                    seen_titles.add(_new_title)
                 elif t in getattr(self, '_system_caption_exact', ()):
                     # 🔴 系统补渲表的表号是**按样本定死**的（复垦表4-8/4-11/4-12/4-13），
                     #    只登记不重编号。稳评该集恒为空 → 本条恒不触发。
@@ -1851,14 +2263,14 @@ class ReportAssembler:
                     # 🔴 字号只按层级定，不看文本（旧版按文本含「封面」就把字号抬到 24pt）。
                     #    字体/字号**按域取** —— 这里是全文最后一次刷标题字体，
                     #    不跟着域走的话，上面 `_add_heading` 按域设的值会被这里刷回稳评那套。
-                    _ea, _pt = typography(self._domain, "h1")
-                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=_ea)
+                    _ea, _pt = self._typo("h1")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=self._heading_bold(1), ascii_font=_ea)
                 elif is_h2:
-                    _ea, _pt = typography(self._domain, "h2")
-                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=FONT_ASCII)
+                    _ea, _pt = self._typo("h2")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=self._heading_bold(2), ascii_font=FONT_ASCII)
                 else:  # h3
-                    _ea, _pt = typography(self._domain, "h3")
-                    _set_run_font(run, _ea, size=Pt(_pt), bold=True, ascii_font=FONT_ASCII)
+                    _ea, _pt = self._typo("h3")
+                    _set_run_font(run, _ea, size=Pt(_pt), bold=self._heading_bold(3), ascii_font=FONT_ASCII)
 
         # ── 4. Line spacing to 28pt ──
         from docx.shared import Pt as _Pt2
@@ -2002,7 +2414,13 @@ class ReportAssembler:
                                     run.text = run.text.replace(old, new)
 
         # ── Clean up bare "—" cells: replace with context-aware values ──
+        # 🔴 报告表（复垦第11部分）里的空白格**保持空白**：那是给人手填的位置，
+        #    不是「数据缺失」。业主 2026-11-02 点名要求不要用「-」代替。
+        _form_tbls = getattr(self, '_form_tables', []) or []
+        _keep_blank = getattr(self, '_keep_blank_tables', set()) or set()
         for tbl in doc.tables:
+            if tbl._tbl in _form_tbls or tbl._tbl in _keep_blank:
+                continue
             hcells = [c.text.strip() for c in tbl.rows[0].cells]
             for row in tbl.rows[1:]:
                 for ci, cell in enumerate(row.cells):
@@ -2207,7 +2625,43 @@ class ReportAssembler:
     # Cover Page
     # ═══════════════════════════════════════════════════════════════
 
-    def _add_cover_page(self, doc, doc_ref, project_name, org_name, location="", implement_unit=""):
+    def _cover_title_lines(self, filled: dict, project_name: str) -> list:
+        """封面/扉页标题行。
+
+        复垦：用项目自己的标题（`project_title`）——
+            「江苏盐业井神…工程」+「三井组临时用地土地复垦方案」；
+            没有 project_title 时用 project_name + 域显示名（复垦「土地复垦方案」）；
+            **绝不**再硬编码任何封面副标题 —— 不同地区模板的封面标题不同。
+        稳评：同样优先用 project_title，不再写死「《社会稳定性风险评估》」。
+        """
+        import re as _re
+
+        title = str((filled or {}).get("project_title")
+                    or (filled or {}).get("report_title") or "").strip()
+        if self._domain != "reclamation":
+            # 稳评同样不写死报告类型：优先用项目自己的完整标题；
+            # 标题就是项目名时，才补域显示名（来自域配置，不是封面专用文案）。
+            if not title:
+                title = project_name
+            if title == project_name:
+                return [project_name]
+            if project_name and title.startswith(project_name):
+                rest = title[len(project_name):].strip()
+                if rest:
+                    return [project_name, rest]
+            return [title]
+        if not title or title == project_name:
+            title = project_name + report_kind_name(self._domain)
+        title = title.replace("报告书", "方案")
+        title = _re.sub(r"方案方案$", "方案", title)
+        # 「…工程」单独一行，后面「三井组临时用地土地复垦方案」一行（与人工稿一致）
+        m = _re.match(r"^(.*?工程)\s*(.+?方案)$", title)
+        if m and m.group(1).strip() and m.group(2).strip():
+            return [m.group(1).strip(), m.group(2).strip()]
+        return [title]
+
+    def _add_cover_page(self, doc, doc_ref, project_name, org_name, location="",
+                        implement_unit="", filled=None):
         """封面 —— 版式对齐参照件《白马湖农场1号风电项目》。
 
         🔴 **用 `space_before` 定位，不用空段**：`_post_generation_fix` 第 6 步会把
@@ -2219,31 +2673,29 @@ class ReportAssembler:
             标题两行同字号居中，落在页面约 27% 高度；
             落款三行左对齐、落在约 72% 高度；两者之间大段留白。
         """
-        _TITLE_TOP_PT = Pt(185)   # 标题头顶到版心上沿（参照件标题中心≈页面 28.8% 处）
-        _SIGN_TOP_PT = Pt(240)    # 落款头顶到标题块之下（参照件落款中心≈页面 72.4% 处）
+        # 🔴 复垦封面比稳评多一行标题且落款三行；原 185/240 pt 在 WPS 里会把
+        #    日期那行挤到第 2 页（业主 2026-11-02 实测）。复垦压到 150/200，
+        #    稳评保持原值（逐字不变）。
+        _title_top, _sign_top = (150, 200) if self._domain == "reclamation" else (185, 240)
+        _TITLE_TOP_PT = Pt(_title_top)   # 标题头顶到版心上沿
+        _SIGN_TOP_PT = Pt(_sign_top)     # 落款头顶到标题块之下
 
         pn = (project_name or doc_ref or '').strip()
         if not pn or '示意图' in pn or '位置图' in pn:
             # 无项目名时才用通用标题兜底（按域取：稳评「土地征收决策」/复垦「土地复垦方案」）
             pn = cover_fallback_title(self._domain)
 
-        # ── 标题：两行、同字号、居中 ──
+        # ── 标题：复垦用**项目自身标题**（工程名 + 临时用地…方案），
+        #    不再硬编码「土地复垦方案报告书」；稳评保持「项目名 + 报告类型」两行。──
         _ct_font, _ct_pt = typography(self._domain, "cover_title")
         _cs_font, _cs_pt = typography(self._domain, "cover_sign")
-        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = _TITLE_TOP_PT
-        p.paragraph_format.space_after = Pt(6)
-        _set_run_font(p.add_run(pn), _ct_font, size=Pt(_ct_pt),
-                      bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
-
-        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(0)
-        # 🔴 业主口径（2026-09-21）：第二行写《社会稳定性风险评估》。
-        #    参照件《白马湖农场1号》是裸的「社会稳定风险评估」，业主明确要求改，
-        #    以业主口径为准。该行是**报告类型**，按域取（复垦为《土地复垦方案》）。
-        _set_run_font(p.add_run(cover_type_line(self._domain)), _ct_font, size=Pt(_ct_pt),
-                      bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
+        _title_lines = self._cover_title_lines(filled or {}, pn)
+        for _i, _line in enumerate(_title_lines):
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = _TITLE_TOP_PT if _i == 0 else Pt(0)
+            p.paragraph_format.space_after = Pt(6) if _i < len(_title_lines) - 1 else Pt(0)
+            _set_run_font(p.add_run(_line), _ct_font, size=Pt(_ct_pt),
+                          bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
 
         # ── 落款：三行左对齐（标签都是 6 字+冒号，天然对齐）──
         # 🔴 前两个抬头按域取（稳评「稳评责任主体/实施单位」→ 复垦「项目单位/编制单位」）。
@@ -2281,18 +2733,15 @@ class ReportAssembler:
         _th_font, _th_pt = typography(self._domain, "title_page_head")
         _ti_font, _ti_pt = typography(self._domain, "title_page_info")
 
-        # ── 顶部：项目名 + 报告类型（与封面同款，居中）──
-        if pn:
+        # ── 顶部：与封面同款标题行（复垦用项目自身标题，不再硬编码报告书）──
+        _lines = self._cover_title_lines(filled or {}, pn)
+        for _i, _line in enumerate(_lines):
             p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(front_matter_gap_pt(self._domain, "title_page_head"))
-            p.paragraph_format.space_after = Pt(6)
-            _set_run_font(p.add_run(pn), _th_font, size=Pt(_th_pt),
+            p.paragraph_format.space_before = (
+                Pt(front_matter_gap_pt(self._domain, "title_page_head")) if _i == 0 else Pt(0))
+            p.paragraph_format.space_after = Pt(24) if _i == len(_lines) - 1 else Pt(4)
+            _set_run_font(p.add_run(_line), _th_font, size=Pt(_th_pt),
                           bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
-        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(24)
-        _set_run_font(p.add_run(cover_type_line(self._domain)), _th_font,
-                      size=Pt(_th_pt), bold=cover_bold(self._domain), ascii_font=FONT_ASCII)
 
         # ── 信息块：**样本是 6 行填表**（每行值下面一条横线），值缺失也留着横线给手填 ──
         #    样本（明远路 第2页 实测）：
@@ -2360,6 +2809,25 @@ class ReportAssembler:
 
         # Fix section numbering: "1 . 1" → "1.1", "1 .1" → "1.1", etc.
         markdown = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', markdown)
+        # 🔴 标题里重复的序号：「4.4.2.1 （1）评价范围」→「4.4.2.1 评价范围」
+        #    （模型常把自动编号和手写「（1）」一起写；业主 2026-11-04 实测）
+        markdown = re.sub(
+            r'^(#{2,4}\s*\d+(?:\.\d+)+\s*)[（(]\s*\d+\s*[)）]\s*',
+            r'\1', markdown, flags=re.MULTILINE)
+        # 编号与标题之间的空格补齐（「4.4.2.2评价单元划分」→「4.4.2.2 评价单元划分」）
+        markdown = re.sub(
+            r'^(#{2,4}\s*\d+(?:\.\d+)+)(?=[^\s\d.])',
+            r'\1 ', markdown, flags=re.MULTILINE)
+        # 🔴 最多三级标题：X.Y.Z.W 及更深 → 正文引导「n）标题」
+        markdown, _deep_n = demote_deep_headings(markdown)
+        if _deep_n:
+            logger.info(f"[标题] 第{ch_num}章 {_deep_n} 处四级编号降为「n）」引导行")
+        # 🔴 模板清单之外的小节标题 → 「n）」引导行（与人工报告目录对齐）
+        _allowed = self._template_allowed_sections(ch_num)
+        if _allowed:
+            markdown, _unlisted = align_headings_to_template(markdown, _allowed)
+            if _unlisted:
+                logger.info(f"[标题] 第{ch_num}章 {_unlisted} 处模板外小节降为「n）」引导行")
         markdown = re.sub(r'^### (第[一二三四五六七八九十\d]+章\s)', r'## \1', markdown, flags=re.MULTILINE)
         # 🔴 二级标题层级统一：`### 2.1 xxx` → `## 2.1 xxx`（保证所有 X.Y 二级标题都是 Heading 2/宋体四号加黑靠左）
         markdown = re.sub(r'^#{3,4}\s+(\d+\.\d+\s)', r'## \1', markdown, flags=re.MULTILINE)
@@ -2403,7 +2871,10 @@ class ReportAssembler:
                 if not isinstance(_img, dict):
                     _keep.append(_img); continue
                 _meta = f"{_img.get('label', '')} {_img.get('caption', '')} {_img.get('name', '')}"
-                if _img.get("type") in ("map", "survey_map") or any(k in _meta for k in _MAP_KW):
+                if "拦挡" in _meta or _img.get("type") == "measure_section":
+                    # 图6-1 拦挡断面图不是位置图，留到 6.1.1 锚点落位
+                    _keep.append(_img)
+                elif _img.get("type") in ("map", "survey_map") or any(k in _meta for k in _MAP_KW):
                     # 🔴 1.5 只留**一张**位置示意图（用户要求）；
                     #    其余（勘测定界图等）留回本章图位，章末不再自动补插 → 落附件。
                     if not self._pending_map_images:
@@ -2447,12 +2918,30 @@ class ReportAssembler:
             _imgs_a = _cim_a.get(ch_num, [])
             # 🔴 第3章：系统已出「位置示意图」时，跳过用户上传的**原始红线渲染**
             #    （.shp.png / .cad.png）—— 它们与系统图同义，会印成两张同名图。
-            if int(ch_num) == 3 and ((self._session_state or {}).get("filled_data") or {}).get("_fig_location_generated"):
-                _raw = [i for i in _imgs_a
-                        if str((i or {}).get("path", "")).endswith((".shp.png", ".cad.png"))]
+            _fig_ok = (int(ch_num) == 3
+                       and ((self._session_state or {}).get("filled_data") or {}
+                            ).get("_fig_location_generated"))
+            if _fig_ok:
+                _imgs_a, _raw = split_raw_redline(_imgs_a)
                 if _raw:
-                    _imgs_a = [i for i in _imgs_a if i not in _raw]
                     logger.info(f"[配图] 第3章已有系统位置图，跳过原始红线渲染 {len(_raw)} 张")
+                # 🔴 系统图之外，任何「位置示意图」类的图也一并去掉 ——
+                #    样本/用户材料里常自带一张同名位置图，插进来就是
+                #    图3-1、图3-2 两张一样的图（业主 2026-11-04 实测）。
+                _imgs_a, _dup = drop_location_dupes(_imgs_a)
+                if _dup:
+                    logger.info(f"[配图] 第3章已有系统位置图，跳过重复位置图 {len(_dup)} 张")
+                # 🔴 **无论过滤后还剩什么都要清空本章图位** —— 原来只在 `_imgs_a`
+                #    非空时才清；若系统图没进图库（正文每类限 2 张，原始红线先占了名额），
+                #    过滤后为空 → 章末兜底又把那两张红线图插回来，图3-1 变成白底红线图
+                #    （2026-11-03 线上实测）。
+                _cim_a[ch_num] = []
+                if not _imgs_a:
+                    # 系统图确定存在（`_fig_location_generated`）就直接补一条，
+                    # 不让它因为图库名额/去重被吃掉。
+                    _gp = Path(str(self.storage_dir)) / "images" / "图3-1 工程位置示意图.jpg"
+                    if _gp.exists():
+                        _imgs_a = [{"path": str(_gp), "label": "项目地理位置示意图"}]
             if _imgs_a:
                 # 🔴 复垦第3章的图序按样本：**位置示意图在前**、土地利用现状图在后
                 #    （图3-1 位置、图3-2 现状）。用户上传的图排在系统图前面，
@@ -2468,6 +2957,9 @@ class ReportAssembler:
                 self._defer_empty_section = True  # 仅复垦锚点章启用「无正文则挂起」
                 _cim_a[ch_num] = []
 
+        # 🔴 复垦第1章：表1-1 拟损毁土地情况表（分区名称/面积由用户提供）
+        if ch_num == 1 and getattr(self, "_domain", "stability") == "reclamation":
+            self._init_ch1_tables(filled)
         # 🔴 复垦第4章：登记待补渲的分析表（表4-8/4-11/4-12/4-13），
         #    在小节边界处依次落下。稳评 / 其他章此调用是空操作。
         if ch_num == 4:
@@ -2479,6 +2971,9 @@ class ReportAssembler:
         #    稳评 / 其他章此调用是空操作。
         if ch_num == 7:
             self._init_ch7_tables()
+        # 🔴 复垦第8章：表8-1 费用安排表（阶段工程费 + 按比例分摊）
+        if ch_num == 8:
+            self._init_ch8_tables()
 
         for line in lines:
             s = line.strip()
@@ -2959,6 +3454,14 @@ class ReportAssembler:
         #       （表间分隔、遇到正文、章末），只挂章末那处根本不触发（实测）。
         if self._render_reclamation_system_table(doc, caption, ch_num):
             return
+        # 🔴 表4-5 土地适宜性评价指标体系：**整张照搬模板**（保留列宽/边框/合并单元格）
+        if ch_num == 4 and "土地适宜性评价指标体系" in str(caption or ""):
+            _ind_no = self._template_ch4_no("指标体系") or 5
+            if self._insert_template_table(
+                    doc, re.sub(r'^表\s*\d+\s*[-—]\s*\d+',
+                                f'表4-{_ind_no}', str(caption or "")),
+                    ("一级影响因子", "三级影响因子")):
+                return
         # 🔴 **同一张表号只印一次**：系统已按 `[SYS_TABLE:6-1]` 渲染过表6-1 之后，
         #    模型又手写了一张同名表（实测 2026-10-28：第二张还列错位，
         #    三圩社区六组「面积总计」印成 2481，实际 178769）。表题相同即判重。
@@ -3185,31 +3688,127 @@ class ReportAssembler:
                 if _sec.endswith('表'):
                     _name = _sec
         caption = f"表{ch_num}-{_seq} {_name}".strip() if _name else f"表{ch_num}-{_seq}"
+        caption = self._ensure_table_caption_name(caption, rows[0] if rows else [])
         self._add_table_caption(doc, caption)
 
         table = doc.add_table(rows=len(rows), cols=ncols, style='Table Grid')
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        self._apply_tpl_table_style(table)
 
+        _tf, _ts = self._table_typo_for(ch_num, caption, ncols)
+        _hbold = self._table_bold_for(ch_num, caption)
         for ri, row_data in enumerate(rows):
             for ci in range(ncols):
                 cell_text = self._clean_md_cell(row_data[ci] if ci < len(row_data) else '')
                 cell = table.cell(ri, ci)
                 cell.paragraphs[0].clear()
                 r = cell.paragraphs[0].add_run(cell_text)
-                r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                r.font.size = TABLE_SIZE
+                r.font.name = _tf; r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+                r.font.size = _ts
                 if ri == 0:
-                    r.bold = True
+                    r.bold = _hbold
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        self._merge_first_col(table)
+        self._fit_wide_table(table, rows[0] if rows else [], rows[1:])
+        self._merge_first_col(table, _tf, _ts)
         doc.add_paragraph()
 
     # 🔴 「合计/小计」行永不并入上一行
     _NO_MERGE_VALUES = ("合计", "小计", "总计", "合  计")
 
     @staticmethod
-    def _merge_first_col(table) -> int:
+    def _merge_land_group_cells(table) -> None:
+        """表4-3/4-4 的分组格式：表头前两列合并、一级地类纵向合并、合计行前两列合并。"""
+        def _keep_first(cell) -> None:
+            ps = cell.paragraphs
+            for p in ps[1:]:
+                p._element.getparent().remove(p._element)
+
+        try:
+            table.cell(0, 0).merge(table.cell(0, 1))
+            _keep_first(table.cell(0, 0))
+        except Exception:
+            pass
+        n = len(table.rows)
+        idx = 1
+        while idx < n:
+            try:
+                txt = table.cell(idx, 0).text.strip()
+            except Exception:
+                break
+            if txt == "合计":
+                try:
+                    table.cell(idx, 0).merge(table.cell(idx, 1))
+                    _keep_first(table.cell(idx, 0))
+                except Exception:
+                    pass
+                idx += 1
+                continue
+            j = idx
+            while j + 1 < n:
+                try:
+                    nxt = table.cell(j + 1, 0).text.strip()
+                except Exception:
+                    break
+                if nxt != txt:
+                    break
+                j += 1
+            if j > idx:
+                try:
+                    table.cell(idx, 0).merge(table.cell(j, 0))
+                    _keep_first(table.cell(idx, 0))
+                except Exception:
+                    pass
+            idx = j + 1
+
+    @staticmethod
+    def _merge_plot_group_cells(table, sizes) -> None:
+        """表4-2 的模板格式：面积列拆「小计 | 逐个地块」，其余列按分区纵向合并。
+
+        模板（井神 11.2 p18）：序号/地块名称/地块个数/损毁程度 在每个分区上合并成一个
+        大格；面积列左栏是分区小计（同样纵向合并），右栏一行一个地块面积；
+        表头「面积（hm2）」跨两栏；合计行「合计」跨前两栏。
+        `sizes` 是各分区占用的数据行数（与 `table_damage_inventory` 的 `group_sizes` 对应）。
+        """
+        def _keep_first(cell) -> None:
+            ps = cell.paragraphs
+            for p in ps[1:]:
+                p._element.getparent().remove(p._element)
+
+        def _vmerge(col: int, top: int, bottom: int) -> None:
+            if bottom <= top:
+                return
+            try:
+                table.cell(top, col).merge(table.cell(bottom, col))
+                _keep_first(table.cell(top, col))
+            except Exception:
+                pass
+
+        # 表头：面积两栏合并
+        try:
+            table.cell(0, 2).merge(table.cell(0, 3))
+            _keep_first(table.cell(0, 2))
+        except Exception:
+            pass
+
+        idx = 1
+        for n in sizes:
+            n = max(int(n or 0), 1)
+            for col in (0, 1, 2, 4, 5):
+                _vmerge(col, idx, idx + n - 1)
+            idx += n
+
+        # 合计行：前两栏合并
+        for r in range(idx, len(table.rows)):
+            try:
+                if table.cell(r, 0).text.strip().startswith("合计"):
+                    table.cell(r, 0).merge(table.cell(r, 1))
+                    _keep_first(table.cell(r, 0))
+            except Exception:
+                pass
+
+    @staticmethod
+    def _merge_first_col(table, font=None, size=None) -> int:
         """把表格**首列**相邻同名的单元格纵向合并（业主：「部分表格的第一列要合并同类项」）。
 
         问卷统计表最典型：首列写的是「您的身份 / 您的年龄 / 您的职业 …」，
@@ -3256,9 +3855,10 @@ class ReportAssembler:
                     for _r in list(_keep.runs):
                         _r._element.getparent().remove(_r._element)
                     _run = _keep.add_run(txt)
-                    _run.font.name = FONT_TABLE
-                    _run._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                    _run.font.size = TABLE_SIZE
+                    _tf, _ts = font or FONT_TABLE, size or TABLE_SIZE
+                    _run.font.name = _tf
+                    _run._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+                    _run.font.size = _ts
                     _keep.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     # 合并后的单元格垂直居中
                     _tcPr = a._tc.get_or_add_tcPr()
@@ -3343,6 +3943,51 @@ class ReportAssembler:
             self._rendered_sigs = []
         self._rendered_sigs.append((_ch, _sig, nrows))
 
+    def _insert_template_table(self, doc, caption, keywords) -> bool:
+        """把模板里的整张表深拷贝进来（保留格式与合并单元格）；找不到返回 False。"""
+        tp = str((getattr(self, "_session_state", {}) or {}).get("template_path") or "")
+        if not tp:
+            return False
+        try:
+            from app.services.template_table_copy import find_template_table
+            tbl = find_template_table(tp, keywords)
+        except Exception as e:
+            logger.info(f"[模板表] 取表失败: {e}")
+            return False
+        if tbl is None:
+            return False
+        self._add_table_caption(doc, caption)
+        body = doc.element.body
+        sect = body.find(qn('w:sectPr'))
+        if sect is not None:
+            sect.addprevious(tbl)
+        else:
+            body.append(tbl)
+        doc.add_paragraph()
+        logger.info(f"[模板表] 已按模板原样插入「{caption[:24]}」")
+        return True
+
+    def _ensure_table_caption_name(self, caption, header) -> str:
+        """裸表题「表3-1」补名称（业主 2026-11-05：表3-1 连名称都没了）。"""
+        cap = str(caption or "").strip()
+        if not re.match(r'^\**表\s*\d+\s*[-—]\s*\d+\**$', cap):
+            return cap
+        h = " ".join(str(x) for x in (header or []))
+        if "一级地类" in h and "二级地类" in h:
+            name = "土地分类面积表"
+        elif "权属单位" in h:
+            name = "土地权属状况表"
+        elif "损毁" in h:
+            name = "土地损毁情况表"
+        elif "复垦方向" in h:
+            name = "复垦方向表"
+        elif "面积" in h:
+            name = "面积统计表"
+        else:
+            name = "统计表"
+        _m = re.match(r'^(\**表\s*\d+\s*[-—]\s*\d+\**)', cap)
+        return f"{_m.group(1)} {name}" if _m else cap
+
     def _add_table_caption(self, doc, caption):
         """在表格正上方加表题（宋体 小四 12pt 居中）。"""
         _k = self._caption_key(caption)
@@ -3353,15 +3998,17 @@ class ReportAssembler:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(caption)
-        r.font.name = FONT_CAPTION; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_CAPTION)
-        r.font.size = Pt(12)
-        r.bold = False
+        _cf, _cs, _cb = self._caption_typo()
+        r.font.name = _cf; r._element.rPr.rFonts.set(qn('w:eastAsia'), _cf)
+        r.font.size = _cs
+        r.bold = _cb
 
-    def _set_cell(self, cell, text, bold=False):
+    def _set_cell(self, cell, text, bold=False, ncols: int = 0, typo=None):
         cell.paragraphs[0].clear()
         r = cell.paragraphs[0].add_run(text)
-        r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-        r.font.size = TABLE_SIZE
+        _tf, _ts = typo or self._table_typo(ncols)
+        r.font.name = _tf; r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+        r.font.size = _ts
         r.bold = bold
 
     # ── 复垦第4章：系统补渲的分析表（表4-8/4-11/4-12/4-13）────────────────
@@ -3381,6 +4028,26 @@ class ReportAssembler:
             return None
         return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
 
+    def _reserve_system_captions(self, items) -> None:
+        """把系统表的**表题与表号**登记为受保护（不渲染，只占号）。
+
+        🔴 与 `_register_dyn_tables` 分开：那张表可能因为「模型已写同题表」被跳过不渲染，
+        但它仍占着样本表号（表4-11/4-13）；不登记就会被顺序重编成 表4-1/表4-3。
+        """
+        for _sec, _tbl in (items or []):
+            _cap = str((_tbl or {}).get("caption") or "")
+            if not _cap:
+                continue
+            self._system_caption_exact.add(_cap)
+            _m = re.match(r'^表\s*(\d+)\s*[-—]\s*(\d+)', _cap)
+            if not _m:
+                continue
+            self._system_caption_nums.setdefault(int(_m.group(1)), set()).add(int(_m.group(2)))
+            _title = re.sub(r'^表\s*\d+\s*[-—]\s*\d+\s*', '', _cap).strip()
+            _prefix = re.match(r'^(表\s*\d+\s*[-—]\s*\d+)', _cap)
+            if _title and _prefix:
+                self._system_caption_by_title[_title] = re.sub(r'\s+', '', _prefix.group(1))
+
     def _register_dyn_tables(self, ch_num: int, items) -> None:
         """登记某章的待落位表：`items = [(小节号, {caption, headers, rows, lead})]`。"""
         store = getattr(self, "_dyn_pending", None)
@@ -3388,14 +4055,7 @@ class ReportAssembler:
             store = self._dyn_pending = {}
         store[ch_num] = list(items or [])
         # 表号按样本定死（表4-8/7-3…），`_dedup_table_titles` 不重编号、且新表跳号
-        for _sec, _tbl in store[ch_num]:
-            _cap = str(_tbl.get("caption") or "")
-            if not _cap:
-                continue
-            self._system_caption_exact.add(_cap)
-            _m = re.match(r'^表\s*(\d+)\s*[-—]\s*(\d+)', _cap)
-            if _m:
-                self._system_caption_nums.setdefault(int(_m.group(1)), set()).add(int(_m.group(2)))
+        self._reserve_system_captions(store[ch_num])
 
     def _flush_dyn_tables(self, doc, ch_num: int, heading_text: str) -> None:
         """遇到新的小节标题时，把**归属更早小节**的待落位表先落下去。"""
@@ -3435,37 +4095,59 @@ class ReportAssembler:
         _lead = str(tbl.get("lead") or "")
         if _lead:
             self._add_para(doc, _lead, indent=True)
+        _copy = tbl.get("template_copy")
+        if _copy:
+            if self._insert_template_table(doc, tbl.get("caption", ""), tuple(_copy)):
+                return
         self._render_table_from_dict(doc, tbl, caption=tbl.get("caption", ""))
 
-    def _init_ch4_tables(self, filled, markdown: str = "") -> None:
-        """登记第4章待补渲的分析表；模型已自己写了同题表的，不重复补。
+    def _init_ch1_tables(self, filled) -> None:
+        """复垦第 1 章：表1-1 临时用地拟损毁土地情况表（分区由用户提供）。
 
-        🔴 去重按**表题关键词**：模型偶尔会自己写一张「复垦前后结构对比表」，
-           我们再补一张就是两张同题表（`_dedup_duplicate_tables` 只删逐字重复的）。
+        2026-11-03 业主：「临时用地名称是每次跟甲方沟通有多少地区，让用户提供
+        地区名称还有对应的大小。」没有分区数据就整张不出（不编地块名）。
+        """
+        try:
+            from app.services.reclamation_zones import table_1_1
+            _t = table_1_1(filled or getattr(self, '_filled', None) or {})
+            if _t:
+                self._register_dyn_tables(1, [("1.2.3", _t)])
+                logger.info(f"[表1-1] 已登记（{len(_t.get('rows') or []) - 1} 个功能分区）")
+        except Exception as e:
+            logger.warning(f"[表1-1] 登记失败（不影响出报告）: {e}")
+
+    def _init_ch4_tables(self, filled, markdown: str = "") -> None:
+        """登记第4章待补渲的分析表。
+
+        模型写的同题表已在装配入口按表题整张删掉（见 `assemble` 里的
+        `strip_md_tables_by_caption`），这里**只要算得出就登记**，不再按
+        「模型提到过表题」跳过 —— 2026-11-04 实测那种跳过会让表两头落空。
         """
         from app.agent.chapter_catalog import has_analysis_tables_in_body
         if not has_analysis_tables_in_body(self._domain):
             return
         try:
             from app.services.reclamation_ch4_tables import build_ch4_tables
-            _md = str(markdown or "")
-            _KEY_OF = {"表4-8": ("等级标准", "限制因素"),
-                       "表4-11": ("表土资源平衡", "表土平衡"),
-                       "表4-12": ("水资源分析", "水资源平衡"),
-                       "表4-13": ("复垦前复垦后", "复垦前后结构", "结构对比")}
-            _built = build_ch4_tables(filled or getattr(self, '_filled', None) or {})
-            _kept = []
-            for _sec, _tbl in _built:
-                _cap = _tbl.get("caption", "")
-                _keys = next((v for k, v in _KEY_OF.items() if k in _cap), ())
-                if any(k in _md for k in _keys):
-                    logger.info(f"[表4-x] 模型已写同题表，跳过补渲：{_cap}")
-                    continue
-                _kept.append((_sec, _tbl))
-            self._register_dyn_tables(4, _kept)
-            if _kept:
-                logger.info(f"[表4-x] 第4章待补渲分析表 {len(_kept)} 张："
-                            f"{[t.get('caption','')[:9] for _, t in _kept]}")
+            _title = str((getattr(self, '_session_state', {}) or {}).get("report_title") or "")
+            _plan = self._template_ch4_plan()
+            _built = build_ch4_tables(filled or getattr(self, '_filled', None) or {},
+                                      title=_title, plan=_plan)
+            # 🔴 模板的「土地适宜性评价指标体系」整张照搬（排在 4.4 各表最前）
+            _ind_no = self._template_ch4_no("指标体系")
+            if _ind_no:
+                _e = next((x for x in (_plan or [])
+                           if int(x.get("no") or 0) == _ind_no), {})
+                _t = re.sub(r'\s+', ' ', str(_e.get("title") or "土地适宜性评价指标体系")).strip()
+                _built = [("4.4", {
+                    "caption": f"表4-{_ind_no} {_t}",
+                    "lead": f"本项目土地复垦适宜性评价指标体系见表4-{_ind_no}。",
+                    "template_copy": ("一级影响因子", "三级影响因子"),
+                    "headers": [], "rows": [],
+                })] + list(_built)
+            self._register_dyn_tables(4, _built)
+            if _built:
+                logger.info(f"[表4-x] 第4章分析表 {len(_built)} 张："
+                            f"{[t.get('caption','')[:9] for _, t in _built]}")
         except Exception as e:
             logger.warning(f"[表4-x] 第4章分析表准备失败（不影响出报告）: {e}")
 
@@ -3546,14 +4228,37 @@ class ReportAssembler:
             logger.warning(f"[表6-1] 工程量表准备失败（不影响出报告）: {e}")
 
     def _init_ch7_tables(self) -> None:
-        """第7章「投资估算」的 表7-3/表7-4 —— 数从 budget-maker 现算。
+        """第7章「投资估算」的表7-3/7-4/7-5。
 
-        🔴 桥连不上、表6-1 解析不出、或没有任何可计价项 → **整块不补**，
-           第7章保持模型原文（金额不编）。
+        🔴 两个口径（业主 2026-11-05）：
+          ① 用户上传了《投资估算 Excel》（第七章管道费用表）→ **以它为唯一口径**，
+             表7-3/7-4/7-5 直接按 Excel 渲染（工程量也与 Excel 同源）；
+          ② 没有 Excel → 仍由 budget-maker 现算，补表7-3/表7-5（回落口径）。
+        都取不到 → 整块不补，第7章保持模型原文（金额不编）。
         """
         from app.agent.chapter_catalog import uses_budget_bridge
         if not uses_budget_bridge(self._domain):
             return
+        _wb = (getattr(self, "_filled", None) or {}).get("_cost_workbook")
+        if isinstance(_wb, dict) and _wb.get("engineering"):
+            try:
+                from app.services.reclamation_cost_excel import (
+                    engineering_table, other_cost_table, summary_table,
+                )
+                _tbls = []
+                for _sec, _t in (("7.2.1", engineering_table(_wb)),
+                                 ("7.2.3", other_cost_table(_wb)),
+                                 ("7.2.6", summary_table(_wb))):
+                    if _t:
+                        _t = dict(_t)
+                        _t["lead"] = ""
+                        _tbls.append((_sec, _t))
+                if _tbls:
+                    self._register_dyn_tables(7, _tbls)
+                    logger.info(f"[表7-x] 按用户投资估算 Excel 渲染 {len(_tbls)} 张表")
+                    return
+            except Exception as e:
+                logger.warning(f"[表7-x] 按 Excel 渲染失败，回落 budget-maker: {e}")
         try:
             from app.services.reclamation_budget_bridge import (
                 engineering_table, investment_table,
@@ -3573,6 +4278,32 @@ class ReportAssembler:
                         f"{est.construction:.2f} 万元、静态总投资 {est.static_total:.2f} 万元）")
         except Exception as e:
             logger.warning(f"[表7-x] 第7章投资估算表准备失败（不影响出报告）: {e}")
+
+    def _init_ch8_tables(self) -> None:
+        """第8章 表8-1「土地复垦费用安排表」—— 阶段工程费 + 按比例分摊。
+
+        业主 2026-11-05 口径：四期金额按**阶段工程费 + 按比例分摊**其他费/预备费，
+        合计严格等于动态总投资。没有投资估算 Excel 的数据就**整张不出**（不估）。
+        """
+        from app.agent.chapter_catalog import uses_budget_bridge
+        if not uses_budget_bridge(self._domain):
+            return
+        fd = getattr(self, "_filled", None) or {}
+        _wb = fd.get("_cost_workbook")
+        try:
+            from app.services.reclamation_cost_excel import phase_schedule_table
+            _t = None
+            if isinstance(_wb, dict) and _wb.get("engineering"):
+                _t = phase_schedule_table(_wb, fd)
+            if not _t:
+                logger.info("[表8-1] 缺日期或估算数据，本期不出费用安排表")
+                return
+            _t = dict(_t)
+            _t["lead"] = ""
+            self._register_dyn_tables(8, [("8.3", _t)])
+            logger.info(f"[表8-1] 第8章费用安排表由系统渲染（{len(_t['rows'])} 期）")
+        except Exception as e:
+            logger.warning(f"[表8-1] 费用安排表准备失败（不影响出报告）: {e}")
 
     def _render_reclamation_system_table(self, doc, caption, ch_num) -> bool:
         """复垦的**系统渲染表**（按样本逐表核对，不让 LLM 自己编）。
@@ -3642,6 +4373,11 @@ class ReportAssembler:
         lc = filled.get("land_classification")
         lc = lc if isinstance(lc, dict) else {}
         rows = lc.get("rows") or []
+
+        # 🔴 第4章「评价单元」两张表（表4-7 土地损毁 / 表4-10 复垦方向）**由系统出数**：
+        #    走 `reclamation_ch4_tables.build_ch4_tables` 的小节落点机制
+        #    （模型写了同题表就跳过、没写就补渲），不在这里按表题兜。
+
         if not rows or "临时用地土地利用现状统计表" not in cap:
             return False
 
@@ -3736,13 +4472,16 @@ class ReportAssembler:
             pass
         table = doc.add_table(rows=nrows, cols=ncols, style='Table Grid')
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        self._apply_tpl_table_style(table)
 
+        _tf, _ts = self._table_typo_for(getattr(self, "_current_chapter", 0), caption, ncols)
+        _hbold = self._table_bold_for(getattr(self, "_current_chapter", 0), caption)
         for ci, h in enumerate(headers):
             cell = table.cell(0, ci)
             cell.paragraphs[0].clear()
             r = cell.paragraphs[0].add_run(str(h))
-            r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-            r.font.size = TABLE_SIZE; r.bold = True
+            r.font.name = _tf; r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+            r.font.size = _ts; r.bold = _hbold
             cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         for ri, row in enumerate(rows, start=1):
@@ -3751,9 +4490,33 @@ class ReportAssembler:
                 cell = table.cell(ri, ci)
                 cell.paragraphs[0].clear()
                 r = cell.paragraphs[0].add_run(self._clean_md_cell(str(val)))
-                r.font.name = FONT_TABLE; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                r.font.size = TABLE_SIZE
+                r.font.name = _tf; r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+                r.font.size = _ts
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        self._fit_wide_table(table, headers, rows)
+        if table_data.get("land_groups"):
+            self._merge_land_group_cells(table)
+        elif table_data.get("plot_groups"):
+            self._merge_plot_group_cells(table, table_data.get("group_sizes") or [])
+            try:
+                self._keep_blank_tables.add(table._tbl)
+            except Exception:
+                pass
+        if table_data.get("keep_blank"):
+            # 表7-3/7-4/7-5/8-1：模板里空着的格就是空白，不能填「—」
+            try:
+                self._keep_blank_tables.add(table._tbl)
+            except Exception:
+                pass
+        if table_data.get("merge_header") and ncols >= 3:
+            # 表7-4 的表头「其他费用（万元）」跨前三栏，金额在右端（样本 p59）
+            try:
+                _m = table.cell(0, 0).merge(table.cell(0, 2))
+                for _p in list(_m.paragraphs)[1:]:
+                    _p._element.getparent().remove(_p._element)
+            except Exception:
+                pass
 
         # 🔴 记录系统渲染的标准表，_fill_table_data 不得覆盖其数据
         try:
@@ -3763,7 +4526,7 @@ class ReportAssembler:
 
         # 🔴 垂直合并第一列重复内容（表3-1群众/表3-3部门 的题目列，如「请问您是？」重复4行）
         if table_data.get("merge_first_col"):
-            self._merge_first_col(table)
+            self._merge_first_col(table, *self._table_typo(ncols))
 
         if caption:
             doc.add_paragraph()
@@ -3951,11 +4714,17 @@ class ReportAssembler:
         self._add_table_caption(doc, caption)
         table = doc.add_table(rows=len(rows)+1, cols=len(headers), style='Table Grid')
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        self._apply_tpl_table_style(table)
+        _ncol = len(headers)
+        _typo = self._table_typo_for(
+            getattr(self, "_current_chapter", 0), caption, _ncol)
+        _hbold = self._table_bold_for(getattr(self, "_current_chapter", 0), caption)
         for ci, h in enumerate(headers):
-            self._set_cell(table.cell(0, ci), h, bold=True)
+            self._set_cell(table.cell(0, ci), h, bold=_hbold, ncols=_ncol, typo=_typo)
         for ri, row in enumerate(rows):
             for ci, val in enumerate(row):
-                self._set_cell(table.cell(ri+1, ci), val)
+                self._set_cell(table.cell(ri+1, ci), val, ncols=_ncol, typo=_typo)
+        self._fit_wide_table(table, headers, rows)
 
     # ═══════════════════════════════════════════════════════════════
     # Extracted Tables (from PDF)
@@ -4165,16 +4934,21 @@ class ReportAssembler:
 
             table = doc.add_table(rows=nrows, cols=ncols, style='Table Grid')
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            self._apply_tpl_table_style(table)
 
             # Header row
+            _tf, _ts = self._table_typo_for(
+                getattr(self, "_current_chapter", 0), caption, ncols)
+            _hbold = self._table_bold_for(
+                getattr(self, "_current_chapter", 0), caption)
             for ci, h in enumerate(headers):
                 cell = table.cell(0, ci)
                 cell.paragraphs[0].clear()
                 r = cell.paragraphs[0].add_run(str(h).replace('\n', ' '))
-                r.font.name = FONT_TABLE
-                r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                r.font.size = TABLE_SIZE
-                r.bold = True
+                r.font.name = _tf
+                r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+                r.font.size = _ts
+                r.bold = _hbold
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
             # Data rows
@@ -4184,11 +4958,12 @@ class ReportAssembler:
                     cell = table.cell(ri + 1, ci)
                     cell.paragraphs[0].clear()
                     r = cell.paragraphs[0].add_run(str(val).replace('\n', ' '))
-                    r.font.name = FONT_TABLE
-                    r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_TABLE)
-                    r.font.size = TABLE_SIZE
+                    r.font.name = _tf
+                    r._element.rPr.rFonts.set(qn('w:eastAsia'), _tf)
+                    r.font.size = _ts
                     cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+            self._fit_wide_table(table, headers, rows)
             doc.add_paragraph()
         return True
 
@@ -4761,6 +5536,30 @@ class ReportAssembler:
                 logger.debug(f"读取模板目录失败 {_p}: {_e}")
         return None
 
+    @staticmethod
+    def _toc_is_title(p, qn) -> bool:
+        t = ''.join(x.text or '' for x in p.iter(qn('w:t')))
+        t = re.sub(r'[\s　​]+', '', t)
+        return t in ('目录',)
+
+    @staticmethod
+    def _toc_is_field_para(p, qn) -> bool:
+        return (p.find('.//' + qn('w:fldChar')) is not None
+                or p.find('.//' + qn('w:instrText')) is not None)
+
+    @staticmethod
+    def _toc_has_fld_end(p, qn) -> bool:
+        return any(fc.get(qn('w:fldCharType')) == 'end'
+                   for fc in p.iter(qn('w:fldChar')))
+
+    @staticmethod
+    def _toc_strip_entry_runs(p, qn) -> None:
+        """删掉段落里的**文字 run**，保留域管道（fldChar/instrText）。"""
+        for r in list(p.findall(qn('w:r'))):
+            if (r.find('.//' + qn('w:fldChar')) is None
+                    and r.find('.//' + qn('w:instrText')) is None):
+                p.remove(r)
+
     def _add_toc(self, doc, chapters, template_path: Optional[str] = None):
         """插入**真正的 Word 目录域**——直接用 docx 的目录功能生成，不自己写条目。
 
@@ -4774,22 +5573,56 @@ class ReportAssembler:
 
         _sdt = self._load_toc_sdt(template_path)
         if _sdt is not None:
-            # 🔴 模板的目录 SDT 是**嵌套**的：外层包标题、内层包条目。
-            #    要取「直接挂着 w:p 的那个 sdtContent」，不能只取第一层。
             _contents = [c for c in _sdt.iter(_qn('w:sdtContent'))
                          if c.findall(_qn('w:p'))]
             _content = _contents[-1] if _contents else None
             if _content is not None:
+                # 🔴 去掉模板目录自带的**节属性**：保留它会在目录后多出一个分节，
+                #    紧接的「目录后分页」就落在一个新节首段 → 整页空白（实测）。
+                for _sp in list(_sdt.iter(_qn('w:sectPr'))):
+                    _sp.getparent().remove(_sp)
                 _ps = list(_content.findall(_qn('w:p')))
-                # 保留首段（目录标题 + 域开始）与末段（域结束），删掉中间的缓存条目。
-                # 🔴 必须按下标删——lxml 元素是代理对象，id() 不稳定，不能用 id 做集合比对。
-                if len(_ps) >= 2:
-                    for _p in _ps[1:-1]:
-                        _content.remove(_p)
-                # 域开始处标 dirty，Word 打开即重建
-                for _fc in _sdt.iter(_qn('w:fldChar')):
-                    if _fc.get(_qn('w:fldCharType')) == 'begin':
+                _title = next((p for p in _ps if self._toc_is_title(p, _qn)), None)
+                # 🔴 **重建**目录域：只留「目  录」标题段，其余旧条目/旧域全丢。
+                #    模板每个条目段里都夹着 fldChar，照搬会留下几十个空段，
+                #    且 `ps[1:-1]` 的删法会把标题一起删掉（业主：「目录俩字没了」）。
+                for _p in _ps:
+                    _content.remove(_p)
+                if _title is not None:
+                    _content.append(_title)
+
+                def _fld_para(kind: str):
+                    from docx.oxml import OxmlElement as _OE
+                    _p = _OE('w:p')
+                    _r = _OE('w:r')
+                    _fc = _OE('w:fldChar')
+                    _fc.set(_qn('w:fldCharType'), kind)
+                    if kind == 'begin':
                         _fc.set(_qn('w:dirty'), 'true')
+                    _r.append(_fc)
+                    _p.append(_r)
+                    return _p
+
+                from docx.oxml import OxmlElement as _OE
+                _head = _OE('w:p')
+                _r1 = _OE('w:r')
+                _fc = _OE('w:fldChar')
+                _fc.set(_qn('w:fldCharType'), 'begin')
+                _fc.set(_qn('w:dirty'), 'true')
+                _r1.append(_fc)
+                _r2 = _OE('w:r')
+                _it = _OE('w:instrText')
+                _it.set(_qn('xml:space'), 'preserve')
+                _it.text = ' TOC \\o "1-2" \\h \\u '
+                _r2.append(_it)
+                _r3 = _OE('w:r')
+                _fc2 = _OE('w:fldChar')
+                _fc2.set(_qn('w:fldCharType'), 'separate')
+                _r3.append(_fc2)
+                for _r in (_r1, _r2, _r3):
+                    _head.append(_r)
+                _content.append(_head)
+                _content.append(_fld_para('end'))
             _body = doc.element.body
             _sect = _body.find(_qn('w:sectPr'))
             if _sect is not None:
@@ -5099,6 +5932,43 @@ class ReportAssembler:
             pool.setdefault(item_no, []).append({"path": path, "note": note})
             budget -= 1
 
+        # 🔴 材料名 → 附件项（③④ 图片归项与 PDF 的「同文档去重」共用这张表）。
+        #    归项口径要和 `RECLAMATION_APPENDIX_RULES`（PDF 走的那张）一致，
+        #    否则同一份调查表会一半按 PDF 进门、一半按图片进门，印两遍。
+        _NAME_RULES = (
+            (16, ("现状图", "勘测定界图", "勘界图", "勘界报告", "勘测定界报告", "勘测报告")),
+            (17, ("红线",)),
+            (13, ("功能分布图", "分布图")),
+            (6, ("复垦协议",)),
+            (5, ("临时用地协议", "临时使用土地合同", "使用土地合同", "临时用地合同")),
+            (9, ("调查表", "公众调查", "调查问卷")),
+            (10, ("权利人意见", "权利人")),
+            (14, ("补偿证明", "补偿到位", "补偿款到位")),
+        )
+
+        def _stem_key(n: str) -> str:
+            """材料名归一（调查表_01 → 调查表），见模块级 `material_stem_key`。"""
+            return material_stem_key(n)
+
+        def _pdf_pages(p) -> int:
+            try:
+                import fitz
+                with fitz.open(str(p)) as _d:
+                    return int(_d.page_count)
+            except Exception:
+                return -1
+
+        # 同名逐页图片（`调查表_01.jpg` … `调查表_07.jpg`）：用来判断「PDF 与图片是同一份材料」。
+        # 只统计**会进附件**的那些（按名能归项），否则跳过 PDF 会把材料弄丢。
+        _img_stems: Dict[str, list] = {}
+        for _img in ((getattr(self, '_img_catalog_data', {}) or {}).get("catalog") or []):
+            _ip = str(_img.get("path") or "")
+            if not _ip or os.path.basename(_ip).startswith("pdf_"):
+                continue
+            if not next((n for n, kws in _NAME_RULES if any(k in _ip for k in kws)), 0):
+                continue
+            _img_stems.setdefault(_stem_key(_ip), []).append(_img)
+
         # ① PDF 原件 → 整页渲染
         for m in (self._project_materials or []):
             if not isinstance(m, dict):
@@ -5109,6 +5979,15 @@ class ReportAssembler:
                 continue
             _p = self._resolve_image_path(src)
             if not _p.exists():
+                continue
+            # 🔴 同一份材料既传了 PDF 又传了逐页图片（井神「调查表.pdf」+
+            #    「调查表_01..07.jpg」）：两边都进附件 = **同一份调查表印两遍**
+            #    （2026-11-02 业主实测）。页数相同时按图片入册（原图分辨率更高），
+            #    PDF 整份跳过；页数对不上说明不是同一份，仍按 PDF 收（宁可重复不可丢页）。
+            _same = _img_stems.get(_stem_key(name)) or []
+            if _same and _pdf_pages(_p) == len(_same):
+                logger.info(f"[复垦附件] 《{name}》与 {len(_same)} 张同名图片内容相同，"
+                            f"跳过 PDF 渲染（只按图片入册，避免重复）")
                 continue
             # 「勘测定界报告」在样本里同时供了附件16（勘测报告）与附件18（主体项目用地范围），
             # 靠 match 表**专名优先**区分，这里不再二次判断。
@@ -5144,6 +6023,13 @@ class ReportAssembler:
                 if not os.path.basename(_p).startswith("pdf_"):
                     _add(12, _p, str(img.get("display_name") or "影像图"))
                 continue
+            # 🔴 复垦图片分类器产出的是 `site_photo / site_layout / occupancy_map /
+            #    section` 这类**复垦专名**（见 RECLAMATION_IMAGE_SPECS），不是稳评的
+            #    `photo/announcement`。只认后两个 → 正文用剩的现场照片一张都进不了
+            #    附件12（2026-11-04 实测：62 张图，附件区 0 张）。
+            if _cat in ("site_photo", "site_layout", "occupancy_map", "section"):
+                _add(12, _p, str(img.get("display_name") or "现场照片"))
+                continue
             if _cat not in ("photo", "announcement"):
                 continue
             # 🔴 **PDF 派生的图不进这一类**（`pdf_*` 是 PDF 内嵌位图 / 整页渲染 / 关键图）：
@@ -5160,26 +6046,12 @@ class ReportAssembler:
         #       用户传的图片材料**一份都进不了报告**。更隐蔽的是：上传的图按
         #       `<原名>_<hash>.jpg` 落盘，而图片目录内部的回退找的是 `storage/images/<原名>`
         #       —— 名字对不上就**整张丢掉**（`_prepare_image_catalog` 里已修成用真实路径）。
-        #    归属按样本的附件清单：
+        #    归属按样本的附件清单（规则表见函数开头 `_NAME_RULES`）：
         #       现状图 / 勘测定界图 → 附件16「勘测报告」的附图
         #         （样本里它属**第13部分图件区**的图件②，图件区还没做，先挂勘测报告名下）
         #       红线图（含 CAD 渲染出的 `<名>.cad.png`）→ 附件17「主体项目用地红线图」
         #       功能分布图 → 附件13「临时用地功能分布图」
-        _NAME_RULES = (
-            (16, ("现状图", "勘测定界图", "勘界图")),
-            (17, ("红线",)),
-            (13, ("功能分布图", "分布图")),
-            # 🔴 合同/协议扫描件按名归项（分类器已把这类判成 `document`，不进 ③ 的
-            #    11/12）：临时用地协议 → 附件5，复垦协议 → 附件6。
-            #    否则这类图会**既不进正文也不进附件**，材料等于丢了（实测 2026-10-31）。
-            # 🔴 材料名 → 附件项（2026-10-31 实测：材料明明传了，却全标「待补充」）
-            (6, ("复垦协议",)),
-            (5, ("临时用地协议", "临时使用土地合同", "使用土地合同", "临时用地合同")),
-            (9, ("调查表", "公众调查", "调查问卷")),
-            (10, ("权利人意见", "权利人")),
-            (14, ("补偿证明", "补偿到位", "补偿款到位")),
-            (16, ("勘界报告", "勘测定界报告", "勘测报告")),
-        )
+        #       合同/协议扫描件 → 附件5/6（分类器已把这类判成 `document`，不进 ③ 的 11/12）
         for img in ((getattr(self, '_img_catalog_data', {}) or {}).get("catalog") or []):
             _p = str(img.get("path", ""))
             _nm = os.path.basename(_p)
@@ -5209,15 +6081,35 @@ class ReportAssembler:
         except Exception as _pe:
             logger.warning(f"[报告表] 人员库读取失败: {_pe}")
             _people = []
+        # 🔴 没有勾选时（脚本/老会话），默认按范文的三位排前面（陈春/林叶青/刘利伟），
+        #    不够再补其他职称/专业齐全的人；报告表最多 3 行。
+        if not (getattr(self, "_selected_personnel", None) or []) and _people:
+            # 复垦只收职称/专业齐全的人（与前端可选名单一致）
+            _people = [p for p in _people
+                       if str(p.get("职称/职务") or "").strip()
+                       and str(p.get("专业") or "").strip()] or _people
+            try:
+                from app.agent.reclamation_definitions import (
+                    RECLAMATION_DEFAULT_PERSONNEL as _pref_names,
+                )
+                _by_name = {p.get("姓名"): p for p in _people}
+                _pref = [_by_name[n] for n in _pref_names if n in _by_name]
+                if _pref:
+                    _people = _pref + [p for p in _people if p not in _pref]
+            except Exception:
+                pass
 
         data = collect_form_data(filled or {}, self._company or {}, _people)
-        # 🔴 摘要栏要**够长**（样本这两节各占大半页）。早先卡 700 字，实测把
-        #    「…在其实施过程中必须进行工程」截在半句上，业主直接说「内容缺少很多」。
-        #    现在按章长度给（第8章 ~1300 字、第10章 ~3000 字，等于整章收进来），
-        #    超限时在**句末**断开并加省略号。
-        data["工作计划"] = self._excerpt(chapters, 8, 1400)
-        data["保障措施"] = self._excerpt(chapters, 10, 2800)
-        data["测算依据"] = (
+        # 🔴 报告表的这两栏就是**正文第8章/第10章的原文摘录**，不压缩改写。
+        #    早先卡 1400/2800 字，第10章尾段（土地权属调整方案）被切掉并加「……」，
+        #    业主 2026-11-05：「报告表中的文本是否都能对应上正文内容？区别少一些」。
+        #    现在两栏按整章收（只留一个防极端长章撑爆表格的上限）。
+        data["工作计划"] = self._excerpt(chapters, 8, 8000)
+        data["保障措施"] = self._excerpt(chapters, 10, 8000)
+        # 🔴 测算依据也取**正文 7.1.1 的原文** —— 早先是一段写死的静态清单，
+        #    与模型写的第7章不一致（正文有《江苏省土地综合整治工程建设规范》、
+        #    2023 年修订版定额等，表里没有）。取不到才回落到静态口径。
+        data["测算依据"] = self._section_prose(chapters, 7, "投资估算编制依据") or (
             "（1）《土地复垦方案编制规程——通则》（TD/T 1031.1~1031.7-2011）；"
             "（2）《江苏省土地综合整治项目预算定额标准》；"
             "（3）《江苏省土地综合整治项目施工机械台班费预算定额标准》（苏财建〔2013〕469 号）；"
@@ -5230,7 +6122,97 @@ class ReportAssembler:
         _no = report_form_chapter_no(self._domain)
         self._add_chapter_title_page(doc, _cn_num(_no), self._get_chapter_title(_no),
                                      chapter_number=_no)
+        _t0 = len(doc.tables)
         render_report_form(doc, data, chapters, chapter_no=_no)
+        # 🔴 报告表的空白格就是**留白给人手填**（法人代表/发证机关/已损毁…），
+        #    不是「没有数据」。记下这些表格，`_post_generation_fix` 的
+        #    「空单元格填 —」那一步必须跳过 —— 业主 2026-11-02：
+        #    「表格中空白的部分不需要 "-" 代替」。
+        self._form_tables = [t._tbl for t in doc.tables[_t0:]]
+
+    def _add_reclamation_figures(self, doc, filled):
+        """第13部分「图件」：系统位置图 + 用户上传的现状/规划/勘界图。
+
+        样本这一部分是**整页大图**（土地利用现状图、复垦规划图等），所以这里
+        不套正文小图规格，按 15cm 宽单页排。没有图就只写一句说明，不印空章节。
+        """
+        from docx.shared import Cm as _Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH as _AL
+
+        items = []
+        _loc = Path(str(self.storage_dir)) / "images" / "图3-1 工程位置示意图.jpg"
+        if _loc.exists():
+            items.append((_loc, "项目地理位置示意图"))
+
+        _cats = {"land_use_map", "site_layout", "occupancy_map",
+                 "damage_layout", "measure_layout"}
+        _seen = {str(_loc)}
+        for it in ((getattr(self, "_img_catalog_data", {}) or {}).get("catalog") or []):
+            cat = str((it or {}).get("category") or "")
+            if cat not in _cats:
+                continue
+            name = str((it or {}).get("display_name") or (it or {}).get("name") or "")
+            if "位置示意图" in name or "工程位置" in name:
+                continue
+            try:
+                p = self._resolve_image_path((it or {}).get("path") or "")
+            except Exception:
+                continue
+            if not p or not p.exists() or str(p) in _seen:
+                continue
+            _seen.add(str(p))
+            items.append((p, name or f"图件{len(items) + 1}"))
+            if len(items) >= 10:
+                break
+
+        if not items:
+            self._add_para(doc, "本次未提供图件。")
+            return
+        for i, (p, name) in enumerate(items, 1):
+            if i > 1:
+                doc.add_page_break()
+            try:
+                para = doc.add_paragraph()
+                para.alignment = _AL.CENTER
+                para.add_run().add_picture(str(p), width=_Cm(15))
+            except Exception as e:
+                logger.warning(f"[图件] 插入失败 {p}: {e}")
+                continue
+            cap = doc.add_paragraph()
+            cap.alignment = _AL.CENTER
+            r = cap.add_run(f"图件{i} {name}")
+            r.font.name = "黑体"
+            r._element.get_or_add_rPr().get_or_add_rFonts().set(qn('w:eastAsia'), "黑体")
+            r.font.size = Pt(10.5)
+            r.bold = True
+
+    @staticmethod
+    def _section_prose(chapters, ch_num, title: str) -> str:
+        """取某章某个小节的正文纯文本（去标题/表格行）。
+
+        报告表「投资估算测算依据」用它，保证表里写的就是正文 7.1.1 的原话，
+        而不是另写一段静态清单（业主 2026-11-05：「报告表中的文本要能对应上正文」）。
+        """
+        ch = (chapters or {}).get(ch_num) or (chapters or {}).get(str(ch_num)) or {}
+        md = ch.get("markdown", "") if isinstance(ch, dict) else str(ch)
+        out: List[str] = []
+        inside = False
+        for ln in str(md).splitlines():
+            s = ln.strip()
+            _h = re.match(r'^#{1,6}\s*(.+?)\s*#*$', s)
+            if _h:
+                if inside and title not in _h.group(1):
+                    break
+                inside = title in _h.group(1)
+                continue
+            if not inside or not s:
+                continue
+            if s.startswith('|') or s.startswith('!['):
+                continue
+            if re.match(r'^\**\s*[表图]\s*\d+[-—]\d+', s):
+                continue
+            out.append(re.sub(r'\*\*(.+?)\*\*', r'\1', s))
+        return "\n".join(out).strip()
 
     @staticmethod
     def _excerpt(chapters, ch_num, limit: int) -> str:
@@ -5246,9 +6228,14 @@ class ReportAssembler:
             s = ln.strip()
             if not s or s.startswith("#") or s.startswith("|") or s.startswith("!["):
                 continue
+            # 🔴 表格/图片题注不是正文：「表8-1 复垦工作计划与投资安排表」被摘进
+            #    报告表的工作计划栏，读者看不到表，只看到一句孤零零的题注。
+            if re.match(r'^\**\s*[表图]\s*\d+[-—]\d+', s):
+                continue
             s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
             keep.append(s)
         text = "\n".join(keep)
+        text = re.sub(r'……+$', '', text).strip()
         if len(text) <= limit:
             return text
         cut = text[:limit]
@@ -5277,22 +6264,28 @@ class ReportAssembler:
         self._add_chapter_title_page(doc, _cn_num(_TOTAL), self._get_chapter_title(_TOTAL),
                                      chapter_number=_TOTAL)
 
-        # ── 附件清单：22 项全列，缺的标「（待补充）」──
+        # ── 附件清单：只列**这次真有材料**的项，并按 1..N 连续编号 ──
+        #    业主 2026-11-04：「资料少就跳过这个附件，按数字顺序排列，不要中间隔一个」。
+        #    以前固定列 22 项、缺的标「（待补充）」，渲染区就会出现 6 → 9 的跳号。
+        _items = [(no, name) for no, name in RECLAMATION_APPENDIX_ITEMS
+                  if pool.get(no)]
         _p = doc.add_paragraph(); _p.alignment = WD_ALIGN_PARAGRAPH.LEFT
         _r = _p.add_run('附件清单')
         _r.font.name = FONT_SONGTI; _r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_SONGTI)
         _r.font.size = Pt(14); _r.bold = True
-        for _no, _name in RECLAMATION_APPENDIX_ITEMS:
-            _mark = "" if pool.get(_no) else "（待补充）"
-            self._add_para(doc, f'附件{_no} {_name}{_mark}', indent=False, size=Pt(12))
+        if not _items:
+            self._add_para(doc, '本次未提供附件材料', indent=False, size=Pt(12))
+        else:
+            for _seq, (_no, _name) in enumerate(_items, 1):
+                self._add_para(doc, f'附件{_seq} {_name}', indent=False, size=Pt(12))
 
-        # ── 逐项渲染 ──
-        for _no, _name in RECLAMATION_APPENDIX_ITEMS:
+        # ── 逐项渲染：编号与清单一致，连续不跳号 ──
+        for _seq, (_no, _name) in enumerate(_items, 1):
             _files = pool.get(_no) or []
-            if not _files:
-                continue
             doc.add_page_break()
-            self._add_heading(doc, f'附件{_no} {_name}', 1)
+            # 🔴 附件项标题用 2 级：样本目录里「14 附件」下挂各项，用 1 级会和
+            #    正文各章并排（实测成稿目录里出现 10 个并列的「附件N」章）。
+            self._add_heading(doc, f'附件{_seq} {_name}', 2)
             for _f in _files:
                 _fp = _f.get("path", "")
                 if not _fp:
@@ -5326,8 +6319,25 @@ class ReportAssembler:
         if content is None:
             return 0
         ps = list(content.findall(_q('w:p')))
-        if len(ps) < 2:
+        if not ps:
             return 0
+        # 🔴 保留「目 录」标题与域管道（fldChar/instrText），只清旧条目 ——
+        #    以前 `ps[1:-1]` 把标题也删了，目录页只剩条目没有「目 录」二字。
+        title_p = next((p for p in ps if self._toc_is_title(p, _q)), None)
+        field_ps = [p for p in ps if self._toc_is_field_para(p, _q)]
+        for _p in ps:
+            if _p is title_p or _p in field_ps:
+                continue
+            content.remove(_p)
+        for _p in field_ps:
+            self._toc_strip_entry_runs(_p, _q)
+        end_p = next((p for p in field_ps if self._toc_has_fld_end(p, _q)), None)
+        if end_p is not None:
+            anchor = end_p
+        elif title_p is not None:
+            anchor = title_p
+        else:
+            anchor = field_ps[0] if field_ps else ps[0]
 
         # 收集正文标题（跳过目录 SDT 内部的段落）
         _inner = {id(x) for x in sdt.iter(_q('w:p'))}
@@ -5357,9 +6367,6 @@ class ReportAssembler:
         if not heads:
             return 0
 
-        for _p in ps[1:-1]:            # 清掉旧条目
-            content.remove(_p)
-        last = ps[-1]                  # 末段 = 域结束
         # 🔴 目录条目要**紧凑行距**（业主：「目录的格式行高紧凑一些」）。
         #    `docDefaults` 给的是 1.15 倍行距 + 段后 10 磅，条目之间空得厉害；
         #    参照件（洪泽模板 / 人工案卷）用的是 `line=350 lineRule=exact`
@@ -5374,8 +6381,7 @@ class ReportAssembler:
             sp.set(_q('w:after'), '0')
             return sp
 
-        # ⚠️ 模板自带的旧条目**不用单独压紧** —— 它们在上面那句
-        #    `for _p in ps[1:-1]: content.remove(_p)` 里已经全被删掉了，
+        # ⚠️ 模板自带的旧条目**不用单独压紧** —— 它们在上面清理旧条目时已经全删掉了，
         #    下面会按 `heads` 重新写一份。给已脱离文档树的元素设属性是死代码。
         for lvl, txt in heads:
             np = OxmlElement('w:p')
@@ -5411,7 +6417,11 @@ class ReportAssembler:
             t = OxmlElement('w:t'); t.text = txt
             r.append(t)
             np.append(r)
-            last.addprevious(np)
+            if end_p is not None:
+                end_p.addprevious(np)      # 条目插在域结束段之前
+            else:
+                anchor.addnext(np)         # 无域结束段：接在标题（或首段）之后
+                anchor = np
         return len(heads)
 
 
@@ -5641,8 +6651,10 @@ class ReportAssembler:
                 #    看不清 —— 逐张独占一行（宽 12.5cm）。照片类才需要并排。
                 for _p, _l in _pairs:
                     self._add_image(doc, _p, _l or "", numbered=True)
-                # 图后补带数字的解读（业主 2026-10-31）
-                self._add_figure_reading(doc, getattr(self, '_current_chapter', 0))
+                    # 🔴 每张图后面紧跟一段带数字的解读（地段 + 占地面积 + 主导地类），
+                    #    业主 2026-11-02：「每张插入的图片是否都有分析」。
+                    self._add_figure_reading(doc, getattr(self, '_current_chapter', 0),
+                                             [(_p, _l)])
             else:
                 self._add_image_row_pair(doc, _pairs)
 
@@ -5903,10 +6915,50 @@ class ReportAssembler:
             try:
                 from app.config import settings as _settings
                 from app.services.reclamation_figures import ensure_reclamation_figures
+                # 🔴 红线常以 **Shapefile** 上传：`_project_materials` 只收文本可解析的
+                #    材料，`.shp` 不在里面 → 界址点找不到、卫星图退化成白底几何图。
+                #    这里把上传清单里的 `.shp` 也并进材料列表（`collect_survey_polygons`
+                #    只读 source_path/source_name）。
+                _mats = list(state.get("_project_materials") or [])
+                _have = {str((m or {}).get("source_path") or "")
+                         for m in _mats if isinstance(m, dict)}
+                for _f in (state.get("_uploaded_files") or []):
+                    _p = _f.get("path") if isinstance(_f, dict) else _f
+                    if str(_p).lower().endswith(".shp") and str(_p) not in _have:
+                        _mats.append({"source_name": os.path.basename(str(_p)),
+                                      "source_path": str(_p)})
                 _gen = ensure_reclamation_figures(
-                    state.get("_project_materials") or [], _settings.STORAGE_DIR,
+                    _mats, _settings.STORAGE_DIR,
                     filled=state.get("filled_data") or {})
-                uploaded_items += _gen
+                # 🔴 系统生成的图（图3-1 位置示意图，带行政区位/五角星/比例尺/指北针）
+                #    排在用户上传图**前面**：同一图题下优先用生成的，避免人工稿里
+                #    那张缺图件要素的旧图顶掉新图（2026-11-04 业主实测）。
+                uploaded_items = list(_gen) + uploaded_items
+                # 🔴 图6-1 临时拦挡措施断面示意图（业主 2026-11-05 批注：
+                #    「涉及到表土剥离就放入这个图片」）。内置一张兜底；
+                #    用户上传了同名图（名字带「拦挡/断面」）就改用用户那张。
+                try:
+                    _fd6 = state.get("filled_data") or {}
+                    _rows6 = _fd6.get("_quantity_rows") or []
+                    _has_strip = any(
+                        ("剥离" in str((r or {}).get("name") or ""))
+                        and float((r or {}).get("qty") or 0) > 0
+                        for r in _rows6) if isinstance(_rows6, list) else False
+                    _user_section = any(
+                        ("拦挡" in str((u or {}).get("name") or ""))
+                        or ("拦挡" in str((u or {}).get("original_name") or ""))
+                        for u in uploaded_items if isinstance(u, dict))
+                    _builtin = (Path(str(_settings.STORAGE_DIR)) / "images"
+                                / "reclamation" / "图6-1_临时拦挡措施断面示意图.png")
+                    if _has_strip and not _user_section and _builtin.exists():
+                        uploaded_items.append({
+                            "path": str(_builtin),
+                            "name": _builtin.name,
+                            "label": "临时拦挡措施断面示意图",
+                        })
+                        logger.info("[图6-1] 涉及表土剥离，内置拦挡断面图已加入配图")
+                except Exception as _e6:
+                    logger.warning(f"[图6-1] 内置图加入失败（不影响出报告）: {_e6}")
                 # 🔴 系统生成的图**不参与「竖版地图转 90° 横放」那条启发式**
                 #    （那是给竖版扫描件用的；我们的图3-1 是真南北向竖图）——见 `_prep`。
                 self._no_rotate_names = {os.path.basename(str(g.get("path") or ""))
@@ -5929,6 +6981,18 @@ class ReportAssembler:
                            "survey": 2, "sentiment": 2, "review": 2, "opinion": 2, "planning": 2}
             _DEFAULT_BODY_QUOTA = 2
             _by_ch = img_catalog.get("by_chapter", {}) or {}
+            # 🔴 系统生成的图3-1（卫星底图+红线）必须先占住第3章的位置图名额。
+            #    图片目录的正文配额是「每类最多 2 张、按输入顺序取」——用户上传的
+            #    原始红线渲染排在前面，两张就把名额吃光，卫星图被挤掉，第3章只剩
+            #    白底红线图（2026-11-03 线上实测）。这里先把原始渲染从**正文**摘掉，
+            #    它们仍留在 `catalog` 里，照常进附件17。
+            _fig_ok = bool(((state.get("filled_data") or {})
+                            .get("_fig_location_generated")))
+            if self._domain == "reclamation" and _fig_ok:
+                _dropped = drop_raw_redline_from_ch3(_by_ch)
+                if _dropped:
+                    logger.info(f"[配图] 位置图名额让给系统卫星图，正文剔除原始红线 "
+                                f"{_dropped} 张（仍进附件17）")
             _total_before = sum(len(v) for v in _by_ch.values())
             for _ch in list(_by_ch.keys()):
                 _per_label = {}
@@ -6340,6 +7404,405 @@ class ReportAssembler:
         except Exception:
             return None
 
+    def _typo(self, slot: str) -> tuple:
+        """版式槽位 → `(中文字体, 字号 pt)`：模板画像优先，读不到按域常量。"""
+        _d = (getattr(self, "_tpl_style", None) or {}).get(slot) or {}
+        if _d.get("font") and _d.get("size"):
+            return str(_d["font"]), float(_d["size"])
+        return typography(getattr(self, '_domain', None), slot)
+
+    def _heading_bold(self, level: int) -> bool:
+        """该级标题是否加粗：按模板实测（井神样本标题实际**不加粗**）。
+
+        没有模板画像时保持原行为（加粗）。
+        """
+        _d = (getattr(self, "_tpl_style", None) or {}).get(f"h{level}") or {}
+        b = _d.get("bold")
+        return True if b is None else bool(b)
+
+    def _tpl_table_styles(self, chapter_no: int):
+        """当前模板某章每张表的实际字体/字号（按表题匹配用）。"""
+        cache = getattr(self, "_tpl_tbl_styles", None)
+        if cache is None:
+            cache = self._tpl_tbl_styles = {}
+        if chapter_no in cache:
+            return cache[chapter_no]
+        styles = []
+        tp = str((getattr(self, "_session_state", {}) or {}).get("template_path") or "")
+        if tp:
+            try:
+                from app.services.template_table_copy import chapter_table_styles
+                styles = chapter_table_styles(tp, chapter_no) or []
+            except Exception as e:
+                logger.info(f"[表格样式] 读取模板表样式跳过: {e}")
+        cache[chapter_no] = styles
+        return styles
+
+    def _match_tpl_table(self, chapter_no: int, caption: str):
+        """按表题二元组重合度找模板里的同题表。"""
+        def _bg(s):
+            s = re.sub(r'^表\s*\d+\s*[-—]\s*\d+\s*', '', str(s or ""))
+            s = re.sub(r'\s|单位[:：].*$', '', s)
+            return {s[i:i + 2] for i in range(max(0, len(s) - 1))}
+
+        _cap = _bg(caption)
+        best, score = None, 0
+        for e in (self._tpl_table_styles(chapter_no) or []):
+            sc = len(_cap & _bg(e.get("title")))
+            if sc > score:
+                best, score = e, sc
+        return best if (best and score >= 4) else None
+
+    def _table_typo_for(self, chapter_no: int, caption: str, ncols: int = 0) -> tuple:
+        """按**模板里同题表**取字体字号（每张表可能不同：4-8/4-9/4-10 是 9pt）。"""
+        best = self._match_tpl_table(chapter_no, caption)
+        if best and best.get("font") and best.get("size"):
+            return str(best["font"]), Pt(float(best["size"]))
+        return self._table_typo(ncols)
+
+    def _table_bold_for(self, chapter_no: int, caption: str) -> bool:
+        """表头是否加粗：模板实际不加粗（run bold=False），没有模板时保持加粗。"""
+        best = self._match_tpl_table(chapter_no, caption)
+        if best is not None and best.get("bold") is not None:
+            return bool(best["bold"])
+        return True
+
+    def _table_typo(self, ncols: int = 0) -> tuple:
+        """表格正文字体/字号（模板实测：仿宋 五号 10.5pt；读不到用 宋体 10.4）。
+
+        列多的表（7 列以上）自动降到 9pt、10 列以上 8pt —— 否则表头一个字一行、
+        整张表被撑到多页（业主 2026-11-04 实测：表4-5 变成竖排）。
+        """
+        _d = (getattr(self, "_tpl_style", None) or {}).get("table") or {}
+        _size = float(_d.get("size") or TABLE_SIZE.pt)
+        if ncols >= 10:
+            _size = min(_size, 8.0)
+        elif ncols >= 7:
+            _size = min(_size, 9.0)
+        return str(_d.get("font") or FONT_TABLE), Pt(_size)
+
+    def _caption_typo(self) -> tuple:
+        """表题/图注字体、字号、是否加粗（模板实测：黑体 10.5pt）。"""
+        _d = (getattr(self, "_tpl_style", None) or {}).get("caption") or {}
+        return (str(_d.get("font") or FONT_CAPTION),
+                Pt(float(_d.get("size") or 12)),
+                bool(_d.get("bold")))
+
+    def _template_ch4_plan(self):
+        """当前模板第四章的表格清单（表号/表题/顺序）；无模板返回 None。"""
+        if hasattr(self, "_tpl_ch4_plan"):
+            return self._tpl_ch4_plan
+        plan = None
+        tp = str((getattr(self, "_session_state", {}) or {}).get("template_path") or "")
+        if tp and getattr(self, "_domain", None) == "reclamation":
+            try:
+                from app.services.template_table_copy import chapter_table_plan
+                plan = chapter_table_plan(tp, 4) or None
+            except Exception as e:
+                logger.info(f"[表4-x] 模板表格清单读取跳过: {e}")
+        self._tpl_ch4_plan = plan
+        return plan
+
+    def _template_ch4_no(self, *keywords) -> int:
+        """模板第四章里标题含全部关键词的表号；找不到返回 0。"""
+        for e in (self._template_ch4_plan() or []):
+            t = re.sub(r'\s+', '', str(e.get("title") or ""))
+            if keywords and all(k in t for k in keywords):
+                return int(e.get("no") or 0)
+        return 0
+
+    def _template_allowed_sections(self, chapter_no: int):
+        """模板画像里本章允许的小节编号集合；没有模板/画像返回 None。"""
+        cache = getattr(self, "_tpl_sec_cache", None)
+        if cache is None:
+            cache = self._tpl_sec_cache = {}
+        if chapter_no in cache:
+            return cache[chapter_no]
+        allowed = None
+        tp = str((getattr(self, "_session_state", {}) or {}).get("template_path") or "")
+        if tp and getattr(self, "_domain", None) == "reclamation":
+            try:
+                from app.services.reclamation_template_profile import ensure_profile
+                prof = ensure_profile(tp, domain="reclamation")
+                ch = ((prof or {}).get("chapters") or {}).get(str(int(chapter_no)))
+                if ch:
+                    _nums = {str(s.get("no") or "").strip():
+                             re.sub(r'^[.．、\s]+', '',
+                                    str(s.get("title") or "")).strip()
+                             for s in (ch.get("sections") or [])
+                             if str(s.get("no") or "").strip()}
+                    allowed = _nums or None
+            except Exception as e:
+                logger.info(f"[章节核对] 模板小节读取跳过: {e}")
+        cache[chapter_no] = allowed
+        return allowed
+
+    def _dedup_structure_tables(self, doc) -> int:
+        """删掉重复的「复垦前后结构对比」表：只保留最后一张（系统补渲那张）。
+
+        模型有时只写「表4-3」当表题、表头是地类/复垦前，`strip_md_tables_by_caption`
+        匹配不到标题，最后和系统表印成两张（2026-11-05 实测）。
+        """
+        body = doc.element.body
+        cands = []
+        for el in list(body.iterchildren()):
+            if el.tag != qn('w:tbl'):
+                continue
+            trs = el.findall(qn('w:tr'))
+            if not trs:
+                continue
+            hdr = "".join(n.text or "" for n in trs[0].iter(qn('w:t')))
+            if '地类名称' in hdr and ('复垦前' in hdr or '复垦后' in hdr):
+                cands.append(el)
+        if len(cands) <= 1:
+            return 0
+        removed = 0
+        for el in cands[:-1]:
+            prev = el.getprevious()
+            if prev is not None and prev.tag == qn('w:p'):
+                txt = "".join(n.text or "" for n in prev.iter(qn('w:t'))).strip()
+                if re.match(r'^\*{0,2}表\s*4\s*[-—]\s*\d+\s*\*{0,2}$', txt):
+                    body.remove(prev)
+            body.remove(el)
+            removed += 1
+        if removed:
+            logger.info(f"[表去重] 删除重复的复垦前后结构对比表 {removed} 张")
+        return removed
+
+    def _center_all_tables(self, doc) -> int:
+        """全篇表格内容**上下左右居中**（业主口径：表格里不要有左对齐/顶对齐的格）。
+
+        逐格设两层：
+          水平 —— 每个单元格段落 `w:jc=center`；
+          垂直 —— 每个单元格 `w:vAlign=center`（Word 里「表格属性→单元格→垂直居中」）。
+        **大段文字格例外**：超过 40 字的整段话强制左对齐（复垦方案报告表的
+        「复垦工作计划」「实施保障措施」），只做垂直居中，不把整段话居中。
+        只处理单元格内部；表题段落在 `_add_table_caption` 里已居中，不受影响。
+        放在 save 前统一兜一遍，模板深拷贝进来的表、系统表、附录表都覆盖到。
+        """
+        n = 0
+
+        def _do(table) -> None:
+            nonlocal n
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for row in table.rows:
+                for cell in row.cells:
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    # 单元格里若还嵌了表，一并居中
+                    for sub in cell.tables:
+                        _do(sub)
+                    # 🔴 大段文字（如复垦方案报告表的「一、复垦工作计划」「二、实施保障措施」）
+                    #    **左对齐**：整段话居中会像诗，业主 2026-11-05 点名不要。
+                    #    阈值与 `reclamation_report_form._section_table` 的 left_align_long 一致。
+                    if len(cell.text.strip()) > 40:
+                        for p in cell.paragraphs:
+                            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        continue
+                    for p in cell.paragraphs:
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            n += 1
+
+        for table in doc.tables:
+            _do(table)
+        if n:
+            logger.info(f"[表格居中] 全篇 {n} 张表已上下左右居中")
+        return n
+
+    def _apply_document_fonts(self, doc) -> None:
+        """把模板的中文字体写进**文档默认样式**。
+
+        🔴 只给 run 设字体不够：空段、域、题注、表格空单元格会落回文档默认
+           （python-docx 空白模板的主题字体）。实测成稿在 Word 里显示
+           「MS 明朝」—— 不是我们设的仿宋/黑体，就是默认样式没改。
+        """
+        body_font, body_size = self._typo("body")
+        heads = {f"h{i}": self._typo(f"h{i}") for i in (1, 2, 3)}
+        tbl_font = self._table_typo()[0]
+        tbl_size_pt = self._table_typo()[1].pt
+
+        def _set_rfonts(rpr, east: str) -> None:
+            rf = rpr.find(qn('w:rFonts'))
+            if rf is None:
+                rf = OxmlElement('w:rFonts')
+                rpr.insert(0, rf)
+            for attr in ('w:asciiTheme', 'w:hAnsiTheme', 'w:eastAsiaTheme', 'w:cstheme'):
+                if rf.get(qn(attr)) is not None:
+                    del rf.attrib[qn(attr)]
+            rf.set(qn('w:ascii'), 'Times New Roman')
+            rf.set(qn('w:hAnsi'), 'Times New Roman')
+            rf.set(qn('w:cs'), 'Times New Roman')
+            rf.set(qn('w:eastAsia'), east)
+
+        # ① 文档默认（docDefaults）
+        try:
+            dd = doc.styles.element.find(qn('w:docDefaults'))
+            if dd is not None:
+                rpr_d = dd.find(qn('w:rPrDefault'))
+                if rpr_d is not None:
+                    rpr = rpr_d.find(qn('w:rPr'))
+                    if rpr is None:
+                        rpr = OxmlElement('w:rPr'); rpr_d.append(rpr)
+                    _set_rfonts(rpr, body_font)
+        except Exception as e:
+            logger.info(f"[版式] 文档默认字体设置跳过: {e}")
+
+        # ② 命名样式
+        def _style(name, font, size, bold=None):
+            try:
+                st = doc.styles[name]
+            except KeyError:
+                return
+            rpr = st.element.get_or_add_rPr()
+            _set_rfonts(rpr, font)
+            if size:
+                st.font.size = Pt(float(size))
+            if bold is not None:
+                st.font.bold = bold
+
+        _style('Normal', body_font, body_size)
+        for key, name in (("h1", 'Heading 1'), ("h2", 'Heading 2'), ("h3", 'Heading 3')):
+            font, size = heads[key]
+            _style(name, font, size, self._heading_bold(int(key[1])))
+        _style('Table Grid', tbl_font, tbl_size_pt)
+
+    def _fit_wide_table(self, table, header, rows) -> None:
+        """宽表按内容长度分列宽（7 列以上），并收紧单元格边距。
+
+        python-docx 新建表是**等宽列**：7 列以上的表里「一级影响因素」这种长表头
+        在 1.9cm 的格子里只能一个字一行，整张表被撑成竖排、跨好几页
+        （业主 2026-11-04 实测表4-5）。这里按「表头/前几行最长文本」分配列宽。
+        """
+        n = len(table.columns)
+        if n < 7:
+            return
+        usable_cm = 14.6
+        lens = []
+        for i in range(n):
+            vals = [str(header[i]) if i < len(header) else ""]
+            for r in (rows or [])[:8]:
+                vals.append(str(r[i]) if i < len(r) else "")
+            lens.append(max(4, min(18, max(len(v) for v in vals))))
+        total = float(sum(lens)) or 1.0
+        widths = [max(1.1, usable_cm * v / total) for v in lens]
+        k = usable_cm / sum(widths)
+        widths = [w * k for w in widths]
+
+        table.autofit = False
+        tblPr = table._tbl.tblPr
+        lay = tblPr.find(qn('w:tblLayout'))
+        if lay is None:
+            lay = OxmlElement('w:tblLayout')
+            tblPr.insert_element_before(
+                lay, 'w:tblCellMar', 'w:tblLook', 'w:tblCaption', 'w:tblDescription')
+        lay.set(qn('w:type'), 'fixed')
+        for i, w in enumerate(widths):
+            table.columns[i].width = Cm(w)
+
+        old = tblPr.find(qn('w:tblCellMar'))
+        if old is not None:
+            tblPr.remove(old)
+        mar = OxmlElement('w:tblCellMar')
+        for side, cm in (("top", 0), ("left", 0.05), ("bottom", 0), ("right", 0.05)):
+            el = OxmlElement(f'w:{side}')
+            el.set(qn('w:w'), str(int(round(cm / 2.54 * 1440))))
+            el.set(qn('w:type'), 'dxa')
+            mar.append(el)
+        tblPr.insert_element_before(mar, 'w:tblLook', 'w:tblCaption', 'w:tblDescription')
+
+    def _apply_tpl_table_style(self, table) -> None:
+        """按模板画像给表格套**边框、对齐、单元格边距、表头底纹、行高**。
+
+        表格不只是字体：模板可能是 1pt 粗框、无内框、带灰色表头，也可能是全无框线。
+        没有模板画像时不动（沿用 `Table Grid` 的 0.5pt 单线）。
+        """
+        st = getattr(self, "_tpl_style", None) or {}
+        if not st:
+            return
+        tblPr = table._tbl.tblPr
+        if tblPr is None:
+            return
+
+        # ── 边框（外框 + 内框）──
+        b = st.get("table_border") or {}
+        if b:
+            old = tblPr.find(qn('w:tblBorders'))
+            if old is not None:
+                tblPr.remove(old)
+            bd = OxmlElement('w:tblBorders')
+            none = bool(b.get("none"))
+            val = "nil" if none else str(b.get("val") or "single")
+            sz = str(max(2, int(round(float(b.get("size_pt") or 0.5) * 8))))
+            color = str(b.get("color") or "000000")
+            for side in ("top", "left", "bottom", "right"):
+                el = OxmlElement(f'w:{side}')
+                el.set(qn('w:val'), val); el.set(qn('w:sz'), sz)
+                el.set(qn('w:space'), '0'); el.set(qn('w:color'), color)
+                bd.append(el)
+            for side in ("insideH", "insideV"):
+                el = OxmlElement(f'w:{side}')
+                if none or not b.get("inside", True):
+                    el.set(qn('w:val'), 'nil')
+                else:
+                    el.set(qn('w:val'), val); el.set(qn('w:sz'), sz)
+                    el.set(qn('w:space'), '0'); el.set(qn('w:color'), color)
+                bd.append(el)
+            tblPr.insert_element_before(
+                bd, 'w:shd', 'w:tblLayout', 'w:tblCellMar', 'w:tblLook',
+                'w:tblCaption', 'w:tblDescription')
+
+        lay = st.get("table_layout") or {}
+        # ── 表格整体对齐 ──
+        a = str(lay.get("align") or "")
+        if a in ("center", "left", "right"):
+            old = tblPr.find(qn('w:jc'))
+            if old is not None:
+                tblPr.remove(old)
+            jc = OxmlElement('w:jc'); jc.set(qn('w:val'), a)
+            tblPr.insert_element_before(
+                jc, 'w:tblCellSpacing', 'w:tblInd', 'w:tblBorders', 'w:shd',
+                'w:tblLayout', 'w:tblCellMar', 'w:tblLook')
+
+        # ── 单元格边距 ──
+        m = lay.get("cell_margin_cm") or {}
+        if m:
+            old = tblPr.find(qn('w:tblCellMar'))
+            if old is not None:
+                tblPr.remove(old)
+            mar = OxmlElement('w:tblCellMar')
+            for side in ("top", "left", "bottom", "right"):
+                el = OxmlElement(f'w:{side}')
+                el.set(qn('w:w'), str(int(round(float(m.get(side) or 0) / 2.54 * 1440))))
+                el.set(qn('w:type'), 'dxa')
+                mar.append(el)
+            tblPr.insert_element_before(
+                mar, 'w:tblLook', 'w:tblCaption', 'w:tblDescription')
+
+        # ── 表头底纹 ──
+        shade = str(lay.get("header_shading") or "")
+        if shade and table.rows:
+            for cell in table.rows[0].cells:
+                tcPr = cell._tc.get_or_add_tcPr()
+                old = tcPr.find(qn('w:shd'))
+                if old is not None:
+                    tcPr.remove(old)
+                shd = OxmlElement('w:shd')
+                shd.set(qn('w:val'), 'clear'); shd.set(qn('w:color'), 'auto')
+                shd.set(qn('w:fill'), shade)
+                tcPr.append(shd)
+
+        # ── 行高（atLeast：只保证最小高度，内容多时可撑开，不裁字）──
+        h = lay.get("row_height_cm")
+        if h:
+            for row in table.rows:
+                trPr = row._tr.get_or_add_trPr()
+                old = trPr.find(qn('w:trHeight'))
+                if old is not None:
+                    trPr.remove(old)
+                trh = OxmlElement('w:trHeight')
+                trh.set(qn('w:val'), str(int(round(float(h) / 2.54 * 1440))))
+                trh.set(qn('w:hRule'), 'atLeast')
+                trPr.append(trh)
+
     def _add_heading(self, doc, text, level):
         h = doc.add_heading(text, level=level)
         # 🔴 版式按域取（见 `chapter_catalog.typography`）：
@@ -6347,9 +7810,9 @@ class ReportAssembler:
         #     —— 与改动前逐字相同；
         #    复垦 1级 黑体 16pt 居中 / 2级 黑体 15pt 左 / 3级 黑体 14pt 左
         #     —— 四份样本实测一致（一级不是 22pt，二三级不是宋体）。
-        _ea, _pt = typography(getattr(self, '_domain', None), f"h{level}")
+        _ea, _pt = self._typo(f"h{level}")
         align = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
-        ea, size, bold = _ea, Pt(_pt), True
+        ea, size, bold = _ea, Pt(_pt), self._heading_bold(level)
         h.alignment = align
         # 标题段不留首行缩进（正文才有）
         try:
@@ -6370,7 +7833,7 @@ class ReportAssembler:
         r = p.add_run(text)
         # 🔴 正文字体按域取：稳评 宋体（逐字等于改动前）/ 复垦 **仿宋**（四份样本一致）。
         #    显式传 `font` 的调用点（目录 / 编制说明用宋体）不受影响。
-        _df, _dp = typography(getattr(self, '_domain', None), "body")
+        _df, _dp = self._typo("body")
         _set_run_font(r, font or _df, size=size if size is not None else Pt(_dp),
                       bold=bold, ascii_font=FONT_ASCII)
 
@@ -6396,38 +7859,81 @@ class ReportAssembler:
                 _p, _l = str(info), ""
             if _p:
                 self._add_image(doc, _p, _l or "", numbered=True)
+                self._add_figure_reading(doc, getattr(self, '_current_chapter', 0),
+                                         [(_p, _l)])
         logger.info(f"[落图] 小节「{_trig}」的 {len(_imgs)} 张图落在首段之后："
                     + "、".join(str(x.get('path') if isinstance(x, dict) else x) for x in _imgs))
-        self._add_figure_reading(doc, getattr(self, '_current_chapter', 0))
 
-    def _add_figure_reading(self, doc, ch_num):
-        """图后补一段**带数字的解读**（业主 2026-10-31：配图小节必须有数据分析）。
+    def _add_figure_reading(self, doc, ch_num, imgs=None):
+        """**每张正文配图**后补一段带数字的解读（业主 2026-11-02：
+        「每张插入的图片是否都有分析？分析地段还有分析占地面积这类的」）。
 
-        🔴 为什么系统来写：复垦第3/4章的图是装配器插的，模型写正文时并不知道
-           图会落在哪一段，所以几乎从不主动写图后解读（实测三张图后一个字都没有）。
-           这里用事实卡里的**真实数字**补一句：范围面积 + 主导地类占比；
+        🔴 为什么系统来写：复垦的图由装配器插入，模型写正文时并不知道图会落在哪一段，
+           几乎从不主动写图后解读。这里用事实卡里的**真实数字**补：
+             · 地图类（位置/红线/现状/勘界/分布）→ 地段 + 占地面积 + 主导地类及占比
+             · 照片/影像 → 该范围 + 占地面积（**不编**照片里看到的东西）
            没有的数字就不写，绝不编。
         """
-        if self._domain != "reclamation" or int(ch_num or 0) not in (3, 4):
+        if self._domain != "reclamation":
             return
         st = getattr(self, '_session_state', {}) or {}
         filled = st.get("filled_data") or {}
         m2 = _num_or(filled.get("area_m2"), 0) or _num_or(filled.get("area_mu"), 0) * 666.67
         lc = filled.get("land_classification") or {}
         rows = lc.get("rows") if isinstance(lc, dict) else []
-        parts = []
-        if m2 > 0:
-            parts.append(f"图中红线范围为本次复垦责任范围，面积 {m2:,.0f} 平方米"
-                         f"（约 {m2 / 10000:.2f} 公顷）")
-        if isinstance(rows, list) and rows and m2 > 0:
-            _r = rows[0] or {}
-            _name = "".join(str(_r.get(k) or "") for k in ("一级地类", "二级地类"))
-            _a = _num_or(_r.get("面积_m2"), 0)
-            if _name and _a > 0:
-                parts.append(f"范围内以{_name}为主，面积 {_a:,.0f} 平方米，占 {_a / m2 * 100:.1f}%")
-        if not parts:
+        loc = str(filled.get("location") or "").strip()
+
+        items = list(imgs or [])
+        if not items:
+            items = [""]
+        # 同一批图重复调用（落图 + 挂起两条路径）只写一次
+        def _pth(x):
+            if isinstance(x, dict):
+                return str(x.get("path") or "")
+            if isinstance(x, (tuple, list)) and x:
+                return str(x[0] or "")
+            return str(x or "")
+        _key = (int(ch_num or 0), tuple(_pth(x) for x in items))
+        _done = getattr(self, '_figure_reading_done', None)
+        if _done is None:
+            _done = self._figure_reading_done = set()
+        if _key in _done:
             return
-        self._add_para(doc, "；".join(parts) + "。上述边界即复垦工程与监测管护的实际作业范围。")
+        _done.add(_key)
+
+        _MAP_KWS = ("位置", "红线", "现状", "勘界", "分布", "示意", "图")
+        _PHOTO_KWS = ("照片", "影像", "现场", "微信")
+        _leads = ["图中", "该图", "上图", "本图", "所附影像"]
+        for _i, _it in enumerate(items):
+            if isinstance(_it, dict):
+                _label = str(_it.get("label") or _it.get("name") or _it.get("path") or "")
+            elif isinstance(_it, (tuple, list)) and len(_it) >= 2:
+                _label = str(_it[1] or _it[0] or "")
+            else:
+                _label = str(_it or "")
+            _is_photo = any(k in _label for k in _PHOTO_KWS)
+            _lead = _leads[_i % len(_leads)]
+            parts = []
+            if _is_photo:
+                if m2 > 0:
+                    parts.append(f"{_lead}为临时用地现场影像，拍摄范围为本次复垦责任范围"
+                                 + (f"（{loc}）" if loc else "")
+                                 + f"，面积 {m2:,.0f} 平方米（约 {m2 / 10000:.2f} 公顷）")
+            elif m2 > 0:
+                parts.append(f"{_lead}红线范围为本次复垦责任范围"
+                             + (f"，位于{loc}" if loc else "")
+                             + f"，面积 {m2:,.0f} 平方米（约 {m2 / 10000:.2f} 公顷）")
+            if isinstance(rows, list) and rows and m2 > 0:
+                _r = rows[0] or {}
+                _name = "".join(str(_r.get(k) or "") for k in ("一级地类", "二级地类"))
+                _a = _num_or(_r.get("面积_m2"), 0)
+                if _name and _a > 0:
+                    parts.append(f"范围内以{_name}为主，面积 {_a:,.0f} 平方米，"
+                                 f"占 {_a / m2 * 100:.1f}%")
+            if not parts:
+                continue
+            self._add_para(doc, "；".join(parts) +
+                           "。上述边界即复垦工程、监测与管护的实际作业范围。")
 
     # ═══════════════════════════════════════════════════════════════
     # 审核元信息 → Word 批注（python-docx 无原生批注 API，直接操作 OOXML）

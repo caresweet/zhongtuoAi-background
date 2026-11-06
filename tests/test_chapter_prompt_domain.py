@@ -81,9 +81,12 @@ def test_data_iron_rule_reclamation_is_reclamation_not_translated_stability():
 
 
 def test_structure_sources_reclamation_are_empty_or_from_reclamation():
-    # 复垦无稳评模板小标题/底稿/表格骨架 —— 一律空，绝不回落稳评那份
+    # 复垦无稳评模板小标题/表格骨架 —— 一律空，绝不回落稳评那份
     assert cat.headings_for_prompt("reclamation", 3) == ""
-    assert cat.template_block_for_prompt("reclamation", 3) == ""
+    # 2026-11-02 起：没传选定模板时，仍可从**库内复垦范文**补「同章小节参考」
+    #（「都要切，每章节每小节」）—— 但绝不能出现稳评内容。
+    _blk = cat.template_block_for_prompt("reclamation", 3)
+    assert "社会稳定" not in _blk and "稳评" not in _blk and "DB32" not in _blk
     assert cat.table_skeletons("reclamation", 3) == {}
 
 

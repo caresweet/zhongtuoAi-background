@@ -230,6 +230,12 @@ class ChapterAgentBase(BaseAgent):
                     system_prompt = system_prompt + "\n\n" + _extra
             except Exception:
                 pass
+            # 🔴 模板底稿（2026-11-02 业主：「自创的文字是否都是学习模板对应小节构写的」）：
+            #    UI/主编排走的是 `_use_custom_prompt` 这条**覆盖 agent 自带提示词**的路，
+            #    此前**完全没带模板原文** —— LLM 只看到章节要点、事实卡与 RAG，等于凭空写，
+            #    「不需要动的不动、要写的按模板对应小节重新拟」根本没落地。
+            #    这里把「本章模板底稿」（含各二级/三级小节的原文）补进 user prompt。
+            user_prompt = self._append_template_block(user_prompt, state)
         else:
             system_prompt, user_prompt = self._build_llm_prompt(state, rag_context, user_data)
 
@@ -1961,6 +1967,49 @@ class ChapterAgentBase(BaseAgent):
 
     # ---- Default Prompt Templates ----
 
+    def _append_template_block(self, user_prompt: str, state: dict) -> str:
+        """把「本章模板底稿」追加到 custom prompt（按域取，见 `chapter_catalog`）。
+
+        稳定/复垦都走这里：底稿是该域模板**本章原文**（含各小节标题与正文），
+        规则三条由 `template_chapter_chunker` 写在块头：
+          不需要动的不动 / 要写的地方重新拟 / 别的项目事实不得照抄。
+        """
+        try:
+            from app.agent import chapter_catalog
+            _blk = chapter_catalog.template_block_for_prompt(
+                getattr(self, "domain", None), self.chapter_number,
+                (state or {}).get("template_path"))
+        except Exception as e:                       # pragma: no cover
+            logger.warning(f"[模板底稿] 取本章底稿失败（不影响生成）: {e}")
+            return user_prompt
+        out = user_prompt
+        if _blk and _blk not in out:
+            out = out + "\n\n" + _blk
+        # 🔴 复垦：在本章模板底稿之后附「逐节三色画像」——
+        #    模板原文告诉模型「可以照着写」，画像告诉它「哪些不许动、哪些只换数、哪些重写」。
+        if getattr(self, "domain", None) == "reclamation":
+            try:
+                from app.services.reclamation_template_profile import profile_prompt_block
+                _pb = profile_prompt_block((state or {}).get("template_path"),
+                                           self.chapter_number, domain="reclamation",
+                                           filled=(state or {}).get("filled_data"))
+                if _pb and _pb not in out:
+                    out = out + "\n\n" + _pb
+            except Exception as e:
+                logger.warning(f"[模板画像] 注入失败（不影响生成）: {e}")
+        # 🔴 所有域：把「逐节批注式分析」的取数口径附上（不变/换数/重写 + 来源/公式）。
+        #    业主 2026-11-05：「不只是复垦模块，以后所有的报告模块都是这套流程」。
+        try:
+            from app.services.template_case_analysis import case_prompt_block
+            _dom = getattr(self, "domain", None) or "stability"
+            _cb = case_prompt_block((state or {}).get("template_path"),
+                                    self.chapter_number, domain=_dom)
+            if _cb and _cb not in out:
+                out = out + "\n\n" + _cb
+        except Exception as e:
+            logger.warning(f"[批注分析] 注入失败（不影响生成）: {e}")
+        return out
+
     def _default_system_prompt(self, state: dict) -> str:
         """Default system prompt for chapter generation — 去AI化风格.
 
@@ -1998,7 +2047,8 @@ class ChapterAgentBase(BaseAgent):
 
         # 🔴 章节二级标题结构规范（含每节内容要点/数据/图片规格，按域）
         try:
-            section_spec = chapter_catalog.sections_for_prompt(domain, self.chapter_number)
+            section_spec = chapter_catalog.sections_for_prompt(
+                domain, self.chapter_number, (state or {}).get("template_path") or "")
         except Exception:
             section_spec = ""
 
@@ -2152,12 +2202,44 @@ class ChapterAgentBase(BaseAgent):
         template_content = chapter_catalog.template_reference_for_prompt(
             domain, self.chapter_number, state.get("filled_data", {})
         )
+        # 🔴 复垦：本章模板底稿 + 逐节三色画像（地区模板真正落地的地方）。
+        #    UI 主编排走 `_append_template_block`，脚本路径走这里，两条路都要有。
+        template_block = ""
+        profile_block = ""
+        if domain == "reclamation":
+            _tp = (state or {}).get("template_path")
+            if _tp:
+                try:
+                    template_block = chapter_catalog.template_block_for_prompt(
+                        domain, self.chapter_number, _tp) or ""
+                except Exception as e:
+                    logger.warning(f"[模板底稿] 取本章底稿失败: {e}")
+                try:
+                    from app.services.reclamation_template_profile import profile_prompt_block
+                    profile_block = profile_prompt_block(
+                        _tp, self.chapter_number, domain=domain,
+                        filled=(state or {}).get("filled_data")) or ""
+                except Exception as e:
+                    logger.warning(f"[模板画像] 构建失败: {e}")
+        # 🔴 所有域：逐节批注式分析（取数口径/公式），作为模板底稿的补充
+        case_block = ""
+        _tp_any = (state or {}).get("template_path")
+        if _tp_any:
+            try:
+                from app.services.template_case_analysis import case_prompt_block
+                case_block = case_prompt_block(
+                    _tp_any, self.chapter_number, domain=domain) or ""
+            except Exception as e:
+                logger.warning(f"[批注分析] 构建失败: {e}")
 
         return (
             f"## 写作材料（按优先级排列）\n\n"
             f"{chapter_catalog.material_heading(domain)}"
             f"{example_ctx[:8000] if example_ctx else '（无）'}\n"
             f"{template_content}\n"
+            f"{template_block}\n"
+            f"{profile_block}\n"
+            f"{case_block}\n"
             f"{dynamic_examples}\n\n"
             f"### 材料2：法规标准\n"
             f"{local_ctx[:3000] if local_ctx else ''}\n"

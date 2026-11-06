@@ -214,17 +214,14 @@ class TestNotAskable:
         from app.agent.chapter_definitions import NON_ASKABLE_FIELDS
         assert "notice_publish_date" in NON_ASKABLE_FIELDS
 
-    def test_no_fallback_for_org_personnel(self):
-        """🔴 责任单位人事信息**不给 AI 兜底拟稿** —— 拟出来一定是错的。
+    def test_no_ai_fallback_for_any_field(self):
+        """🔴 用户跳过 = 正文写「待补充」，**不再 AI 兜底拟稿**（2026-11-02 口径）。
 
-        实测：让模型拟「稳评责任单位」，它按事实卡写成了
-        「江苏众拓项目代理咨询有限公司」——那是**实施单位**（本公司），
-        责任单位是政府。事实卡里两者并存，模型分不清。
+        旧机制下责任单位人事信息会被模型按事实卡拟成「本公司」——责任单位其实是政府。
+        现在跳过的字段一律占位「待补充」，`_draft_field_fallbacks` 已删除。
         """
-        from app.services.report_workflow import _NO_FALLBACK_FIELDS
-        for k in ("org_name", "org_leader", "org_leader_title",
-                  "org_contact", "org_phone", "decision_unit"):
-            assert k in _NO_FALLBACK_FIELDS, f"{k} 不该被 AI 兜底拟稿"
+        import app.services.report_workflow as wf
+        assert not hasattr(wf, "_draft_field_fallbacks")
 
 
 class TestAttachmentCleanup:

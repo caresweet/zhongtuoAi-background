@@ -284,11 +284,72 @@ def _wide_bbox(lonlat: Sequence[Tuple[float, float]],
     return [(lon0, lat0), (lon1, lat0), (lon1, lat1), (lon0, lat1)]
 
 
+def _star_polygon(cx: float, cy: float, r: float, ratio: float = 0.382):
+    """五角星顶点（外接圆半径 r；`ratio` 是内半径比例）。"""
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * ratio
+        pts.append((cx + rr * math.cos(ang), cy + rr * math.sin(ang)))
+    return pts
+
+
+def _locator_inset(lonlat: Sequence[Tuple[float, float]], cache_dir: str,
+                   width: int, admin_text: str = ""):
+    """**行政区位小图**（左上角）：县域尺度卫星底图 + 项目五角星 + 行政区位文字。
+
+    业主 2026-11-02：「地理位置示意图要有行政区位；项目位置用五角星代表」。
+    取图失败返回 None（主图照常出，不阻断）。
+    """
+    from PIL import Image, ImageDraw
+    lons = [p[0] for p in lonlat]
+    lats = [p[1] for p in lonlat]
+    if not lons:
+        return None
+    cx, cy = sum(lons) / len(lons), sum(lats) / len(lats)
+    # ≈ 16 km 见方（zoom 12 下足够看到城区轮廓与主要道路）
+    half_lat = 0.075
+    half_lon = half_lat / max(0.25, math.cos(math.radians(cy)))
+    got = fetch_basemap([(cx - half_lon, cy + half_lat), (cx + half_lon, cy - half_lat)],
+                        cache_dir, zoom=12)
+    if got is None:
+        return None
+    canvas, tx0, ty0, z = got
+    canvas = canvas.convert("RGB")
+    x, y = _px(cx, cy, tx0, ty0, z)
+    side = max(64, min(canvas.width, canvas.height))
+    left = int(max(0, min(canvas.width - side, x - side / 2)))
+    top = int(max(0, min(canvas.height - side, y - side / 2)))
+    sq = canvas.crop((left, top, left + side, top + side)).resize((width, width))
+    _sc = width / float(side)
+    sx, sy = (x - left) * _sc, (y - top) * _sc
+    dr = ImageDraw.Draw(sq)
+    # 五角星 = 项目位置
+    _r = max(10, width // 16)
+    dr.polygon(_star_polygon(sx, sy, _r), fill=(220, 0, 0), outline=(255, 255, 255))
+    # 行政区位文字（压在星上方）
+    f = _font(max(13, width // 18))
+    txt = admin_text or "项目位置"
+    bb = dr.textbbox((0, 0), txt, font=f)
+    _tw, _th = bb[2] - bb[0], bb[3] - bb[1]
+    tx = int(min(max(4, sx - _tw / 2), width - _tw - 8))
+    ty = int(max(4, sy - _r - _th - 12))
+    dr.rectangle([tx - 5, ty - 4, tx + _tw + 5, ty + _th + 5],
+                 fill=(255, 255, 255), outline=(190, 0, 0), width=1)
+    dr.text((tx, ty - bb[1] + 1), txt, fill=(160, 0, 0), font=f)
+    dr.rectangle([0, 0, width - 1, width - 1], outline=(60, 60, 60),
+                 width=max(2, width // 120))
+    return sq
+
+
 def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
-                           cache_dir: str, title: str = "工程位置示意图") -> bool:
-    """出「工程位置示意图」：卫星影像 + 红线 + 比例尺 + 指北针 + 面积标注。
+                           cache_dir: str, title: str = "工程位置示意图",
+                           admin_text: str = "") -> bool:
+    """出「工程位置示意图」：卫星影像 + 红线 + 比例尺 + 指北针 + 面积标注
+    + **行政区位小图**（缩到县域尺度的区位图，项目位置用五角星标出）。
 
     `points` 是勘测定界的 `[(东, 北)]`（东坐标含 40 带号）。成功返回 True。
+    `admin_text` 是行政区位文字（如「淮安市淮安区」），空则不印。
     """
     from PIL import Image, ImageDraw
     lonlat = points_to_lonlat(points)
@@ -339,10 +400,13 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     f_big, f_sm = _font(_fb), _font(_fs)
     # 复垦责任范围注记（白底黑字 + 红框：叠在影像上不比红字压白边难认）
     cx = sum(p[0] for p in px) / len(px); cy = sum(p[1] for p in px) / len(px)
+    # 🔴 项目位置用**五角星**（业主 2026-11-02 口径），压在红线范围中心
+    _rs = max(9, img.width // 70)
+    dr.polygon(_star_polygon(cx, cy, _rs), fill=(220, 0, 0), outline=(255, 255, 255))
     _area = _polygon_area(points)
     lines = [f"复垦责任范围 {_area:.2f} ㎡",
              f"合 {_area / 666.6667:.2f} 亩    界址点 {len(points)} 个"]
-    _tx, _ty = cx + img.width // 40, cy - _fs
+    _tx, _ty = cx + img.width // 40 + _rs * 1.8, cy - _fs
     _pad = max(8, img.width // 200)
     _w_max = 0
     for i, s in enumerate(lines):
@@ -356,27 +420,78 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     for i, s in enumerate(lines):                    # 底上再写一遍，压住边框
         dr.text((_tx + _pad, _ty + i * int(_fs * 1.5) + _pad), s,
                 fill=(150, 0, 0), font=f_sm)
-    # 比例尺（按像元分辨率换算，不猜）
+    # ── 比例尺（图件要素；按像元分辨率换算，不猜）──
     mpp = meters_per_pixel(lonlat[0][1], z)
-    bar_m = 50.0
+    bar_m = 100.0
     bar_px = int(bar_m / mpp)
-    bx, by = img.width // 30, img.height - int(_fs * 2.2)
-    dr.rectangle([bx - _pad, by - int(_fs * 1.4), bx + bar_px + _pad, by + int(_fs * 1.4)],
+    bx, by = img.width // 30, img.height - int(_fs * 2.0)
+    _seg = max(2, bar_px // 2)
+    _bh = max(6, _fs // 3)
+    dr.rectangle([bx - _pad, by - int(_fs * 1.9), bx + bar_px + _pad, by + int(_fs * 0.8)],
                  fill=(255, 255, 255))
-    dr.line([bx, by, bx + bar_px, by], fill=(0, 0, 0), width=max(3, img.width // 700))
-    dr.text((bx, by + int(_fs * 0.15)), f"{bar_m:.0f} m", fill=(0, 0, 0), font=f_sm)
-    # 指北针
+    dr.text((bx, by - int(_fs * 1.75)), "比例尺（m）", fill=(0, 0, 0), font=f_sm)
+    dr.rectangle([bx, by, bx + _seg, by + _bh], fill=(0, 0, 0))
+    dr.rectangle([bx + _seg, by, bx + bar_px, by + _bh], fill=(255, 255, 255),
+                 outline=(0, 0, 0), width=1)
+    for _v, _x in ((0, bx), (int(bar_m / 2), bx + _seg), (int(bar_m), bx + bar_px)):
+        dr.text((_x - 6, by + _bh + 2), str(_v), fill=(0, 0, 0), font=f_sm)
+    # 指北针（压在标题条下方，别被标题条盖住）
     _n = max(26, img.width // 45)
-    ax, ay = img.width - _n * 2, _n
+    ax, ay = img.width - _n * 2, int(_fb * 1.7) + _n
     dr.rectangle([ax - _n, ay - _n, ax + _n, ay + int(_n * 2.4)], fill=(255, 255, 255))
     dr.line([ax, ay + int(_n * 1.9), ax, ay + int(_n * 0.2)], fill=(0, 0, 0), width=max(3, img.width // 700))
     dr.polygon([(ax, ay - int(_n * 0.2)), (ax - _n // 3, ay + int(_n * 0.45)),
                 (ax + _n // 3, ay + int(_n * 0.45))], fill=(0, 0, 0))
     dr.text((ax - _n // 5, ay + int(_n * 1.0)), "北", fill=(0, 0, 0), font=f_sm)
-    # 图题 + 底图来源（标题条高度随字号走）
+    # ── 图例（图件要素；右下，压在底图来源之上）──
+    _leg = (("line", "复垦责任范围"), ("star", "项目位置"), ("dot", "界址点"),
+            ("box", "行政区位"))
+    _lw = max(dr.textbbox((0, 0), t, font=f_sm)[2] for _, t in _leg)
+    _lh = int(_fs * 1.5)
+    _box_w = _lw + int(_fs * 3.2)
+    _box_h = _lh * len(_leg) + int(_fs * 0.8)
+    _lx = img.width - _box_w - int(_fs * 0.9)
+    _ly = img.height - _box_h - int(_fs * 4.2)
+    dr.rectangle([_lx, _ly, _lx + _box_w, _ly + _box_h],
+                 fill=(255, 255, 255), outline=(60, 60, 60),
+                 width=max(1, img.width // 900))
+    for _i, (_kind, _txt) in enumerate(_leg):
+        _cy = _ly + int(_fs * 0.4) + _i * _lh + _lh // 2
+        _sx = _lx + int(_fs * 0.6)
+        if _kind == "line":
+            dr.line([_sx, _cy, _sx + int(_fs * 1.6), _cy],
+                    fill=(230, 0, 0), width=max(3, img.width // 500))
+        elif _kind == "star":
+            dr.polygon(_star_polygon(_sx + int(_fs * 0.8), _cy, int(_fs * 0.55)),
+                       fill=(220, 0, 0), outline=(255, 255, 255))
+        elif _kind == "dot":
+            _d = max(3, img.width // 600)
+            dr.ellipse([_sx + int(_fs * 0.8) - _d, _cy - _d,
+                        _sx + int(_fs * 0.8) + _d, _cy + _d], fill=(230, 0, 0))
+        else:
+            dr.rectangle([_sx + int(_fs * 0.3), _cy - int(_fs * 0.45),
+                          _sx + int(_fs * 1.3), _cy + int(_fs * 0.45)],
+                         fill=(200, 200, 200), outline=(60, 60, 60))
+        dr.text((_sx + int(_fs * 2.2), _cy - int(_fs * 0.55)), _txt,
+                fill=(40, 40, 40), font=f_sm)
+    # ── 行政区位小图（左上，标题条下方；项目位置=五角星）──
     _tb = int(_fb * 1.7)
+    _pad0 = max(8, img.width // 120)
+    try:
+        _ins = _locator_inset(lonlat, cache_dir, max(200, img.width // 4), admin_text)
+        if _ins is not None:
+            img.paste(_ins, (_pad0, _tb + _pad0))
+    except Exception as e:                       # pragma: no cover - 小图失败不影响主图
+        logger.warning(f"[图3-1] 行政区位小图生成失败（主图照常）: {e}")
+    # 图题 + 底图来源（标题条高度随字号走）
     dr.rectangle([0, 0, img.width, _tb], fill=(255, 255, 255))
     dr.text((img.width // 40, int(_fb * 0.3)), title, fill=(0, 0, 0), font=f_big)
+    # 行政区位文字靠右写进标题条（业主：「要有行政区位」）
+    if admin_text:
+        _atxt = f"行政区位：{admin_text}"
+        _abb0 = dr.textbbox((0, 0), _atxt, font=f_sm)
+        dr.text((img.width - (_abb0[2] - _abb0[0]) - img.width // 40,
+                 int(_fb * 0.55)), _atxt, fill=(70, 70, 70), font=f_sm)
     _fa = max(14, img.width // 110)
     _f_attr = _font(_fa)
     _attr = "底图：Esri World Imagery（卫星影像）"
@@ -384,6 +499,11 @@ def render_location_figure(points: Sequence[Tuple[float, float]], out_path: str,
     dr.text((img.width - (_abb[2] - _abb[0]) - img.width // 40, img.height - int(_fa * 1.6)),
             _attr, fill=(255, 255, 255), font=_f_attr,
             stroke_width=2, stroke_fill=(60, 60, 60))
+
+    # ── 图廓（整幅外边框，图件要素）──
+    _bw = max(2, img.width // 700)
+    dr.rectangle([1, 1, img.width - 2, img.height - 2],
+                 outline=(0, 0, 0), width=_bw)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     # 🔴 存 JPEG 不存 PNG：这类卫星影像 PNG 要 2.3MB，JPEG(85) 只要 ~400KB，

@@ -52,7 +52,11 @@ ENABLE_HUMAN_REVIEW = os.environ.get("ENABLE_HUMAN_REVIEW", "false").lower() in 
 #   ⚠️ 评审表「人员四要素」（责任单位负责人/联系人/我方联系人电话）与
 #      「资料里确实没有」的关键字段仍会问 —— 那类信息只有用户知道，
 #      不问就只能印占位符。这是刻意保留的**唯一**提问点。
-ENABLE_DATA_INQUIRY = os.environ.get("ENABLE_DATA_INQUIRY", "false").lower() in ("1", "true", "yes")
+# 🔴 生成前/逐章的字段核对弹窗**默认开启**（业主 2026-11-02 实测：「没看到前端有
+#    让用户填数据的弹窗」—— 根因就是这里默认 false，线上没配环境变量，整条
+#    interrupt 路径从未触发，缺的字段被静默标成「已确认」）。
+#    脚本（`scripts/gen_reclamation_e2e.py`）里显式设 false，不阻塞批处理。
+ENABLE_DATA_INQUIRY = os.environ.get("ENABLE_DATA_INQUIRY", "true").lower() in ("1", "true", "yes")
 
 # 🔴 缺口弹窗单独一个开关（业主 2026-10-29：「缺少数据的可以弹窗问用户啊」）：
 #    AI 能拟出替代句的缺口**不打扰**（就地改写），只把**真缺硬数据**的那几条弹窗问。
@@ -442,15 +446,33 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
     try:
         if domain_of_state(state) == "reclamation":
             from app.services.field_fixer import fix_reclamation_fields
-            _before = {k: filled.get(k) for k in ("build_unit", "land_use_period")}
-            fix_reclamation_fields(filled, state.get("_project_materials") or [])
-            _new = [k for k, v in (("build_unit", filled.get("build_unit")),
-                                   ("land_use_period", filled.get("land_use_period")))
-                    if v and not _before.get(k)]
+            _keys = ("build_unit", "land_use_period", "topsoil_thickness",
+                     "hard_surface_type", "hard_area_m2", "surface_thickness_cm",
+                     "cushion_thickness_cm", "service_years", "project_area_m2",
+                     "project_investment", "construction_nature")
+            _before = {k: filled.get(k) for k in _keys}
+            fix_reclamation_fields(filled, state.get("_project_materials") or [],
+                                   title=state.get("report_title") or "")
+            _new = [k for k in _keys
+                    if filled.get(k) and not _before.get(k)]
             if _new:
                 logs.append("📌 复垦事实补全：" + "、".join(_new))
     except Exception as _rfe:
         logger.warning(f"fix_reclamation_fields skipped: {_rfe}")
+
+    # 🔴 复垦：从材料里**自动找项目批复/备案文号**（业主：「不都是可以获取到的么」）。
+    #    文本层先找；合同/批复扫描件再走一次视觉（按 md5 缓存）。找到就不弹窗问。
+    try:
+        if domain_of_state(state) == "reclamation" and not filled.get("doc_reference"):
+            from app.config import settings as _st
+            from app.services.doc_number_extract import ensure_doc_reference
+            _dn = await ensure_doc_reference(
+                filled, state.get("_project_materials") or [],
+                str(_st.STORAGE_DIR))
+            if _dn:
+                logs.append(f"📄 已从材料识别项目文号：{_dn}")
+    except Exception as _dne:
+        logger.warning(f"doc_reference 自动识别跳过: {_dne}")
 
     # 🔴 用勘测定界表纠正被正则抓错的字段（land_use/location/project_name）——按表头语义，不锁位置
     try:
@@ -677,50 +699,119 @@ async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
     #    这里挑出「有值、不是用户填的、用户还没确认过」的关键字段（按 `data_usage_map`
     #    挑影响 ≥2 个章节的），连同**当前值**一起弹给用户。
     checks = []
+    _domain = domain_of_state(state)
     try:
-        from app.services.data_usage_map import FIELD_USAGE
         from app.services import field_sources as _fs
-        from app.agent.chapter_definitions import NON_ASKABLE_FIELDS
-        _ranked = sorted(FIELD_USAGE.keys(),
-                         key=lambda k: -len(FIELD_USAGE.get(k) or []))
-        # 🔴 与「缺字段弹窗」同一条判据：**问了也答不上来的不问**
-        #    （风险等级是 scoring_service 算的、界址描述只可能来自勘测定界…）。
-        _cand = [k for k in _ranked
-                 if len(FIELD_USAGE.get(k) or []) >= 2 and k not in NON_ASKABLE_FIELDS]
-        # 🔴 **材料已经抽到的值不再拉出来问**（业主：「如果用户提供的资料里面有公示日期
-        #    这些数据，就不要再弹窗问用户日期了」）。
-        #    原先判据是 `field_sources.unconfirmed()` =「有值 且 来源≠user 且 未确认」——
-        #    也就是**专门**把材料识别出来的值挑出来让用户「核对」，而 `notice_date`/
-        #    `survey_date`/`symposium_date` 正在其中。对用户来说就是
-        #    「系统都从材料里认出来了，还问我一遍」。
-        #    现在只问**真正没有值**的关键字段（提前问一次，省得生成到一半再打断）。
-        _todo = [
-            k for k in _cand
-            if not str(filled.get(k) or "").strip()
-            or str(filled.get(k) or "").strip().startswith("【待")
-        ][:15]
-        from app.agent.chapter_definitions import FIELD_META
-        for k in _todo:
-            meta = FIELD_META.get(k)
-            if meta is None:
-                # 兜底不能回落英文 key（弹窗上写 `doc_reference` 业主看不懂）
-                logger.warning(f"[FIELD_META 缺登记] {k} —— 核对弹窗显示「补充信息」")
-                meta = ("补充信息", "text", None, 100, "")
-            checks.append({
-                "key": k, "label": meta[0], "type": meta[1],
-                "pattern": meta[2], "maxlength": meta[3], "example": meta[4],
-                "chapter": "数据核对",
-                # 🔴 预填**真实解析值**给用户核对；`【待补充】` 是占位符，不是值，
-                #    直接预填进去会让用户以为「系统认为这就是答案」。
-                "current": ("" if str(filled.get(k) or "").strip().startswith("【待")
-                            else str(filled.get(k) or "").strip()),
-                "source": _fs.label_of(filled, k),           # 「材料识别」/「AI 提取」
-            })
-        if checks:
-            from app.services.data_usage_map import attach_usage
-            attach_usage(checks)
+        if _domain == "reclamation":
+            # 🔴 复垦**绝不能套稳评的 FIELD_USAGE** —— 那份清单是土地征收口径：
+            #    `org_name`（稳评责任单位）、`support_rate`（群众支持率）、
+            #    `household_count`（户数）、`area_mu`（亩）……业主 2026-11-02 线上
+            #    复垦实测：弹窗又列出这 15 项，整份报告被当成稳评问。
+            #    复垦只问报告表「项目概况」那一小批（`RECLAMATION_NEED_FIELDS`），
+            #    且**资料里已有值 / 用户已确认过**的不问。
+            from app.agent.reclamation_definitions import RECLAMATION_NEED_FIELDS
+            _seen = set()
+            for _ch in sorted(RECLAMATION_NEED_FIELDS or {}):
+                for _spec in (RECLAMATION_NEED_FIELDS.get(_ch) or []):
+                    try:
+                        _k, _label, _ftype, _pat, _maxlen, _ex = _spec[:6]
+                    except (ValueError, TypeError):
+                        continue
+                    if _k in _seen:
+                        continue
+                    _seen.add(_k)
+                    _v = str(filled.get(_k) or "").strip()
+                    if _v and not _v.startswith(("【待", "待补充")):
+                        continue                          # 有值不问
+                    if filled.get(f"_confirmed_{_k}"):
+                        continue                          # 用户已确认/跳过
+                    checks.append({
+                        "key": _k, "label": _label, "type": _ftype,
+                        "pattern": _pat, "maxlength": _maxlen, "example": _ex,
+                        "chapter": "数据核对", "current": "",
+                        "source": _fs.label_of(filled, _k),
+                    })
+
+            # 🔴 报告表「主要编制人员」的职称/专业：人员库里有些行只有姓名
+            #    （历史证书扫描件入库时没这些字段），不补问就只能印「待补充」。
+            #    内部键用 `_person_title_<姓名>` / `_person_major_<姓名>`，
+            #    出口过滤放行 `_` 开头；报告表渲染时从 filled_data 读。
+            try:
+                from app.services.personnel_store import personnel_for
+                _names = list(state.get("selected_personnel")
+                              or (filled.get("_selected_personnel") or []))
+                for _p in personnel_for(_names or None, state.get("_company_id"))[:3]:
+                    _nm = str(_p.get("姓名") or "").strip()
+                    if not _nm:
+                        continue
+                    if (not str(_p.get("职称/职务") or "").strip()
+                            and not str(filled.get(f"_person_title_{_nm}") or "").strip()):
+                        checks.append({
+                            "key": f"_person_title_{_nm}",
+                            "label": f"{_nm} 的职称/职务", "type": "text",
+                            "pattern": None, "maxlength": 20, "example": "高级工程师",
+                            "chapter": "数据核对", "current": "",
+                            "source": "人员库缺这一项",
+                        })
+                    if (not str(_p.get("专业") or "").strip()
+                            and not str(filled.get(f"_person_major_{_nm}") or "").strip()):
+                        checks.append({
+                            "key": f"_person_major_{_nm}",
+                            "label": f"{_nm} 的专业", "type": "text",
+                            "pattern": None, "maxlength": 20, "example": "土地管理",
+                            "chapter": "数据核对", "current": "",
+                            "source": "人员库缺这一项",
+                        })
+            except Exception as _pe:
+                logger.warning(f"[询问字段] 人员职称/专业补问准备失败: {_pe}")
+        elif _domain in (None, "stability"):
+            from app.services.data_usage_map import FIELD_USAGE
+            from app.agent.chapter_definitions import NON_ASKABLE_FIELDS
+            _ranked = sorted(FIELD_USAGE.keys(),
+                             key=lambda k: -len(FIELD_USAGE.get(k) or []))
+            # 🔴 与「缺字段弹窗」同一条判据：**问了也答不上来的不问**
+            #    （风险等级是 scoring_service 算的、界址描述只可能来自勘测定界…）。
+            _cand = [k for k in _ranked
+                     if len(FIELD_USAGE.get(k) or []) >= 2 and k not in NON_ASKABLE_FIELDS]
+            # 🔴 **材料已经抽到的值不再拉出来问**（业主：「如果用户提供的资料里面有公示日期
+            #    这些数据，就不要再弹窗问用户日期了」）。
+            #    原先判据是 `field_sources.unconfirmed()` =「有值 且 来源≠user 且 未确认」——
+            #    也就是**专门**把材料识别出来的值挑出来让用户「核对」，而 `notice_date`/
+            #    `survey_date`/`symposium_date` 正在其中。对用户来说就是
+            #    「系统都从材料里认出来了，还问我一遍」。
+            #    现在只问**真正没有值**的关键字段（提前问一次，省得生成到一半再打断）。
+            _todo = [
+                k for k in _cand
+                if not str(filled.get(k) or "").strip()
+                or str(filled.get(k) or "").strip().startswith("【待")
+            ][:15]
+            from app.agent.chapter_definitions import FIELD_META
+            for k in _todo:
+                meta = FIELD_META.get(k)
+                if meta is None:
+                    # 兜底不能回落英文 key（弹窗上写 `doc_reference` 业主看不懂）
+                    logger.warning(f"[FIELD_META 缺登记] {k} —— 核对弹窗显示「补充信息」")
+                    meta = ("补充信息", "text", None, 100, "")
+                checks.append({
+                    "key": k, "label": meta[0], "type": meta[1],
+                    "pattern": meta[2], "maxlength": meta[3], "example": meta[4],
+                    "chapter": "数据核对",
+                    # 🔴 预填**真实解析值**给用户核对；`【待补充】` 是占位符，不是值，
+                    #    直接预填进去会让用户以为「系统认为这就是答案」。
+                    "current": ("" if str(filled.get(k) or "").strip().startswith("【待")
+                                else str(filled.get(k) or "").strip()),
+                    "source": _fs.label_of(filled, k),       # 「材料识别」/「AI 提取」
+                })
+            if checks:
+                from app.services.data_usage_map import attach_usage
+                attach_usage(checks)
+        # 其它域（投标等）：材料/招标文件说了算，不在这里追问。
     except Exception as _ce:
         logger.warning(f"待核对字段收集跳过: {_ce}")
+
+    # 🔴 最后一道闸：非稳评域的弹窗里不许出现稳评字段（见 chapter_catalog 注释）。
+    from app.agent.chapter_catalog import filter_inquiry_fields
+    checks = filter_inquiry_fields(_domain, checks)
 
     # 🔴 合理性异常（issues）**不再打断弹窗**（业主 2026-09-29：尽量少问用户）：
     #    · 支持率非 100% → 按材料/问卷值照用（业主口径「资料里有就照用，不判断不改」）
@@ -925,88 +1016,6 @@ def _drop_verbatim_chapters(nums, domain: str = "stability"):
     except Exception:
         return list(nums)
 
-# 🔴 **不给兜底拟稿**的字段 —— 拟出来一定是错的，比留空更糟。
-#    实测：让模型按事实卡给「稳评责任单位」拟一版，它写成了
-#    「稳评责任单位为江苏众拓项目代理咨询有限公司」—— 那是**实施单位**（本公司），
-#    责任单位是**政府**。事实卡里两者并存，模型分不清。
-#    这批是**甲方人事信息**，只能由用户提供；缺了就走中性表述 + 缺口清单，
-#    绝不自动编一个「像样的」填上（这条口径 `field_resolver` 里也立过）。
-_NO_FALLBACK_FIELDS = {
-    "org_name",        # 稳评责任单位
-    "org_leader",      # 责任单位负责人
-    "org_leader_title", # 负责人职务
-    "org_contact",     # 责任单位联系人
-    "org_phone",       # 责任单位联系电话
-    "decision_unit",   # 决策主体
-}
-
-
-async def _draft_field_fallbacks(miss_items: list, filled: dict,
-                                 domain: str = "stability") -> Dict[str, str]:
-    """用户**跳过**的字段 → 先拟一版兜底文字，让成品「拿到手简单改改就能用」。
-
-    🔴 业主口径（2026-09-22）：
-        「如果用户跳过了你该如何去填写一些兜底的模板，好让用户拿到生成之后的内容
-          可以就简单的改改。」
-
-        原行为：用户跳过 → 字段仍为空 → 正文只好写「以现状调查确认结果为准」这类遁词，
-        用户拿到后得**从零写一段**。现在改成：跳过 → agent 按事实卡拟一版规范表述，
-        用户只需在上面改几个字。
-
-    🔴 为什么不直接写进 `filled_data`
-        `filled_data` 是本报告的**唯一事实源**（「不留空、不编造」）。AI 拟的稿不是事实，
-        写进去会污染事实卡、并让 `build_project_card` 把它当真实数据发给每一章。
-        所以走独立通道 `filled["_fallbacks"]`，由 `build_project_card` 以
-        「📝 兜底草稿（用户跳过，AI 拟稿待改）」的名义带进提示词。
-
-    Returns: {字段 key: 草稿文字}
-    """
-    # 只对**文字类**字段兜底 —— 日期/数字拟不出来，也不该拟（编个日期比留空更糟）
-    todo = [f for f in (miss_items or [])
-            if str(f.get("type") or "text") in ("text", "phone")
-            and f.get("key") and f["key"] not in _NO_FALLBACK_FIELDS]
-    if not todo:
-        return {}
-    try:
-        from app.services.master_orchestrator import build_project_card
-        from app.services.llm_service import LLMService
-        from app.agent.chapter_catalog import report_kind_name
-        _card = build_project_card(filled or {}, domain)
-        _lines = [f'{i}. 「{f["label"]}」（第{f.get("chapter")}章）'
-                  for i, f in enumerate(todo, 1)]
-        _prompt = (
-            f"下面是一份{report_kind_name(domain)}里，用户**暂时无法提供**的几个字段。\n"
-            "请按事实卡为每一个拟一句**规范表述**，要求：\n"
-            "1. 是**完整可用的中文句子**（用户拿到后改几个字就能用），不是提示语；\n"
-            "2. **只依据「本项目事实卡」**；事实卡里没有的**不要编数字/人名/文号**，\n"
-            "   用「以…为准」「按规定执行」这类规范写法把话说完整即可；\n"
-            "3. 不要出现「待补充」「待填写」「请填写」这类占位字样。\n\n"
-            f"{_card}\n\n"
-            "── 待拟稿的字段 ──\n" + "\n".join(_lines) + "\n\n"
-            '严格输出 JSON：{"1": "第1个字段的表述", "2": "第2个字段的表述", ...}'
-        )
-        _res = await asyncio.wait_for(
-            LLMService().chat(messages=[{"role": "user", "content": _prompt}],
-                              max_tokens=3000, temperature=0.3),
-            timeout=180.0,
-        )
-        import json as _json
-        _m = re.search(r'\{[\s\S]*\}', str(_res or ""))
-        if not _m:
-            return {}
-        _data = _json.loads(_m.group(0))
-        out = {}
-        for i, f in enumerate(todo, 1):
-            v = str(_data.get(str(i)) or "").strip()
-            if v:
-                out[f["key"]] = v
-        logger.info(f"[兜底] 已为用户跳过的 {len(out)}/{len(todo)} 个字段拟稿")
-        return out
-    except Exception as e:
-        logger.warning(f"兜底拟稿跳过: {e}")
-        return {}
-
-
 async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowState:
     """生成「当前」章节（图级循环，每次只生成一章，生成后直接入库自推进）。
 
@@ -1078,8 +1087,10 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     # 🔴 按域取：稳评走上面那套章节规格；复垦/投标**不逐章追问**
     #    （业主 2026-10-31：「线上复垦报告还在弹窗问责任单位」—— 根因是这里
     #      一直按稳评的章节规格推导询问清单，问出了 `org_name` 这种土地征收字段）。
-    from app.agent.chapter_catalog import chapter_need_fields_for
-    _need = [(f, ch_num) for f in chapter_need_fields_for(domain_of_state(state), ch_num)]
+    from app.agent.chapter_catalog import chapter_need_fields_for, filter_inquiry_specs
+    _domain_need = domain_of_state(state)
+    _need = [(f, ch_num) for f in filter_inquiry_specs(
+        _domain_need, chapter_need_fields_for(_domain_need, ch_num))]
     # 🔴 首章生成前，先把「评审表（不编号前置部分）」需要的字段一并问掉
     #    ⚠️ **仅在开启提问时**并进来：默认（不提问）路径会把本章缺失字段统统标
     #       `_confirmed_`，若把评审表字段也带上，它们会被提前标成「已确认」，
@@ -1088,7 +1099,7 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     # 🔴 但评审表是**稳评专有**（江苏省制式评审表要印责任单位负责人/联系人）：
     #    复垦没有评审表章，再问「责任单位负责人/职务/实施单位联系人/电话」，
     #    用户只会莫名其妙（业主 2026-10-30）。按域门控。
-    _rt_fields = review_table_fields_for(domain_of_state(state))
+    _rt_fields = filter_inquiry_specs(_domain_need, review_table_fields_for(_domain_need))
     if idx == 0 and ENABLE_DATA_INQUIRY and _rt_fields:
         _need = [(f, _REVIEW_TABLE_OWNER) for f in _rt_fields] + _need
     if _need:
@@ -1132,20 +1143,15 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                     _fs.mark_confirmed(filled, *[f["key"] for f in _skipped if f.get("key")])
                 except Exception as _fce:
                     logger.warning(f"跳过字段标记失败: {_fce}")
-            # 🔴 同时拟一版兜底稿，让成品「拿到手简单改改就能用」
-            #    （业主：「如果用户跳过了你该如何去填写一些兜底的模板…」）。
-            #    走独立通道 `_fallbacks`，**不进事实卡** —— AI 拟的稿不是事实，
-            #    写进 `filled_data` 会污染唯一事实源。
+            # 🔴 业主 2026-11-02 口径：**用户选择跳过 = 正文该处写「待补充」**。
+            #    不再 AI 拟兜底稿（那是上一版口径），因为「AI 拟的替代句」看着像事实，
+            #    客户分不清哪句是资料、哪句是编的。跳过就是显性留白。
             if _skipped:
-                try:
-                    _fb = await _draft_field_fallbacks(_skipped, filled,
-                                                        domain_of_state(state))
-                    if _fb:
-                        filled.setdefault("_fallbacks", {}).update(_fb)
-                        logs.append(f"📝 用户跳过 {len(_skipped)} 项，已拟兜底草稿 "
-                                    f"{len(_fb)} 条（正文里标注为待核改）")
-                except Exception as _fbe:
-                    logger.warning(f"兜底拟稿跳过: {_fbe}")
+                _ph = filled.setdefault("_placeholders", {})
+                for _f in _skipped:
+                    if _f.get("key"):
+                        _ph[str(_f["key"])] = "待补充"
+                logs.append(f"📝 用户跳过 {len(_skipped)} 项，正文对应位置标「待补充」")
             state["filled_data"] = filled
 
     from app.services.llm_service import LLMService; llm = LLMService()
@@ -1339,6 +1345,9 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                    "filled_data": filled,
                    "_chapter_data": ch_data,
                    "_domain": _domain, "_report_style": "jinhu",
+                   # 🔴 模板底稿要用会话按「域+地区」挑出的那份（见 `template_selector`）：
+                   #    UI 走 custom prompt，agent 侧要靠它补「本章模板底稿」。
+                   "template_path": state.get("template_path") or "",
                    "current_chapter": ch_num, "chapters": {},
                    "_custom_prompt": prompt, "_use_custom_prompt": True,
                    "_uploaded_files": state.get("_uploaded_files", []),
@@ -2234,6 +2243,38 @@ class ReportWorkflowRunner:
         self.workflow = build_report_workflow()
         self.checkpointer = MemorySaver()
         self.compiled = self.workflow.compile(checkpointer=self.checkpointer)
+        self._checkpoint_conn = None
+
+    async def use_sqlite_checkpoints(self, path: str) -> bool:
+        """把 HITL 暂停点落到 SQLite —— 服务重启后 resume 还能接着跑。
+
+        🔴 业主 2026-11-02 线上实测：用户点「跳过」后整单失败
+           `InvalidUpdateError: Must write to at least one of ['__root__']`。
+           根因是 `MemorySaver` 只活在进程里，部署/重启后 thread 没了。
+        初始化失败只回落内存（不影响生成本身），并打告警。
+        """
+        try:
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            self._checkpoint_conn = await aiosqlite.connect(str(path))
+            saver = AsyncSqliteSaver(self._checkpoint_conn)
+            await saver.setup()
+            self.checkpointer = saver
+            self.compiled = self.workflow.compile(checkpointer=saver)
+            logger.info(f"[CHECKPOINT] HITL 暂停点已持久化: {path}")
+            return True
+        except Exception as e:
+            logger.warning(f"[CHECKPOINT] SQLite 暂停点不可用，回落内存（重启会丢暂停点）: {e}")
+            return False
+
+    async def close(self):
+        """关掉 SQLite 连接（服务停止时调用）。"""
+        conn, self._checkpoint_conn = self._checkpoint_conn, None
+        if conn is not None:
+            try:
+                await conn.close()
+            except Exception as e:
+                logger.debug(f"[CHECKPOINT] 关闭连接失败: {e}")
 
     async def start(self, session_id, report_title="", materials_dir="",
                     project_context="", filled_data=None, existing_state=None) -> dict:

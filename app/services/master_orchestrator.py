@@ -386,6 +386,19 @@ def build_project_card(filled_data: Dict[str, Any], domain: str | None = None) -
                 _line += f"（原句：{_about[:60]}）"
             lines.append(_line)
 
+    # 🔴 用户**跳过**的字段 → 正文该处必须原样写「待补充」（业主 2026-11-02：
+    #    「人工选择跳过的，就是占位文字『待补充』」）。不放 AI 拟稿，避免假事实。
+    _ph = filled_data.get("_placeholders")
+    if isinstance(_ph, dict) and _ph:
+        lines.append("")
+        lines.append("  —— ⏳ 用户未提供的数据（正文写到这些内容时**原样写「待补充」**）——")
+        for _k in _ph:
+            lines.append(f"  {_labels.get(_k, _k)}：待补充")
+        lines.append("  🔴 「待补充」只用于**字段值本身**（表格格内，或「单位地址：待补充」这种写法）；"
+                     "**禁止塞进句子中间**（如「在待补充之间」「G2待补充」）。")
+        lines.append("  🔴 道路、坐标、距离这类细节若资料没有，**直接不写**或写「项目区周边」；"
+                     "不要为它们写「待补充」，更不要编造数字。")
+
     # 🔴 兜底草稿（用户**跳过**了字段补充，AI 按事实卡拟的规范表述）。
     #    ⚠️ 它**不是事实** —— 所以既不放进上面的事实清单，也不许当成真实数据引用。
     #    用途是让成品「拿到手简单改改就能用」，而不是留一句遁词让用户从零写。
@@ -727,7 +740,8 @@ def build_chapter_prompt(
     #    导致 `chapter_definitions` 里定义的三级标题（4.2.1 / 8.4.1 / 9.2.1 …）
     #    从没进过提示词，LLM 只能自己编「（一）（二）」式小标题。
     try:
-        _sec = _catalog.sections_for_prompt(domain, num)
+        _sec = _catalog.sections_for_prompt(
+            domain, num, str((state or {}).get("template_path") or ""))
         if _sec:
             prompt += "\n" + _sec + "\n"
     except Exception as _se:

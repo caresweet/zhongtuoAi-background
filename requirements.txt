@@ -12,6 +12,10 @@ aiosqlite==0.20.0
 
 # AI / LLM
 langgraph==0.2.60
+# 🔴 暂停点（HITL interrupt）落 SQLite —— 服务重启后仍能 resume。
+#    以前用 MemorySaver：一重启检查点就没了，用户点「继续」直接
+#    `InvalidUpdateError: Must write to at least one of ['__root__']`。
+langgraph-checkpoint-sqlite==2.0.11
 langchain==0.3.13
 langchain-anthropic==0.3.4
 anthropic==0.42.0

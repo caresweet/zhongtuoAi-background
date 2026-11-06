@@ -122,6 +122,24 @@ def test_fix_reclamation_fields_extracts_unit_and_period():
     assert filled["land_use_end"].startswith("2028年9月")
 
 
+def test_fix_reclamation_fields_discards_bad_names():
+    """批复文号/句子残片不得当成项目名、单位名（2026-11-02 实测两个脏值）。
+
+    第9轮 e2e 报告表上出现过：
+        项目名称 = 「自然资规〔2019〕1号土地征收决策」（批复文号被当项目名）
+        单位名称 = 「 /申请人）"」                        （句子残片被当单位名）
+    """
+    from app.services.field_fixer import fix_reclamation_fields
+
+    filled = {"project_name": "自然资规〔2019〕1号土地征收决策",
+              "project_unit": ' /申请人）"'}
+    fix_reclamation_fields(
+        filled, [],
+        title="盐业井神张兴矿区ZX9、ZX10井施工便道临时用地土地复垦方案")
+    assert filled["project_name"] == "盐业井神张兴矿区ZX9、ZX10井施工便道临时用地"
+    assert "project_unit" not in filled
+
+
 def test_strip_table_references_for_chapter_without_tables():
     from app.validation.content_guardrails import strip_table_references
 

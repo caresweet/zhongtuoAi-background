@@ -39,6 +39,193 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# 🔴 哪些材料名可能是「勘测定界成果」——决定要不要跑视觉读数。
+#    2026-11-02 实测：井神那批文件叫「勘界图-已去除林地.pdf」「井神现状图…」
+#    「宗地图 Model (1).pdf」，一条都不含「勘测定界/勘测」→ 候选为空，地类全程没读，
+#    报告表的「复垦区土地利用现状/复垦土地面积」两张表只剩 0.0000。
+_LAND_CLASS_NAME_KWS = (
+    "勘测定界", "勘测", "勘界", "现状图", "宗地图", "地类", "土地利用现状",
+    # 制式《土地分类面积汇总表》（业主 2026-11-05 提供）
+    "土地分类面积", "分类面积", "面积汇总表",
+)
+
+
+def is_land_class_material(name: str) -> bool:
+    """材料名像不像「勘测定界成果」（含土地分类面积表的那类文件）。"""
+    return any(k in str(name or "") for k in _LAND_CLASS_NAME_KWS)
+
+
+def read_survey_meta_xlsx(path: str) -> Dict[str, str]:
+    """从勘界 Excel 的《勘测界定表》读封面级事实（土地座落/单位地址/单位性质…）。
+
+    表是「标签 | 值 | 标签 | 值」的一行四格形态，标签在左、值在右邻格。
+    只返回读到非空值的键，读不到就空着（**不猜**）。
+    """
+    p = Path(str(path or ""))
+    if not p.exists() or p.suffix.lower() not in (".xlsx", ".xlsm"):
+        return {}
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(p), data_only=True)
+    except Exception:
+        return {}
+    ws = next((w for w in wb.worksheets if "勘测界定表" in str(w.title or "")), None)
+    if ws is None:
+        ws = next((w for w in wb.worksheets if "勘测定界表" in str(w.title or "")), None)
+    if ws is None:
+        return {}
+    _KEYS = {
+        "土地座落": "location",
+        "单位地址": "unit_address",
+        "单位性质": "unit_nature",
+        "联系电话": "contact_phone",
+        "联系人": "contact_name",
+        "界址点数": "plot_count",
+    }
+    out: Dict[str, str] = {}
+    for row in ws.iter_rows(values_only=True):
+        cells = [str(c).strip() if c is not None else "" for c in row]
+        for i, c in enumerate(cells):
+            key = _KEYS.get(c.replace(" ", ""))
+            if not key or key in out:
+                continue
+            # 值一定在**紧邻右格**：往后找第一个非空会串到下一个标签
+            # （实测「单位地址｜（空）｜联系电话｜（空）」会读出 unit_address=联系电话）
+            val = cells[i + 1].strip() if i + 1 < len(cells) else ""
+            if val and val not in ("无", "/", "—"):
+                out[key] = val
+    return out
+
+
+def read_land_class_xlsx(path: str) -> Dict[str, Any]:
+    """从勘测定界报告 **Excel** 的《土地分类面积表》确定性读地类面积。
+
+    🔴 2026-11-02：井神材料里就有 `井神临时用地勘界报告.xlsx`，表结构是三段表头：
+
+        权属单位 | 农用地（耕地→水田/旱地/水浇地、园地、林地、草地…）
+                 | 建设用地（商业/工业/宅基地…） | 未利用地 | 合计
+
+    以前管线只认 PDF 视觉读数，Excel 完全没用上 —— 报告表「复垦区土地利用现状」/
+    「复垦土地面积」两张表只剩 0.0000，第6章工程量与投资估算直接跳过。
+    Excel 是**确定性的**、零 token，应当优先于视觉。
+
+    返回与 `extract_land_classification` 同构：
+        `{"rows": [...], "合计_m2": float, "pages": [], "source": "xlsx", "权属单位": str}`
+    """
+    p = Path(str(path or ""))
+    if not p.exists() or p.suffix.lower() not in (".xlsx", ".xlsm"):
+        return {}
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(p), data_only=True)
+    except Exception as e:
+        logger.warning(f"[地类] 读取 Excel 失败 {p.name}: {e}")
+        return {}
+    ws = next((w for w in wb.worksheets if "土地分类面积" in str(w.title or "")), None)
+    if ws is None:
+        return {}
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+    if not grid:
+        return {}
+
+    def _t(v) -> str:
+        return str(v).strip().replace("\n", "") if v is not None else ""
+
+    def _num(v) -> float:
+        try:
+            s = str(v).replace(",", "").strip()
+            return float(s) if s else 0.0
+        except Exception:
+            return 0.0
+
+    # 表头定位：第一层含「农用地」，第二层含「耕地/园地/林地」，第三层是叶子（水田…）
+    r1 = next((i for i, row in enumerate(grid) if any(_t(c) == "农用地" for c in row)), None)
+    if r1 is None:
+        return {}
+    r2 = r1 + 1
+    while r2 < len(grid) and not any(_t(c) in ("耕地", "园地", "林地") for c in grid[r2]):
+        r2 += 1
+    if r2 >= len(grid):
+        return {}
+    r3 = r2 + 1
+    if r3 >= len(grid):
+        return {}
+    row1, row2, row3 = grid[r1], grid[r2], grid[r3]
+
+    # 合并单元格的值只存在左上角 → 用 merged_cells 把「农用地 / 耕地」按列展开
+    from openpyxl.utils import range_boundaries
+    l1: Dict[int, str] = {}
+    l2: Dict[int, str] = {}
+    for rng in ws.merged_cells.ranges:
+        min_c, min_r, max_c, max_r = range_boundaries(str(rng))
+        val = _t(ws.cell(min_r, min_c).value)
+        if not val:
+            continue
+        if min_r <= r1 + 1 <= max_r:
+            for c in range(min_c, max_c + 1):
+                l1.setdefault(c, val)
+        if min_r <= r2 + 1 <= max_r:
+            for c in range(min_c, max_c + 1):
+                l2.setdefault(c, val)
+    for c, v in enumerate(row1, start=1):
+        if _t(v):
+            l1.setdefault(c, _t(v))
+    for c, v in enumerate(row2, start=1):
+        if _t(v):
+            l2.setdefault(c, _t(v))
+
+    # 叶子列：第三层给出最细地类（水田/旱地/…），没有就用第二层（其他草地/农村道路…）
+    leaves: Dict[int, str] = {}
+    for c in range(2, max(len(row3), len(row2)) + 1):
+        leaf = _t(row3[c - 1]) if c - 1 < len(row3) else ""
+        if not leaf:
+            leaf = _t(row2[c - 1]) if c - 1 < len(row2) else ""
+        if leaf and leaf != "合计":
+            leaves[c] = leaf
+    if not leaves:
+        return {}
+
+    # 数据行：优先取第一列写着「合计」的那行（避免各村分列重复相加），没有就取第一个有数的行
+    data_row = None
+    for row in grid[r3 + 1:]:
+        if row and _t(row[0]) == "合计" and any(_num(v) > 0 for v in row[1:]):
+            data_row = row
+    if data_row is None:
+        for row in grid[r3 + 1:]:
+            if row and any(_num(v) > 0 for v in row[1:]):
+                data_row = row
+                break
+    if data_row is None:
+        return {}
+
+    rows: List[dict] = []
+    for c, leaf in sorted(leaves.items()):
+        a = _num(data_row[c - 1]) if c - 1 < len(data_row) else 0.0
+        if a <= 0:
+            continue
+        rows.append({"一级地类": l1.get(c, ""), "二级地类": leaf, "面积_m2": a})
+    if not rows:
+        return {}
+
+    # 合计列：第一层写着「合计」的那一列；没有就按行求和
+    total = 0.0
+    for c, v in l1.items():
+        if v == "合计":
+            total = _num(data_row[c - 1]) if c - 1 < len(data_row) else 0.0
+            break
+    if total <= 0:
+        total = sum(r["面积_m2"] for r in rows)
+    # 权属单位：数据行第一列（取「合计」行之外的权属行，如「XX村村民委员会」）
+    owner = _t(data_row[0]) if data_row and _t(data_row[0]) != "合计" else ""
+    if not owner:
+        for row in grid[r3 + 1:]:
+            _c0 = _t(row[0]) if row else ""
+            if _c0 and _c0 != "合计" and "单位" not in _c0:
+                owner = _c0
+                break
+    return {"rows": rows, "合计_m2": round(total, 2), "pages": [],
+            "source": "xlsx", "权属单位": owner}
+
 # 命中即认为是「土地分类面积表」所在页
 _PAGE_KW = ("土地分类面积表",)
 # 兜底判据（表名被印章/折痕盖住时）：地类 + 合计 + 耕地 同页

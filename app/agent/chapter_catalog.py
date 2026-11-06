@@ -19,8 +19,11 @@ master_orchestrator）按域取章集合/章标题/章类型/章结构文本的�
    故上列多数函数在稳评分支**直接委托**给既有实现，不复制第二份。
 """
 
+import logging
 import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 _RECLAMATION = "reclamation"
 
@@ -139,15 +142,30 @@ def appendix_chapter_no(domain: str | None) -> Optional[int]:
 
     稳评第 14 章 = 附件（附件清单 + 图片材料）。
     复垦的附件在样本目录里也是**第 14 部分**（`10 保障措施 / 11 复垦方案报告表 /
-    12 请示 / 13 图件 / 14 附件`）—— 11/12/13 尚未实现，故目录会出现 10 → 14 的跳号，
-    这是刻意的（补上那三部分后跳号自然消失）。内容与稳评完全不同，
-    见 `appendix_kind`。
+    12 请示 / 13 图件 / 14 附件`）；四部分均已实现，目录不跳号。内容与稳评
+    完全不同，见 `appendix_kind`。
     """
     if domain == _RECLAMATION:
         from app.agent.reclamation_definitions import RECLAMATION_APPENDIX_CHAPTER_NO
         return RECLAMATION_APPENDIX_CHAPTER_NO
     from app.agent.chapter_definitions import TOTAL_CHAPTERS
     return TOTAL_CHAPTERS
+
+
+def request_letter_chapter_no(domain: str | None) -> Optional[int]:
+    """该域「请示」的章号；复垦第 12 部分，稳评没有。"""
+    if domain == _RECLAMATION:
+        from app.agent.reclamation_definitions import RECLAMATION_REQUEST_CHAPTER_NO
+        return RECLAMATION_REQUEST_CHAPTER_NO
+    return None
+
+
+def figures_chapter_no(domain: str | None) -> Optional[int]:
+    """该域「图件」的章号；复垦第 13 部分，稳评没有。"""
+    if domain == _RECLAMATION:
+        from app.agent.reclamation_definitions import RECLAMATION_FIGURES_CHAPTER_NO
+        return RECLAMATION_FIGURES_CHAPTER_NO
+    return None
 
 
 def report_form_chapter_no(domain: str | None) -> Optional[int]:
@@ -553,12 +571,55 @@ def target_words(domain: str | None, chapter_number: int) -> tuple:
     return _stability_target_words(chapter_number)
 
 
-def sections_for_prompt(domain: str | None, chapter_number: int) -> str:
-    """该域某章的「二级标题结构规范」提示词注入文本。"""
+def sections_for_prompt(domain: str | None, chapter_number: int,
+                        template_path: str = "") -> str:
+    """该域某章的「二级标题结构规范」提示词注入文本。
+
+    🔴 复垦且会话带模板时，**小节以模板为准**（业主 2026-11-04：「我总觉得
+       你还是用的以前的报告大纲」—— 以前这里只给代码里那套 4.1~4.7，模板的
+       4.1.1~4.1.4 反而没进提示词，模型只能沿用旧骨架）。模板画像读不到时
+       才回落到 `RECLAMATION_CHAPTER_DEFINITIONS.sections`。
+    """
     if domain == _RECLAMATION:
+        if template_path:
+            _tpl = _reclamation_sections_from_template(template_path, chapter_number)
+            if _tpl:
+                return _tpl
         return _reclamation_sections_for_prompt(chapter_number)
     from app.agent.chapter_definitions import format_sections_for_prompt
     return format_sections_for_prompt(chapter_number)
+
+
+def _reclamation_sections_from_template(template_path: str, chapter_number: int) -> str:
+    """从模板画像取本章小节（X.Y / X.Y.Z），生成结构规范。"""
+    try:
+        from app.services.reclamation_template_profile import ensure_profile
+        prof = ensure_profile(template_path, domain="reclamation")
+    except Exception:
+        return ""
+    ch = ((prof or {}).get("chapters") or {}).get(str(int(chapter_number)))
+    if not ch:
+        return ""
+    secs = []
+    for s in (ch.get("sections") or []):
+        no = str(s.get("no") or "").strip()
+        if not no or no.count(".") < 1 or no.count(".") > 2:
+            continue
+        # 模板里偶有「.土资源平衡分析」这种带前导点的标题，清掉
+        title = re.sub(r'^[.．、\s]+', '', str(s.get("title") or "")).strip()
+        secs.append((no, title))
+    if len(secs) < 2:
+        return ""
+    lines = [
+        "\n## 📋 本章结构规范（**逐字按模板小节**，禁止增删改）",
+        "🔴 小节标题与编号必须与下列清单一致，顺序不得调整。",
+        "🔴 标题最多三级（1 / 1.1 / 1.1.1）；更深的内容用「1）2）3）」引导行，不写四级编号标题。",
+    ]
+    for no, title in secs:
+        marker = "##" if no.count(".") == 1 else "###"
+        lines.append(f"{marker} {no} {title}")
+    lines.append("\n严格按上述小节顺序逐一撰写，每节必须有实质内容，禁止增删小节或留空。")
+    return "\n".join(lines)
 
 
 def _reclamation_sections_for_prompt(chapter_number: int) -> str:
@@ -746,19 +807,6 @@ def template_name(domain: str | None) -> str:
     return "内置十四章案卷标准结构（知识库综合生成）"
 
 
-def cover_type_line(domain: str | None) -> str:
-    """封面副标题（报告类型那一行）。
-
-    稳评逐字等于业主 2026-09-21 口径的「《社会稳定性风险评估》」（**带书名号**）。
-    复垦按样本：五份样本的封面这一行都是「土地复垦方案**报告书**」，
-    「临时用地土地复垦方案报告书」这类写法也**一律不带书名号** ——
-    带书名号是稳评被业主点名改的写法，复垦照抄就成了稳评格式。
-    """
-    if domain == _RECLAMATION:
-        return "土地复垦方案报告书"
-    return "《社会稳定性风险评估》"
-
-
 def cover_date_parts(domain: str | None, now=None) -> tuple:
     """封面落款第三行的 `(标签, 值)`。
 
@@ -944,7 +992,78 @@ def chapter_need_fields_for(domain: str | None, chapter_number: int) -> list:
     if domain in (None, "stability"):
         from app.agent.chapter_definitions import chapter_need_fields
         return chapter_need_fields(chapter_number)
+    if domain == _RECLAMATION:
+        # 🔴 复垦**不逐章追问**，只问报告表「项目概况」那一小批
+        #    （项目名称/单位名称/单位地址/法人/电话/单位性质）—— 业主 2026-11-02
+        #    「这些都可以弹窗让人工介入」。仍然**只问资料里没有的**（`_missing_for` 判）。
+        from app.agent.reclamation_definitions import RECLAMATION_NEED_FIELDS
+        return list((RECLAMATION_NEED_FIELDS or {}).get(int(chapter_number)) or [])
     return []
+
+
+_RECLAMATION_INQUIRY_KEYS: set | None = None
+
+
+def reclamation_inquiry_keys() -> set:
+    """复垦允许弹窗询问的字段白名单（从两处事实源推导，不另抄一份）。"""
+    global _RECLAMATION_INQUIRY_KEYS
+    if _RECLAMATION_INQUIRY_KEYS is None:
+        keys: set = set()
+        try:
+            from app.agent.reclamation_definitions import RECLAMATION_NEED_FIELDS
+            for _specs in (RECLAMATION_NEED_FIELDS or {}).values():
+                for _spec in (_specs or []):
+                    if _spec:
+                        keys.add(str(_spec[0]))
+        except Exception as e:                       # pragma: no cover
+            logger.warning(f"[询问字段] 复垦 NEED_FIELDS 读取失败: {e}")
+        try:
+            from app.services.material_ingestion_service import (
+                RECLAMATION_RECOGNITION_FIELDS,
+            )
+            keys.update(str(k) for k, _ in RECLAMATION_RECOGNITION_FIELDS)
+        except Exception as e:                       # pragma: no cover
+            logger.warning(f"[询问字段] 复垦识别清单读取失败: {e}")
+        _RECLAMATION_INQUIRY_KEYS = keys
+    return set(_RECLAMATION_INQUIRY_KEYS)
+
+
+def filter_inquiry_fields(domain: str | None, fields: list) -> list:
+    """安全网：非稳评域的弹窗里**不许出现该域没有的字段**。
+
+    🔴 `zhongtuo-report` 已经两次让稳评字段漏进复垦弹窗（10-31 逐章追问、
+       11-02 开头数据核对）。各处都按域取也难免以后再新加一个询问点忘了分支，
+       所以所有弹窗出口统一过这一道：不属于本域的字段直接剔除并记警告。
+       `_gap_*` / `__skip__` 这类内部键放行。
+    """
+    fields = list(fields or [])
+    if domain in (None, "stability"):
+        return fields
+    allowed = reclamation_inquiry_keys() if domain == _RECLAMATION else set()
+    out = []
+    for f in fields:
+        key = str((f or {}).get("key") or "")
+        if key.startswith("_") or key in allowed:
+            out.append(f)
+        else:
+            logger.warning(f"[询问字段] 域 {domain} 不含 {key}，已从弹窗剔除")
+    return out
+
+
+def filter_inquiry_specs(domain: str | None, specs: list) -> list:
+    """同 `filter_inquiry_fields`，输入是 `(key, label, type, pattern, maxlen, example)`。"""
+    specs = list(specs or [])
+    if domain in (None, "stability"):
+        return specs
+    allowed = reclamation_inquiry_keys() if domain == _RECLAMATION else set()
+    out = []
+    for spec in specs:
+        key = str((spec[0] if isinstance(spec, (tuple, list)) and spec else spec) or "")
+        if key.startswith("_") or key in allowed:
+            out.append(spec)
+        else:
+            logger.warning(f"[询问字段] 域 {domain} 不含 {key}，已从弹窗剔除")
+    return out
 
 
 def headings_for_prompt(domain: str | None, chapter_number: int) -> str:
@@ -973,9 +1092,27 @@ def template_block_for_prompt(
     """
     if domain == _RECLAMATION:
         from app.services.template_chapter_chunker import build_template_block_from_path
-        return build_template_block_from_path(template_path, chapter_number)
-    from app.services.template_chapter_chunker import build_template_block_for_prompt
-    return build_template_block_for_prompt(chapter_number)
+        # 🔴 上限放到 16000 字：盐业井神模板第4章原文 12221 字，按 6000 截断会把
+        #    后半章的表格与适宜性评价结论整段切掉 —— agent 拿到的是半章底稿。
+        #    （12000 仍差 221 字，实测会打出「模板后续内容略」，故留足余量。）
+        _base = build_template_block_from_path(template_path, chapter_number, limit=16000)
+    else:
+        from app.services.template_chapter_chunker import build_template_block_for_prompt
+        _base = build_template_block_for_prompt(chapter_number)
+
+    # 🔴 多模板同章小节参考（业主 2026-11-02：「都要切，每章节每小节」）：
+    #    单份「本章模板底稿」之外，把库里**其他范文**的同一章按小节对齐附上，
+    #    模板较薄的章节（复垦 ch6/8/9）也有对应写法可学。取不到就原样返回。
+    try:
+        from app.services.template_section_library import supplemental_block
+        _supp = supplemental_block(
+            domain or "stability", int(chapter_number),
+            base_text=_base, exclude_path=str(template_path or ""))
+        if _supp:
+            _base = (_base + "\n\n" + _supp) if _base else _supp
+    except Exception as _e:                       # pragma: no cover
+        logger.warning(f"[模板切片] 同章多模板参考注入失败（不影响生成）: {_e}")
+    return _base
 
 
 def table_skeletons(domain: str | None, chapter_number: int) -> Dict[str, Any]:
@@ -1232,6 +1369,9 @@ _RECLAMATION_BODY_IMAGE_ANCHOR: Dict[int, str] = {
     #    摘要后面，等于前言里做了一组数据可视化 —— 与「纯文字」的口径冲突。
     3: "项目简介",
     4: "土地损毁分析与评定",
+    # 🔴 第6章：涉及表土剥离就放「图6-1 临时拦挡措施断面示意图」（业主 2026-11-05 批注）。
+    #    锚在 6.1.1 工程技术措施设计 —— 表土剥离的段落就在这里。
+    6: "工程技术措施设计",
 }
 
 

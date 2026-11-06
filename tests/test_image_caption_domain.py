@@ -112,9 +112,9 @@ def test_reclamation_caption_formula_fallback():
 def test_chapter_image_specs_reclamation_from_samples():
     """复垦配图规格：真表（非中性兜底），据样本落地的章号、图名与关键词。"""
     rec = catalog.chapter_image_specs("reclamation")
-    # 只有样本支持的章（3/4/5）有条目；其余章缺省＝无正文图
+    # 样本支持的章（3/4/5）+ 第6章表土剥离拦挡断面图（业主 2026-11-05 批注）
     # 🔴 第1章（前言）自 2026-10-30 起不配图：前言只写文字、不做数据分析
-    assert set(rec) == {3, 4, 5}
+    assert set(rec) == {3, 4, 5, 6}
     for specs in rec.values():
         for s in specs:
             assert set(s) >= {"type", "label", "min", "max", "keywords"}

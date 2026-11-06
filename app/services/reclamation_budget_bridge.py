@@ -347,7 +347,14 @@ class BudgetEstimate:
     equipment: float = 0.0         # 二 设备购置费
     other: float = 0.0             # 三 其他费用
     monitor_care: float = 0.0      # 四 监测与管护费
+    # 四 的分项（第 7 章正文逐个引用，缺一项就会删掉一整句）
+    monitor: float = 0.0           # 四(一) 复垦监测费
+    care: float = 0.0              # 四(二) 管护费
+    acceptance: float = 0.0        # 四(三) 复垦验收费（土壤污染监测/耕地质量评定/验收）
     reserve: float = 0.0           # 五 预备费（基本预备费 + 风险费 + 价差预备费）
+    basic_reserve: float = 0.0     # 五(一) 基本预备费
+    price_reserve: float = 0.0     # 五(二) 价差预备费
+    risk: float = 0.0              # 五(三) 风险金
     static_total: float = 0.0      # 六 静态总投资
     dynamic_total: Optional[float] = None   # 七 动态总投资（未计价差时**留空**，不写 0）
     per_mu: float = 0.0            # 亩均投资
@@ -387,12 +394,27 @@ def to_estimate(data: dict) -> Optional[BudgetEstimate]:
         risk = float(rep.get("risk_fee_wan") or 0.0)
         cont = rep.get("price_contingency_wan")
         dynamic = rep.get("dynamic_total_wan")
+        construction = float(rep.get("engineering_cost_wan") or 0.0)
+        monitor_care = float(rep.get("monitoring_and_guard_wan") or 0.0)
+        # 四 的分项：接口给多少用多少，缺的按费率反推 / 从合计里扣，保证
+        # 「监测费 + 管护费 + 验收费 = 四」这项勾稽成立（第 7 章正文逐项引用）。
+        monitor = float(rep.get("monitoring_fee_wan") or 0.0) \
+            or round(construction * 0.015, 4)
+        care = float(rep.get("guard_fee_wan") or rep.get("care_fee_wan") or 0.0)
+        acceptance = float(rep.get("acceptance_fee_wan") or 0.0) \
+            or round(max(monitor_care - monitor - care, 0.0), 4)
         return BudgetEstimate(
-            construction=float(rep.get("engineering_cost_wan") or 0.0),
+            construction=construction,
             equipment=float(rep.get("equipment_cost_wan") or 0.0),
             other=float(rep.get("other_fee_wan") or 0.0),
-            monitor_care=float(rep.get("monitoring_and_guard_wan") or 0.0),
+            monitor_care=monitor_care,
+            monitor=round(monitor, 4),
+            care=round(care, 4),
+            acceptance=acceptance,
             reserve=round(basic + risk + float(cont or 0.0), 2),
+            basic_reserve=round(basic, 4),
+            price_reserve=round(float(cont or 0.0), 4),
+            risk=round(risk, 4),
             static_total=float(rep.get("static_total_wan") or 0.0),
             dynamic_total=(float(dynamic) if dynamic is not None else None),
             per_mu=float(rep.get("per_mu_wan") or 0.0),

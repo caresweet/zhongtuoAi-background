@@ -394,3 +394,70 @@ def test_risk_level_table_rebuilt_to_match_ch11():
     assert "| 1 | 甲风险 | 一般 |" in md
     assert "| 2 | 乙风险 | 较小 |" in md
     assert "模型自拟名" not in md and "结论段。" in md
+
+
+
+def test_deep_numbered_headings_become_inline_lead():
+    """四级及更深编号标题 → 正文「n）标题」（业主：最多三级标题）。"""
+    from app.services.report_assembler import demote_deep_headings
+    md = ("#### 4.4.2.1 评价范围\n"
+          "#### 4.4.2.2 评价单元划分\n"
+          "### 4.4.2 评价过程\n"
+          "## 4.4 土地复垦适宜性评价\n")
+    out, n = demote_deep_headings(md)
+    assert n == 2
+    assert "1）评价范围" in out
+    assert "2）评价单元划分" in out
+    assert "### 4.4.2 评价过程" in out      # 三级保留
+    assert "## 4.4 土地复垦适宜性评价" in out
+
+
+def test_all_tables_centered_both_directions():
+    """全篇表格内容上下左右居中：每格 w:vAlign=center、段落 jc=center。"""
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    from app.services.report_assembler import ReportAssembler
+
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2, style="Table Grid")
+    t.cell(0, 0).text = "项目"
+    t.cell(0, 1).text = "面积（hm2）"
+    t.cell(1, 0).text = "施工场站"
+    t.cell(1, 1).text = "0.9800"
+    # 故意留一格左对齐/顶对齐，验证兜底会改回来
+    t.cell(1, 0).paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    n = ReportAssembler._center_all_tables(ReportAssembler(), doc)
+    assert n == 1
+    for row in doc.tables[0].rows:
+        for cell in row.cells:
+            assert cell.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            for p in cell.paragraphs:
+                assert p.alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_long_text_cells_stay_left_aligned():
+    """大段文字格（复垦方案报告表的 工作计划/保障措施）只垂直居中，不水平居中。"""
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    from app.services.report_assembler import ReportAssembler
+
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2, style="Table Grid")
+    t.cell(0, 0).text = "项目"
+    t.cell(0, 1).text = "面积（hm2）"
+    t.cell(1, 0).text = "施工场站"
+    long_text = "一、复垦工作计划：本项目复垦工作自 2028 年 7 月开始，" \
+                "分年度安排表土剥离、场地平整、土壤培肥与管护，具体见第8章。"
+    t.cell(1, 1).text = long_text
+    t.cell(1, 1).paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    ReportAssembler._center_all_tables(ReportAssembler(), doc)
+    tb = doc.tables[0]
+    assert tb.cell(0, 0).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert tb.cell(1, 0).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert tb.cell(1, 1).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.LEFT
+    # 垂直仍居中
+    assert tb.cell(1, 1).vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER

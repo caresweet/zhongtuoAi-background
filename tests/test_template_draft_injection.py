@@ -59,6 +59,26 @@ def test_template_block_missing_chapter_or_path():
     assert build_template_block_from_path("/nope/x.docx", 3) == ""
 
 
+def test_custom_prompt_path_gets_template_block(tmp_path):
+    """UI 走 custom prompt（覆盖 agent 自带提示词）时，也必须带上「本章模板底稿」。
+
+    2026-11-02 核查发现：`_use_custom_prompt` 分支此前只给章节要点 + 事实卡 + RAG，
+    **没有模板原文** —— LLM 等于凭空写，「按模板对应小节构写」没落地。
+    """
+    from app.agent.agents.chapters.reclamation_generic_agent import (
+        ReclamationGenericChapterAgent,
+    )
+    path = _make_template(tmp_path, [(3, "项目概况", "项目建设地点：某某村。")])
+    agent = ReclamationGenericChapterAgent(3)
+    out = agent._append_template_block("原始提示词", {"template_path": path})
+    assert out.startswith("原始提示词")
+    assert "本章模板底稿" in out
+    assert "项目建设地点" in out
+    # 没有选定模板 → 不报错：库里有复垦范文时补「同章多模板参考」，没有就原样返回
+    _no_tpl = agent._append_template_block("x", {})
+    assert _no_tpl == "x" or ("同章多模板参考" in _no_tpl and _no_tpl.startswith("x"))
+
+
 class _FakeLLM:
     def __init__(self, text="## 技术方案\n\n正文内容。"):
         self.text = text

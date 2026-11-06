@@ -9,6 +9,8 @@ class StartGenerationRequest(BaseModel):
     intent: str = Field(default="", description="用户选择的意图类型: stability | bidding | question | table | image_analysis")
     domain: str = Field(default="", description="报告领域: stability | bidding")
     style: str = Field(default="jinhu", description="报告风格: jinhu(金湖模板) | standard(DB32标准格式)")
+    # 用户上传的报告模板（/reports/analyze-template 返回的相对路径）
+    template_path: str = Field(default="", description="用户上传的模板文件相对路径")
 
 
 class StartGenerationResponse(BaseModel):

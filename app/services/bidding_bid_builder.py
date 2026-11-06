@@ -112,6 +112,30 @@ def _image_row(doc, imgs, *, width_cm=7.9):
     return t
 
 
+def _landscape_section(doc):
+    """切到横向页（偏离表/人员配置清单，照人工稿）。"""
+    from docx.enum.section import WD_ORIENT, WD_SECTION
+    from docx.shared import Cm
+    s = doc.add_section(WD_SECTION.NEW_PAGE)
+    s.orientation = WD_ORIENT.LANDSCAPE
+    s.page_width, s.page_height = Cm(29.7), Cm(21.0)
+    s.left_margin = s.right_margin = Cm(2.3)
+    s.top_margin = s.bottom_margin = Cm(2.0)
+    return s
+
+
+def _portrait_section(doc):
+    """从横向页切回 A4 纵向。"""
+    from docx.enum.section import WD_ORIENT, WD_SECTION
+    from docx.shared import Cm
+    s = doc.add_section(WD_SECTION.NEW_PAGE)
+    s.orientation = WD_ORIENT.PORTRAIT
+    s.page_width, s.page_height = Cm(21.0), Cm(29.7)
+    s.left_margin = s.right_margin = Cm(3.0)
+    s.top_margin = s.bottom_margin = Cm(2.5)
+    return s
+
+
 def _page_number_footer(doc) -> None:
     """页脚居中页码（封面页不显示）。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -844,35 +868,56 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                  caption="测绘资质证书")
     doc.add_page_break()
 
-    # ── （四）偏离表 ──
+    # ── （四）偏离表（横向页，照人工稿）──
+    _landscape_section(doc)
     _h(doc, "（四）技术条款及相关要求偏离表", 1)
+    _p(doc, "技术条款及相关要求偏离表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
+    _qual = (
+        "投标人参加本次采购活动应具备下列资格条件：\n"
+        "①具有独立承担民事责任的能力；\n"
+        "②具有良好的商业信誉和健全的财务会计制度；\n"
+        "③有依法缴纳税收和社会保障资金的良好记录；\n"
+        "④具有履行合同所必需的设备和专业技术能力；\n"
+        "⑤不接受联合体，不接受中标后分包；\n"
+        "⑥良好的信用记录：报价截止时间之前，未被“信用中国”网站列入失信执行人、"
+        "重大税收违法案件当事人名单、政府采购严重违法失信行为记录名单，未被"
+        "“中国政府采购网”网站列入政府采购严重违法失信行为记录名单。"
+    )
+    _resp = _qual.replace("投标人参加", "我单位参加", 1)
     _table(doc, ["序号", "项目名称", "招标内容", "投标内容", "正偏离/负偏离"],
-           [["1", "服务内容", "第三章项目技术要求和有关说明", "全部响应，详见服务方案", "无偏离"],
-            ["2", "人员配置", "项目负责人1名、项目组成员3名", "按要求配置4人并附证书", "无偏离"],
-            ["3", "测绘资质", "乙级及以上测绘资质", "提供有效期内测绘资质证书", "无偏离"],
-            ["4", "服务期限", "按招标文件及合同约定", "按采购人要求工期完成", "无偏离"],
-            ["5", "其他技术条款", "见招标文件第三章", "完全响应", "无偏离"]],
-           widths=[1.5, 4.0, 6.0, 5.0, 3.0])
-    _p(doc, "我方对招标文件第三章全部技术条款及要求逐项响应，无负偏离；"
-            "未填写的偏离视为完全响应。", align="justify", size=10.5, indent=False)
+           [["1", project, _qual, _resp, "完全响应"]],
+           widths=[1.11, 2.66, 9.16, 10.08, 2.09], font_size=10.5,
+           row_heights=[1.67, 9.09])
 
-    # ── （五）评分导读表 ──
+    # ── （五）评分导读表（回纵向）──
+    _portrait_section(doc)
     _h(doc, "（五）技术商务部分评分导读表", 1)
-    _p(doc, f"投标人名称（盖章）：{co_name}        项目编号：{no}", indent=False)
+    _p(doc, "技术商务部分评分导读表", size=14, align="center", indent=False)
+    _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
+    _p(doc, f"项目编号：{no}", indent=False)
     _table(doc, ["序号", "评审项目", "响应情况", "投标文件对应页码", "自评分"],
-           [["1", "对项目的理解", "见服务方案第一章", "", ""],
-            ["2", "项目组织实施方案", "见服务方案第二章", "", ""],
-            ["3", "质量保障措施", "见服务方案第三章", "", ""],
-            ["4", "进度安排", "见服务方案第四章", "", ""],
-            ["5", "安全保密保障措施", "见服务方案第五章", "", ""],
-            ["6", "仪器设备", "见其他资料设备清单", "", ""],
-            ["7", "业绩", "见其他资料业绩证明", "", ""],
-            ["8", "项目组织机构人员配备", "见项目人员配置清单及证书", "", ""],
-            ["9", "体系认证证书", "见其他资料体系认证", "", ""]],
-           widths=[1.5, 6.0, 6.0, 3.5, 2.0])
-    _p(doc, "注：以上响应情况对应的证明材料见本投标文件相应章节；"
-            "自评分以评标委员会评审为准。", size=10.5, indent=False)
+           [["1", "投标人自2023年1月1日（含）以来承担过类似征地报批项目的，"
+                  "每提供一个得2分，本项最高得6分，未提供不得分。",
+             "已提供类似业绩", "见投标文件", "6"],
+            ["2", "1、项目负责人具有土地类或测绘类高级及以上职称的得2分，同时具有注册"
+                  "测绘师的得2分，本项最高得4分。\n2、项目组人员（除项目负责人外）中具有"
+                  "国土规划类、土地类或测绘类高级及以上职称的每有一个得2分，具有中级及以上"
+                  "职称的每有一个得1分，本项最多得6分。人员不重复计分，每人按最高职称计分。"
+                  "【提供人员证书复印件及社保证明并加盖公章，未提供不得分】",
+             "1.项目负责人具有测绘类高级职称并具有注册测绘师；\n"
+             "2.项目组成员具有高级职称；\n3.提供项目组成员社保证明材料",
+             "见投标文件", "9"],
+            ["3", "具有有效期内的质量管理体系、职业健康安全管理体系、环境管理体系证书、"
+                  "测量管理体系认证证书的，每提供1个得1分，本项最高得4分。",
+             "提供质量管理体系、职业健康安全管理体系、环境管理体系证书",
+             "见投标文件", "3"],
+            ["4", "投标人拟投入本项目具备全站仪、GNSS接收机、无人机、CASS成图软件、"
+                  "水位仪、绘图仪、测高仪，每类得1分，同类设备不重复计分，最高5分。",
+             "提供全站仪、GNSS接收机、无人机、CASS成图软件、绘图仪等设备购买发票和照片",
+             "见投标文件", "5"]],
+           widths=[1.27, 6.56, 4.58, 2.49, 2.48], font_size=10.5,
+           row_heights=[1.81, 2.22, 9.92, 2.77, 2.77])
     doc.add_page_break()
 
     # ── （六）服务方案 ──
@@ -887,9 +932,12 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _md_to_docx(doc, md or _fallback_plan(tender))
     doc.add_page_break()
 
-    # ── （七）人员配置清单 ──
+    # ── （七）人员配置清单（横向页，照人工稿）──
+    _landscape_section(doc)
     _h(doc, "（七）项目人员配置清单", 1)
-    _p(doc, f"投标人名称（盖章）：{co_name}        项目编号：{no}", indent=False)
+    _p(doc, "项目人员配置清单", size=14, align="center", indent=False)
+    _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
+    _p(doc, f"项目编号：{no}", indent=False)
     rows = []
     for i, p in enumerate(people, 1):
         # 证书编号只认人员库的 cert_no；没有就印「—」，**不拿证书名称顶编号**。
@@ -898,7 +946,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                      str(p.get("age") or ""), p.get("role") or "",
                      p.get("education") or "", p.get("title") or "", cert_no])
     _table(doc, ["序号", "姓名", "性别", "年龄", "岗位名称", "学历", "职称", "资格证书编号"],
-           rows, widths=[1.3, 2.2, 1.3, 1.3, 2.6, 2.2, 3.0, 3.5])
+           rows, widths=[1.45, 2.75, 2.9, 2.76, 3.14, 2.36, 2.8, 6.92],
+           font_size=10.5, row_heights=[0.96] + [0.94] * len(rows))
     _p(doc, "注：上述人员在项目执行过程中如需更换，须经采购人同意；"
             "擅自更换或不到位属违约行为。", size=10.5, indent=False)
     _p(doc, "拟投入人员简历：", bold=True, indent=False)
@@ -909,7 +958,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                 f"{p.get('title') or ''}，拟任{p.get('role') or ''}；持有证书：{certs}。",
            align="justify")
 
-    # ── （八）其他 ──
+    # ── （八）其他（回纵向）──
+    _portrait_section(doc)
     _h(doc, "（八）其他", 1)
     _h(doc, "1. 体系认证证书", 2)
     _asset_block(doc, "", [("质量管理体系认证",), ("环境管理体系认证",),

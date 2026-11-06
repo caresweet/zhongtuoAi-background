@@ -72,8 +72,127 @@ def _h(doc, text: str, level=1):
     return p
 
 
+def _p_two(doc, left: str, right: str, *, size=12, indent=0.0,
+           right_pos_cm=15.0):
+    """一行两段：左文 + 右文（制表位右对齐），用于「投标人名称… 单位：元」。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+    from docx.shared import Cm, Pt
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p.paragraph_format.first_line_indent = Cm(indent) if indent else None
+    p.paragraph_format.tab_stops.add_tab_stop(Cm(right_pos_cm),
+                                              WD_TAB_ALIGNMENT.RIGHT)
+    r = p.add_run(left)
+    _set_font(r, size=size)
+    r = p.add_run("\t" + right)
+    _set_font(r, size=size)
+    return p
+
+
+def _image_row(doc, imgs, *, width_cm=7.9):
+    """身份证正反面并排（带细边框，无图题），与人工稿一致。"""
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.shared import Cm
+    if not imgs:
+        return None
+    t = doc.add_table(rows=1, cols=len(imgs))
+    t.style = "Table Grid"
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, (_nm, data) in enumerate(imgs):
+        cell = t.cell(0, i)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        p = cell.paragraphs[0]
+        p.alignment = 1
+        try:
+            p.add_run().add_picture(io.BytesIO(data), width=Cm(width_cm))
+        except Exception as e:
+            logger.warning(f"[投标文件] 身份证图片插入失败: {e}")
+        for row in t.rows:
+            row.cells[i].width = Cm(width_cm)
+    return t
+
+
+def _page_number_footer(doc) -> None:
+    """页脚居中页码（封面页不显示）。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn as _q
+    from docx.shared import Pt
+    sec = doc.sections[0]
+    sec.different_first_page_header_footer = True
+    p = sec.footer.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    _set_font(run, size=9)
+    fld = OxmlElement('w:fldSimple')
+    fld.set(_q('w:instr'), 'PAGE')
+    r = OxmlElement('w:r')
+    t = OxmlElement('w:t')
+    t.text = "1"          # 不刷新域的阅读器至少看到页码 1
+    r.append(t)
+    fld.append(r)
+    p._p.append(fld)
+
+
+def _apply_body_format(doc) -> None:
+    """正文 12pt 段落统一 1.5 倍行距（对齐人工稿；标题/封面不动）。"""
+    for p in doc.paragraphs:
+        sizes = [r.font.size.pt for r in p.runs if r.font.size]
+        if p.text.strip() and sizes and max(sizes) <= 12:
+            p.paragraph_format.line_spacing = 1.5
+            p.paragraph_format.space_after = 0
+
+
+def _quote_detail_table(doc, items, total_yuan: int, big: str):
+    """明细报价表：5 列 + 合计行跨列合并（照人工稿/招标模板）。"""
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.shared import Cm
+    n = len(items)
+    t = doc.add_table(rows=1 + n + 2, cols=5)
+    t.style = "Table Grid"
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    headers = ["序号", "项目名称", "数量", "单价", "分项总报价"]
+    for ci, h in enumerate(headers):
+        cell = t.cell(0, ci)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        r = cell.paragraphs[0].add_run(h)
+        _set_font(r, size=10.5)
+        cell.paragraphs[0].alignment = 1
+    for i, (name, amt) in enumerate(items, 1):
+        for ci, val in enumerate((str(i), name, "1", str(amt), str(amt))):
+            cell = t.cell(i, ci)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            r = cell.paragraphs[0].add_run(val)
+            _set_font(r, size=10.5)
+            cell.paragraphs[0].alignment = 1
+    # 合计：左侧两列纵向合并，右侧三列拆成「小写/大写」两行
+    left = t.cell(1 + n, 0).merge(t.cell(2 + n, 1))
+    left.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    left.text = ""
+    r = left.paragraphs[0].add_run("合计")
+    _set_font(r, size=10.5)
+    left.paragraphs[0].alignment = 1
+    for ri, txt in ((1 + n, f"（小写）{total_yuan} 元"), (2 + n, f"（大写）{big}")):
+        c = t.cell(ri, 2).merge(t.cell(ri, 4))
+        c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        c.text = ""
+        r = c.paragraphs[0].add_run(txt)
+        _set_font(r, size=10.5)
+        c.paragraphs[0].alignment = 1
+    for ci, w in enumerate([1.47, 5.4, 3.5, 3.51, 3.52]):
+        for row in t.rows:
+            row.cells[ci].width = Cm(w)
+    t.rows[0].height = Cm(1.38)
+    for ri in range(1, n + 1):
+        t.rows[ri].height = Cm(1.35)
+    t.rows[1 + n].height = Cm(2.7)
+    t.rows[2 + n].height = Cm(1.35)
+    return t
+
+
 def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
-           widths: Optional[Sequence[float]] = None):
+           widths: Optional[Sequence[float]] = None, *, font_size=10.5,
+           row_heights: Optional[Sequence[float]] = None):
     from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.shared import Cm
     t = doc.add_table(rows=len(rows) + 1, cols=len(headers))
@@ -84,7 +203,7 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
         cell.text = ""
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         r = cell.paragraphs[0].add_run(str(h))
-        _set_font(r, size=10.5, bold=True)
+        _set_font(r, size=font_size, bold=True)
         cell.paragraphs[0].alignment = 1
     for ri, row in enumerate(rows, 1):
         for ci in range(len(headers)):
@@ -93,12 +212,16 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             val = row[ci] if ci < len(row) else ""
             r = cell.paragraphs[0].add_run(str(val))
-            _set_font(r, size=10.5)
+            _set_font(r, size=font_size)
             cell.paragraphs[0].alignment = 1
     if widths:
         for ci, w in enumerate(widths):
             for r in t.rows:
                 r.cells[ci].width = Cm(w)
+    if row_heights:
+        for i, h in enumerate(row_heights):
+            if i < len(t.rows):
+                t.rows[i].height = Cm(h)
     return t
 
 
@@ -602,53 +725,58 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"日期：{today}", indent=False)
     doc.add_page_break()
 
-    # ── （二）报价文件（照招标第六章模板）──
+    # ── （二）报价文件（照招标第六章模板逐项对版）──
     _h(doc, "（二）报价文件", 1)
-    _h(doc, "1、开标一览表（格式）", 2)
-    _p(doc, f"投标人名称（盖章）：{co_name}                                  单位：元",
-       indent=False, align="left")
+    _h(doc, "1、开标一览表（格式）：", 2)
+    _p(doc, "开标一览表", size=14, align="center", indent=False)
+    _p_two(doc, f"投标人名称（盖章）：{co_name}", "单位：元", size=14,
+           indent=0.0)
     _table(doc, ["标题", "内容（小写）", "内容（大写）"],
-           [["报价", f"{_total_yuan} 元", big]], widths=[6.0, 6.0, 7.0])
-    _p(doc, "投标人签名：", indent=False)
-    _p(doc, f"日期：{today}", indent=False)
-    _p(doc, "注：", indent=False)
-    _p(doc, "1. 投标报价应包含完成本服务项目发生的所有含税费用、支付给员工的工资和"
+           [["报价", f"{_total_yuan} 元", big]],
+           widths=[3.43, 5.33, 8.18], font_size=14,
+           row_heights=[1.12, 2.89])
+    _p_two(doc, "投标人签名：", f"日期：{today}", size=14, indent=0.75)
+    _p(doc, "注：", size=10.5, indent=False)
+    _p(doc, "①  投标报价应包含完成本服务项目发生的所有含税费用、支付给员工的工资和"
             "国家强制缴纳的各种社会保障资金，以及投标人认为需要的其他费用等；",
        size=10.5, indent=False)
-    _p(doc, "2. 每一项服务仅接受一个价格，投标文件应对《开标一览表》中的全部服务进行投标，"
+    _p(doc, "②  每一项服务仅接受一个价格，投标文件应对《开标一览表》中的全部服务进行投标，"
             "只投其中部分服务者，投标无效。", size=10.5, indent=False)
 
-    _h(doc, "2、投标明细报价表（格式）", 2)
+    _h(doc, "2、投标明细报价表（格式）：", 2)
+    _p(doc, "2.1 明细报价表", size=14, align="center", indent=False)
     _p(doc, f"项目名称：{project}", indent=False)
     _p(doc, f"项目编号：{no}", indent=False)
-    _p(doc, "单位：元", indent=False, align="right")
+    _p(doc, "单位：元", indent=False, align="center")
     _items = _quote_items(project, _total_yuan)
-    _rows = [[str(i), nm, "1", str(amt), str(amt)]
-             for i, (nm, amt) in enumerate(_items, 1)]
-    _rows.append(["合计", f"（小写）{_total_yuan} 元", "", "", ""])
-    _rows.append(["", f"（大写）{big}", "", "", ""])
-    _table(doc, ["序号", "项目名称", "数量", "单价", "分项总报价"],
-           _rows, widths=[1.8, 7.4, 1.8, 2.8, 3.2])
-    _p(doc, f"投标人（签章）：{co_name}", indent=False)
-    _p(doc, "投标人（签名）：", indent=False)
-    _p(doc, "注：明细报价表合计应与《开标一览表》报价一致；每一项服务仅接受一个价格。",
+    _quote_detail_table(doc, _items, _total_yuan, big)
+    _sig = _p(doc, f"投 标 人（签章）：{co_name}", indent=False)
+    _sig.paragraph_format.left_indent = Cm(4.5)
+    _sig2 = _p(doc, "投 标 人（签名）：", indent=False)
+    _sig2.paragraph_format.left_indent = Cm(4.5)
+    _p(doc, "注：", size=10.5, indent=False)
+    _p(doc, "（1）投标人应当根据“第三章 项目技术要求和有关说明”的内容详细填写明细报价表，"
+            "须包括本次采购的所有细项；“明细报价表”合计应与“报价一览表”报价一致。",
        size=10.5, indent=False)
     doc.add_page_break()
 
     # ── （三）资格证明文件 ──
     _h(doc, "（三）资格证明文件", 1)
-    _h(doc, "1. 关于资格的声明函", 2)
+    _h(doc, "1、关于资格的声明函（格式）：", 2)
+    _p(doc, "关于资格的声明函", size=14, align="center", indent=False)
     _p(doc, f"{purchaser}：", indent=False)
-    _p(doc, f"我公司参加贵单位{project}采购活动前三年内在经营活动中没有重大违法记录；"
-            "投标时不存在有效期限内的采购严重违法失信行为处罚记录，未被列入失信名单或"
-            "重大税收违法案件当事人名单；且具备履行合同所必需的设备和专业技术能力。"
-            "投标文件中所有关于投标资格的文件、证明、陈述均是真实、准确的。", align="justify")
-    _p(doc, f"投标人（盖章）：{co_name}", indent=False)
-    _p(doc, f"日期：{today}", indent=False)
+    _p(doc, f"我公司参加贵单位{project}项目采购活动前三年内在经营活动中没有重大违法记录；"
+            "同时，投标时不存在有效期限内的采购严重违法失信行为的处罚记录，未被列入失信名单"
+            "或重大税收违法案件当事人名单；且具备履行合同所必需的设备和专业技术能力。"
+            "我公司（单位）愿针对本次项目进行投标，投标文件中所有关于投标资格的文件、证明、"
+            "陈述均是真实的、准确的。若有违背，我公司（单位）同意监管部门做出的相关决定并"
+            "承担由此而产生的一切后果。", align="justify")
+    _p(doc, "投标人签名：", indent=False)
+    _p(doc, f"投标人公章：{co_name}", indent=False)
 
     _h(doc, "2、法定代表人授权委托书：", 2)
     af = _auth_fields(texts)
-    _p(doc, "法定代表人授权书", size=16, bold=True, align="center",
+    _p(doc, "法定代表人授权书", size=14, bold=True, align="center",
        indent=False, name="宋体")
     _p(doc, f"日期：{today}", indent=False, align="right")
     _p(doc, f"{purchaser}、{agency}：", indent=False)
@@ -671,13 +799,38 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"单位名称（公章）：{co_name}", indent=False)
     _p(doc, f"法定代表人签名：{af['legal']}", indent=False)
 
-    # 授权书后贴被授权代表身份证正反面（招标模板与人工稿都在这一页）
+    # 授权书后贴被授权代表身份证正反面（并排，带细边框，无图题）
     _id_imgs = _asset_images("身份证", limit=2)
     if _id_imgs:
-        for nm, data in _id_imgs:
-            _img(doc, data, 14.0, nm)
+        _image_row(doc, _id_imgs)
 
-    _h(doc, "3. 资格性证明材料复印件", 2)
+    _h(doc, "3、资格性证明材料复印件：", 2)
+    _p(doc, "资格性证明材料", size=14, align="center", indent=False)
+    _p(doc, f"日期：{today}", indent=False, align="right")
+    _p(doc, "投标人应按以下顺序提供相关材料复印件：", indent=False)
+    for _item in (
+        "①　具有独立承担民事责任的能力：投标人为法人或其他组织的提供营业执照或法人"
+        "（登记）证书复印件，投标人为自然人的提供自然人身份证复印件；",
+        "②　具有良好的商业信誉和健全的财务会计制度：银行出具的资信证明（若投标人为"
+        "法人的须提供其基本开户银行出具的资信证明）或投标人近十二个月中任意一个月份的"
+        "财务状况报告（资产负债表和利润表）或由会计师事务所出具的近两年中任意一个年度"
+        "的审计报告和所附已审财务报告复印件；",
+        "③　有依法缴纳税收的良好记录：投标人依法缴纳近十二个月中任意一个月份税收的"
+        "相关材料（提供相关主管部门证明或银行代扣证明）复印件；",
+        "④　有依法缴纳社会保障资金的良好记录：投标人依法缴纳近十二个月中任意一个月份"
+        "社会保障资金的相关材料（提供相关主管部门证明或银行代扣证明）复印件；",
+        "⑤　良好的信用记录：未被“信用中国”网站（www.creditchina.gov.cn）列入失信执行人、"
+        "重大税收违法案件当事人名单、政府采购严重违法失信名单，或未在“中国政府采购网”"
+        "网站（www.ccgp.gov.cn）被列入政府采购严重违法失信行为记录名单；（若投标人企业"
+        "信息已录入以上网站的，无需提供相关证明材料；若投标人企业信息未录入以上网站的，"
+        "须在投标文件中提供无不良信用记录承诺书）",
+        "⑥　采购人特殊要求：投标单位具有乙级及以上测绘资质。",
+    ):
+        _p(doc, _item, indent=False)
+    _p(doc, "投标人签名：", indent=False)
+    _p(doc, f"投标人公章：{co_name}", indent=False)
+    doc.add_page_break()
+
     _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
     _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年10—12月资产负债表",),
                               ("2025年10—12月利润表",)], caption="财务状况报告")
@@ -811,8 +964,10 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     # 身份证复印件已按招标模板贴在「（三）2. 法定代表人授权委托书」之后
 
-    # 表格数据统一上下左右居中（在保存前兜底一次）
+    # 正文 12pt 统一 1.5 倍行距（对齐人工稿）；表格上下左右居中；页脚页码
+    _apply_body_format(doc)
     _center_all_cells(doc)
+    _page_number_footer(doc)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

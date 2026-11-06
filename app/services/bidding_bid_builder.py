@@ -1019,7 +1019,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     doc.add_page_break()
 
     _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
-    _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年10—12月资产负债表",),
+    _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",),
+                              ("2025年10—12月资产负债表",),
                               ("2025年10—12月利润表",)], caption="财务状况报告")
     _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)], caption="依法缴纳税收证明")
     _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)], caption="社会保障资金证明")

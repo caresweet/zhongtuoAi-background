@@ -156,6 +156,19 @@ PERF_SECTIONS = [
     (290, 296, "5.大王庄路网接线提升改造工程（颜莲路、拂晓路）用地报批咨询服务采购项目"),
 ]
 
+# 资格证明部分的扫描件（第 11–32 页）
+QUAL_PAGES = [
+    (11, "营业执照", "营业执照"),
+    *[(p, f"2025年度审计报告 第{p - 11}页", "财务报告") for p in range(12, 25)],
+    (25, "依法缴纳税收证明（2025年10月）", "社保纳税证明"),
+    (26, "依法社会保障资金证明（2025年11月）", "社保纳税证明"),
+    (28, "未被列入失信被执行人网站截图", "信用记录"),
+    (29, "未被列入重大税收违法失信主体", "信用记录"),
+    (30, "未被列入政府采购严重违法失信行为记录名单", "信用记录"),
+    (31, "中国政府采购网严重违法失信名单截图", "信用记录"),
+    (32, "9.供应商具有有效期内的测绘资质乙级及以上资质证书", "资质证书"),
+]
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -222,6 +235,14 @@ def main() -> int:
                 nm = f"{title} 第{page_no - start + 1}页" + (f"-{j}" if len(imgs) > 1 else "")
                 _save_asset(conn, nm, "业绩证明", data, w, h)
                 stats["asset"] += 1
+
+    # 资格证明扫描件（营业执照/审计报告/纳税/社保/信用/资质）
+    for page_no, name, category in QUAL_PAGES:
+        imgs = _page_images(doc, page_no)
+        for j, (data, w, h) in enumerate(imgs, 1):
+            nm = name if len(imgs) == 1 else f"{name}-{j}"
+            _save_asset(conn, nm, category, data, w, h)
+            stats["asset"] += 1
 
     conn.commit()
     conn.close()

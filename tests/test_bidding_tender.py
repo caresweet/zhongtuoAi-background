@@ -181,3 +181,23 @@ async def test_authorization_follows_tender_template(tmp_path):
                "单位名称（公章）：江苏众拓测绘有限公司", "法定代表人签名：陈春"):
         assert kw in text, kw
     assert "本授权书宣告" not in text
+    assert "法定代表人身份证复印件：" in text
+    assert "被授权代表身份证复印件：" in text
+
+
+@pytest.mark.asyncio
+async def test_second_page_is_toc(tmp_path):
+    """第二页是目录：封面后插「目  录」+ TOC 域，8 个部分挂 Heading 1。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "目录测试.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    d = Document(str(out))
+    assert any(p.text.strip() == "目  录" for p in d.paragraphs)
+    assert 'TOC \\o "1-1"' in d.element.xml
+    assert d.settings.element.xml.find("updateFields") >= 0
+    heads = [p.text for p in d.paragraphs if p.style.name == "Heading 1"]
+    assert len(heads) == 8
+    assert heads[0] == "（一）投标函" and heads[-1] == "（八）其他"

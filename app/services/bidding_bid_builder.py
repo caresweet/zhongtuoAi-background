@@ -59,16 +59,20 @@ def _p(doc, text: str, *, size=12, bold=False, align="left", indent=True,
     return p
 
 
-def _h(doc, text: str, level=1):
+def _h(doc, text: str, level=1, *, toc=True):
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
-    p = doc.add_paragraph()
+    # 一级标题挂 Heading 1，供目录域抓取；服务方案里的分章不挂（目录只列 8 个部分）
+    style = "Heading 1" if (level == 1 and toc) else None
+    p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.space_before = Pt(10 if level == 1 else 6)
     p.paragraph_format.space_after = Pt(6)
     r = p.add_run(text)
     _set_font(r, name="黑体", size=16 if level == 1 else 14 if level == 2 else 12,
               bold=True)
+    from docx.shared import RGBColor
+    r.font.color.rgb = RGBColor(0, 0, 0)
     return p
 
 
@@ -136,6 +140,46 @@ def _portrait_section(doc):
     return s
 
 
+def _add_toc(doc) -> None:
+    """第二页目录：标题 + TOC 域（打开文档时自动更新页码）。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn as _q
+    from docx.shared import Pt
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run("目  录")
+    _set_font(r, name="黑体", size=18, bold=True)
+
+    q = doc.add_paragraph()
+    run = q.add_run()
+    _set_font(run, size=12)
+    begin = OxmlElement('w:fldChar')
+    begin.set(_q('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText')
+    instr.set(_q('xml:space'), 'preserve')
+    instr.text = 'TOC \\o "1-1" \\h \\z \\u'
+    sep = OxmlElement('w:fldChar')
+    sep.set(_q('w:fldCharType'), 'separate')
+    placeholder = OxmlElement('w:t')
+    placeholder.text = "右键选择“更新域”生成目录"
+    end = OxmlElement('w:fldChar')
+    end.set(_q('w:fldCharType'), 'end')
+    for el in (begin, instr, sep, placeholder, end):
+        run._r.append(el)
+
+    # Word / WPS 打开时自动刷新目录域
+    try:
+        from docx.oxml import OxmlElement as _OE
+        st = doc.settings.element
+        if st.find(_q('w:updateFields')) is None:
+            uf = _OE('w:updateFields')
+            uf.set(_q('w:val'), 'true')
+            st.append(uf)
+    except Exception:
+        pass
+
+
 def _page_number_footer(doc) -> None:
     """页脚居中页码（封面页不显示）。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -144,6 +188,15 @@ def _page_number_footer(doc) -> None:
     from docx.shared import Pt
     sec = doc.sections[0]
     sec.different_first_page_header_footer = True
+    # 页码从 0 起：封面不显示，目录页印 1，与人工稿一致
+    try:
+        sectPr = sec._sectPr
+        if sectPr.find(_q('w:pgNumType')) is None:
+            pn = OxmlElement('w:pgNumType')
+            pn.set(_q('w:start'), '0')
+            sectPr.append(pn)
+    except Exception:
+        pass
     p = sec.footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = p.add_run()
@@ -539,7 +592,7 @@ def _md_to_docx(doc, md: str):
         elif s.startswith("##"):
             _h(doc, s.lstrip("#").strip(), 2)
         elif s.startswith("#"):
-            _h(doc, s.lstrip("#").strip(), 1)
+            _h(doc, s.lstrip("#").strip(), 1, toc=False)
         elif re.match(r'^\s*[-*]\s+', s):
             body = re.sub(r'^\s*[-*]\s+', '', s)
             # 模型常在每个小节重复一遍「采购内容：…」，只保留第一次
@@ -709,6 +762,10 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
        name="仿宋", space_after=0)
     doc.add_page_break()
 
+    # ── 第二页：目录（照人工稿）──
+    _add_toc(doc)
+    doc.add_page_break()
+
     # ── （一）投标函 ──
     _h(doc, "（一）投标函", 1)
     lines = [
@@ -823,10 +880,15 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"单位名称（公章）：{co_name}", indent=False)
     _p(doc, f"法定代表人签名：{af['legal']}", indent=False)
 
-    # 授权书后贴被授权代表身份证正反面（并排，带细边框，无图题）
-    _id_imgs = _asset_images("身份证", limit=2)
-    if _id_imgs:
-        _image_row(doc, _id_imgs)
+    # 授权书后贴身份证正反面：法定代表人 + 被授权代表（并排，带细边框，无图题）
+    _legal_imgs = _asset_images(f"{af['legal']} 身份证", limit=2)
+    _agent_imgs = _asset_images(f"{af['agent']} 身份证", limit=2)
+    if _legal_imgs:
+        _p(doc, "法定代表人身份证复印件：", bold=True, indent=False)
+        _image_row(doc, _legal_imgs)
+    if _agent_imgs and af["agent"] != af["legal"]:
+        _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
+        _image_row(doc, _agent_imgs)
 
     _h(doc, "3、资格性证明材料复印件：", 2)
     _p(doc, "资格性证明材料", size=14, align="center", indent=False)

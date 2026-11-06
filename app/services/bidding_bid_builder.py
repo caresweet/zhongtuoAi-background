@@ -93,7 +93,7 @@ def _p_two(doc, left: str, right: str, *, size=12, indent=0.0,
     return p
 
 
-def _image_row(doc, imgs, *, width_cm=7.9):
+def _image_row(doc, imgs, *, width_cm=6.8):
     """身份证正反面并排（带细边框，无图题），与人工稿一致。"""
     from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.shared import Cm

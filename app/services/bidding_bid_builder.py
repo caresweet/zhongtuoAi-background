@@ -59,7 +59,7 @@ def _p(doc, text: str, *, size=12, bold=False, align="left", indent=True,
     return p
 
 
-def _h(doc, text: str, level=1, *, toc=True):
+def _h(doc, text: str, level=1, *, toc=True, size=None):
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
     # 一级标题挂 Heading 1，供目录域抓取；服务方案里的分章不挂（目录只列 8 个部分）
@@ -69,10 +69,21 @@ def _h(doc, text: str, level=1, *, toc=True):
     p.paragraph_format.space_before = Pt(10 if level == 1 else 6)
     p.paragraph_format.space_after = Pt(6)
     r = p.add_run(text)
-    _set_font(r, name="黑体", size=16 if level == 1 else 14 if level == 2 else 12,
+    _set_font(r, name="黑体",
+              size=size or (16 if level == 1 else 14 if level == 2 else 12),
               bold=True)
     from docx.shared import RGBColor
     r.font.color.rgb = RGBColor(0, 0, 0)
+    return p
+
+
+def _plan_p(doc, text: str):
+    """服务方案正文：15pt、固定 28 磅行距、首行缩进 2 字符（对齐人工稿）。"""
+    from docx.shared import Cm, Pt
+    p = _p(doc, text, size=15, align="justify")
+    p.paragraph_format.line_spacing = Pt(28)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.first_line_indent = Cm(1.06)
     return p
 
 
@@ -671,11 +682,11 @@ def _md_to_docx(doc, md: str):
         if not s.strip():
             continue
         if s.startswith("###"):
-            _h(doc, s.lstrip("#").strip(), 3)
+            _h(doc, s.lstrip("#").strip(), 3, size=15)
         elif s.startswith("##"):
-            _h(doc, s.lstrip("#").strip(), 2)
+            _h(doc, s.lstrip("#").strip(), 2, size=16)
         elif s.startswith("#"):
-            _h(doc, s.lstrip("#").strip(), 1, toc=False)
+            _h(doc, s.lstrip("#").strip(), 1, toc=False, size=18)
         elif re.match(r'^\s*[-*]\s+', s):
             body = re.sub(r'^\s*[-*]\s+', '', s)
             # 模型常在每个小节重复一遍「采购内容：…」，只保留第一次
@@ -683,9 +694,9 @@ def _md_to_docx(doc, md: str):
                 if _seen_scope:
                     continue
                 _seen_scope = True
-            _p(doc, "• " + body, indent=False)
+            _plan_p(doc, "• " + body)
         else:
-            _p(doc, re.sub(r'\*\*(.+?)\*\*', r'\1', s), align="justify")
+            _plan_p(doc, re.sub(r'\*\*(.+?)\*\*', r'\1', s))
 
 
 # ═══════════════════════════════════════════════════════════════

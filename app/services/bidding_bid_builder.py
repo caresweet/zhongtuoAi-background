@@ -1031,8 +1031,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                               ("未被列入政府采购严重违法失信行为记录名单",)],
                  caption="信用记录查询截图")
     _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
-                 caption="测绘资质证书")
-    doc.add_page_break()
+                 caption="测绘资质证书", break_after=False)
 
     # ── （四）偏离表（横向页，照人工稿）──
     _landscape_section(doc)
@@ -1229,7 +1228,8 @@ def _performance_rows() -> List[Tuple[str, str, str]]:
     return names
 
 
-def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], caption=""):
+def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], caption="",
+                 *, break_after=True):
     """按图片名插入公司档案图片（不一定全有，有几张插几张）。"""
     count = 0
     for name_tuple in names:
@@ -1238,7 +1238,8 @@ def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], captio
             if count == 0 and caption:
                 _p(doc, caption, bold=True, indent=False)
             _img(doc, data, 15.0)
-            doc.add_page_break()
+            if break_after:
+                doc.add_page_break()
             count += 1
     if count == 0 and caption:
         _p(doc, f"（{caption}：见公司档案原件）", indent=False)

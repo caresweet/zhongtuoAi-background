@@ -1023,6 +1023,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                               ("2025年10—12月利润表",)], caption="财务状况报告")
     _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)], caption="依法缴纳税收证明")
     _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)], caption="社会保障资金证明")
+    _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                 caption="社会保险权益记录单")
     _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
                               ("未被列入重大税收违法失信主体",),
                               ("未被列入政府采购严重违法失信行为记录名单",)],
@@ -1126,13 +1128,17 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _h(doc, "（八）其他", 1)
     _h(doc, "1. 体系认证证书", 2)
     _asset_block(doc, "", [("质量管理体系认证",), ("环境管理体系认证",),
-                           ("职业健康安全管理体系认证",)], caption="体系认证证书")
+                           ("职业健康安全管理体系认证",),
+                           ("测量管理体系认证证书",)], caption="体系认证证书")
 
     _h(doc, "2. 仪器设备", 2)
     _p(doc, "我方拟投入本项目的主要设备包括：全站仪、GNSS 接收机（RTK）、无人机、"
             "绘图仪、测高仪、水位仪、CASS 成图软件及图形工作站等，满足本项目勘测定界、"
             "外业调查与成果编制需要；自有设备附发票/采购合同及照片，软件附合法授权材料。",
        align="justify")
+    _asset_block(doc, "", [("仪器设备-全站仪",), ("仪器设备-无人机",),
+                           ("仪器设备-CASS",), ("仪器设备-绘图仪",),
+                           ("仪器设备-GNSS",)], caption="仪器设备发票及照片")
 
     _h(doc, "3. 类似项目业绩", 2)
     _p(doc, "近年承担的类似征地报批项目如下（合同/批复复印件附后）：", align="justify")
@@ -1174,6 +1180,13 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         _p(doc, f"我单位郑重声明：本项目由{co_name}独立投标，未与其他单位组成联合体，"
                 "未以任何形式借用或挂靠其他单位资质；中标后由我单位独立履行合同义务，"
                 "不进行转包和违法分包。如有不实，愿承担相应法律责任。", align="justify")
+
+    _h(doc, "6. 单位名称变更材料", 2)
+    _p(doc, "淮安纵横测绘有限公司于 2022 年 12 月 1 日名称变更为江苏众拓测绘有限公司，"
+            "原公司签订的项目合同、资质证书及相关业绩均由变更后的公司承继。"
+            "现将名称变更材料附后。", align="justify")
+    _asset_block(doc, "单位名称变更", [("单位名称变更材料",)],
+                 caption="单位名称变更材料")
 
     # 身份证复印件已按招标模板贴在「（三）2. 法定代表人授权委托书」之后
 
@@ -1220,10 +1233,11 @@ def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], captio
     count = 0
     for name_tuple in names:
         kw = name_tuple[0]
-        for nm, data in _asset_images(kw, limit=1):
+        for nm, data in _asset_images(kw, limit=20):
             if count == 0 and caption:
                 _p(doc, caption, bold=True, indent=False)
             _img(doc, data, 15.0)
+            doc.add_page_break()
             count += 1
     if count == 0 and caption:
         _p(doc, f"（{caption}：见公司档案原件）", indent=False)

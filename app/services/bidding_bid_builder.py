@@ -809,7 +809,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     # ── （二）报价文件（照招标第六章模板逐项对版）──
     _h(doc, "（二）报价文件", 1)
-    _h(doc, "1、开标一览表（格式）：", 2)
+    _h(doc, "1、开标一览表：", 2)
     _p(doc, "开标一览表", size=14, align="center", indent=False)
     _p_two(doc, f"投标人名称（盖章）：{co_name}", "单位：元", size=14,
            indent=0.0)
@@ -825,7 +825,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, "②  每一项服务仅接受一个价格，投标文件应对《开标一览表》中的全部服务进行投标，"
             "只投其中部分服务者，投标无效。", size=10.5, indent=False)
 
-    _h(doc, "2、投标明细报价表（格式）：", 2)
+    _h(doc, "2、投标明细报价表：", 2)
     _p(doc, "2.1 明细报价表", size=14, align="center", indent=False)
     _p(doc, f"项目名称：{project}", indent=False)
     _p(doc, f"项目编号：{no}", indent=False)
@@ -844,7 +844,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     # ── （三）资格证明文件 ──
     _h(doc, "（三）资格证明文件", 1)
-    _h(doc, "1、关于资格的声明函（格式）：", 2)
+    af = _auth_fields(texts)
+    _h(doc, "1、关于资格的声明函：", 2)
     _p(doc, "关于资格的声明函", size=14, align="center", indent=False)
     _p(doc, f"{purchaser}：", indent=False)
     _p(doc, f"我公司参加贵单位{project}项目采购活动前三年内在经营活动中没有重大违法记录；"
@@ -856,8 +857,13 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, "投标人签名：", indent=False)
     _p(doc, f"投标人公章：{co_name}", indent=False)
 
+    # 法定代表人身份证随《关于资格的声明函》一起提交（模板位置）
+    _legal_imgs = _asset_images(f"{af['legal']} 身份证", limit=2)
+    if _legal_imgs:
+        _p(doc, "法定代表人身份证复印件：", bold=True, indent=False)
+        _image_row(doc, _legal_imgs)
+
     _h(doc, "2、法定代表人授权委托书：", 2)
-    af = _auth_fields(texts)
     _p(doc, "法定代表人授权书", size=14, bold=True, align="center",
        indent=False, name="宋体")
     _p(doc, f"日期：{today}", indent=False, align="right")
@@ -881,12 +887,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"单位名称（公章）：{co_name}", indent=False)
     _p(doc, f"法定代表人签名：{af['legal']}", indent=False)
 
-    # 授权书后贴身份证正反面：法定代表人 + 被授权代表（并排，带细边框，无图题）
-    _legal_imgs = _asset_images(f"{af['legal']} 身份证", limit=2)
+    # 授权书后贴被授权代表身份证正反面（并排，带细边框，无图题）
     _agent_imgs = _asset_images(f"{af['agent']} 身份证", limit=2)
-    if _legal_imgs:
-        _p(doc, "法定代表人身份证复印件：", bold=True, indent=False)
-        _image_row(doc, _legal_imgs)
     if _agent_imgs and af["agent"] != af["legal"]:
         _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
         _image_row(doc, _agent_imgs)

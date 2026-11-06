@@ -150,5 +150,13 @@ async def test_quotation_tables_follow_tender_template(tmp_path):
     assert "（小写）370000 元" in total_txt
     assert "叁拾柒万元整" in total_txt
 
+    # 表格数据上下左右居中
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    for t in d.tables:
+        for r in t.rows:
+            for c in r.cells:
+                assert c.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                assert c.paragraphs[0].alignment in (None, 1)
+
     text = "\n".join(p.text for p in d.paragraphs)
     assert "2026年2月3日" not in text

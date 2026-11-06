@@ -74,7 +74,7 @@ def _h(doc, text: str, level=1):
 
 def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
            widths: Optional[Sequence[float]] = None):
-    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.shared import Cm
     t = doc.add_table(rows=len(rows) + 1, cols=len(headers))
     t.style = "Table Grid"
@@ -82,6 +82,7 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
     for ci, h in enumerate(headers):
         cell = t.cell(0, ci)
         cell.text = ""
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         r = cell.paragraphs[0].add_run(str(h))
         _set_font(r, size=10.5, bold=True)
         cell.paragraphs[0].alignment = 1
@@ -89,6 +90,7 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
         for ci in range(len(headers)):
             cell = t.cell(ri, ci)
             cell.text = ""
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             val = row[ci] if ci < len(row) else ""
             r = cell.paragraphs[0].add_run(str(val))
             _set_font(r, size=10.5)
@@ -98,6 +100,17 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
             for r in t.rows:
                 r.cells[ci].width = Cm(w)
     return t
+
+
+def _center_all_cells(doc) -> None:
+    """全篇表格单元格上下左右居中（含模板/后续追加的表）。"""
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    for t in doc.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                for p in cell.paragraphs:
+                    p.alignment = 1
 
 
 def _img(doc, data: bytes, width_cm=15.0, caption=""):
@@ -759,6 +772,9 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                 "不进行转包和违法分包。如有不实，愿承担相应法律责任。", align="justify")
 
     # 身份证复印件已按招标模板贴在「（三）2. 法定代表人授权委托书」之后
+
+    # 表格数据统一上下左右居中（在保存前兜底一次）
+    _center_all_cells(doc)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

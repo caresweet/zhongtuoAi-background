@@ -45,6 +45,19 @@ def test_request_letter_skips_missing_fields():
     assert "公顷" not in t          # 没有面积就不写这句
 
 
+def test_request_letter_prefers_reclamation_investment():
+    """请示里的总投资是**复垦方案投资**，不能拿主体工程投资顶（2026-11-06 实测踩过）。"""
+    doc = Document()
+    render_request_letter(doc, {
+        "project_name": "测试项目",
+        "project_investment": 38600,
+        "_budget_estimate": {"static_total": 144.14, "dynamic_total": 151.34},
+    })
+    t = _letter_text(doc)
+    assert "151.34万元" in t
+    assert "38600" not in t
+
+
 def test_figures_section_without_images(tmp_path):
     from app.services.report_assembler import ReportAssembler
     a = ReportAssembler.__new__(ReportAssembler)

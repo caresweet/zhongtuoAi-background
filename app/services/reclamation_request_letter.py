@@ -65,7 +65,17 @@ def render_request_letter(doc, filled: Dict[str, Any]) -> None:
         # service_years 是「年」（如 3.0），不是「个月」
         _v = float(service)
         service = f"{_v:g}年" if _v < 12 else f"{_v:g}个月"
-    invest = _num(f.get("project_investment"))
+    # 🔴 请示里的「估算总投资」指**土地复垦方案投资**，不是主体工程投资。
+    #    2026-11-06 测试发现误取了 project_investment（38600 万），必须优先用预算桥。
+    invest = 0.0
+    _est = f.get("_budget_estimate")
+    if isinstance(_est, dict):
+        invest = _num(_est.get("dynamic_total") or _est.get("static_total"))
+    elif _est is not None:
+        invest = _num(getattr(_est, "dynamic_total", None)
+                      or getattr(_est, "static_total", None))
+    if invest <= 0:
+        invest = _num(f.get("project_investment"))
     compiler = str(f.get("implement_unit") or "").strip()
 
     m = re.search(r'([一-龥]{2,8}市)', location)

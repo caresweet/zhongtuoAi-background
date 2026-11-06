@@ -127,30 +127,6 @@ def _image_row(doc, imgs, *, width_cm=6.8):
     return t
 
 
-def _landscape_section(doc):
-    """切到横向页（偏离表/人员配置清单，照人工稿）。"""
-    from docx.enum.section import WD_ORIENT, WD_SECTION
-    from docx.shared import Cm
-    s = doc.add_section(WD_SECTION.NEW_PAGE)
-    s.orientation = WD_ORIENT.LANDSCAPE
-    s.page_width, s.page_height = Cm(29.7), Cm(21.0)
-    s.left_margin = s.right_margin = Cm(2.3)
-    s.top_margin = s.bottom_margin = Cm(2.0)
-    return s
-
-
-def _portrait_section(doc):
-    """从横向页切回 A4 纵向。"""
-    from docx.enum.section import WD_ORIENT, WD_SECTION
-    from docx.shared import Cm
-    s = doc.add_section(WD_SECTION.NEW_PAGE)
-    s.orientation = WD_ORIENT.PORTRAIT
-    s.page_width, s.page_height = Cm(21.0), Cm(29.7)
-    s.left_margin = s.right_margin = Cm(3.0)
-    s.top_margin = s.bottom_margin = Cm(2.5)
-    return s
-
-
 _BID_TOP_TITLES = [
     "（一）投标函", "（二）报价文件", "（三）资格证明文件",
     "（四）技术条款及相关要求偏离表", "（五）技术商务部分评分导读表",
@@ -1033,8 +1009,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
                  caption="测绘资质证书", break_after=False)
 
-    # ── （四）偏离表（横向页，照人工稿）──
-    _landscape_section(doc)
+    # ── （四）偏离表（A4 纵向）──
+    doc.add_page_break()
     _h(doc, "（四）技术条款及相关要求偏离表", 1)
     _p(doc, "技术条款及相关要求偏离表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
@@ -1052,11 +1028,11 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _resp = _qual.replace("投标人参加", "我单位参加", 1)
     _table(doc, ["序号", "项目名称", "招标内容", "投标内容", "正偏离/负偏离"],
            [["1", project, _qual, _resp, "完全响应"]],
-           widths=[1.11, 2.66, 9.16, 10.08, 2.09], font_size=10.5,
-           row_heights=[1.67, 9.09])
+           widths=[0.8, 2.1, 5.5, 5.4, 1.2], font_size=9.0,
+           row_heights=[1.4])
 
-    # ── （五）评分导读表（回纵向）──
-    _portrait_section(doc)
+    # ── （五）评分导读表（仍 A4 纵向）──
+    doc.add_page_break()
     _h(doc, "（五）技术商务部分评分导读表", 1)
     _p(doc, "技术商务部分评分导读表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
@@ -1081,7 +1057,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                   "水位仪、绘图仪、测高仪，每类得1分，同类设备不重复计分，最高5分。",
              "提供全站仪、GNSS接收机、无人机、CASS成图软件、绘图仪等设备购买发票和照片",
              "见投标文件", "5"]],
-           widths=[1.27, 6.56, 4.58, 2.49, 2.48], font_size=10.5,
+           widths=[1.1, 5.6, 4.0, 2.1, 2.2], font_size=10.5,
            row_heights=[1.81, 2.22, 9.92, 2.77, 2.77])
     doc.add_page_break()
 
@@ -1097,8 +1073,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _md_to_docx(doc, md or _fallback_plan(tender))
     doc.add_page_break()
 
-    # ── （七）人员配置清单（横向页，照人工稿）──
-    _landscape_section(doc)
+    # ── （七）人员配置清单（A4 纵向）──
     _h(doc, "（七）项目人员配置清单", 1)
     _p(doc, "项目人员配置清单", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
@@ -1111,8 +1086,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                      str(p.get("age") or ""), p.get("role") or "",
                      p.get("education") or "", p.get("title") or "", cert_no])
     _table(doc, ["序号", "姓名", "性别", "年龄", "岗位名称", "学历", "职称", "资格证书编号"],
-           rows, widths=[1.45, 2.75, 2.9, 2.76, 3.14, 2.36, 2.8, 6.92],
-           font_size=10.5, row_heights=[0.96] + [0.94] * len(rows))
+           rows, widths=[0.9, 1.5, 1.3, 1.3, 1.9, 1.3, 1.6, 5.2],
+           font_size=9.5, row_heights=[0.8] + [0.78] * len(rows))
     _p(doc, "注：上述人员在项目执行过程中如需更换，须经采购人同意；"
             "擅自更换或不到位属违约行为。", size=10.5, indent=False)
     _p(doc, "拟投入人员简历：", bold=True, indent=False)
@@ -1123,8 +1098,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                 f"{p.get('title') or ''}，拟任{p.get('role') or ''}；持有证书：{certs}。",
            align="justify")
 
-    # ── （八）其他（回纵向）──
-    _portrait_section(doc)
+    # ── （八）其他（A4 纵向）──
+    doc.add_page_break()
     _h(doc, "（八）其他", 1)
     _h(doc, "1. 体系认证证书", 2)
     _asset_block(doc, "", [("质量管理体系认证",), ("环境管理体系认证",),

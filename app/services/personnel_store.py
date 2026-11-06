@@ -71,6 +71,7 @@ def ensure_tables() -> None:
             title             TEXT DEFAULT '',
             role              TEXT DEFAULT '项目组成员',
             certs             TEXT DEFAULT '[]',
+            cert_no           TEXT DEFAULT '',
             has_wenshen_cert  INTEGER DEFAULT 0,
             sort_order        INTEGER DEFAULT 0,
             company_id        INTEGER NOT NULL DEFAULT 1,
@@ -135,6 +136,12 @@ def _migrate_personnel_company() -> None:
             c.execute("ALTER TABLE company_personnel_images ADD COLUMN company_id INTEGER NOT NULL DEFAULT 1")
             logger.warning("人员库迁移：company_personnel_images 加 company_id 列")
 
+        # ── company_personnel.cert_no：投标人员配置清单要印证书编号 ──
+        #    只在有证书原件时才知道编号；没有就是空串，清单里印「—」，不拿证书名顶编号。
+        if _table_sql("company_personnel") and "cert_no" not in _cols("company_personnel"):
+            c.execute("ALTER TABLE company_personnel ADD COLUMN cert_no TEXT DEFAULT ''")
+            logger.warning("人员库迁移：company_personnel 加 cert_no 列")
+
         # 索引**无论新旧库都要建**（新库的建表脚本里已不再包含它们）
         c.execute("CREATE INDEX IF NOT EXISTS idx_cpi_company ON company_personnel_images(company_id)")
 
@@ -172,6 +179,7 @@ def _migrate_personnel_company() -> None:
                 title             TEXT DEFAULT '',
                 role              TEXT DEFAULT '项目组成员',
                 certs             TEXT DEFAULT '[]',
+                cert_no           TEXT DEFAULT '',
                 has_wenshen_cert  INTEGER DEFAULT 0,
                 sort_order        INTEGER DEFAULT 0,
                 company_id        INTEGER NOT NULL DEFAULT 1,
@@ -182,9 +190,9 @@ def _migrate_personnel_company() -> None:
         c.execute("""
             INSERT INTO company_personnel_mig
                 (id, name, gender, age, education, major, title, role, certs,
-                 has_wenshen_cert, sort_order, company_id, updated_at)
+                 cert_no, has_wenshen_cert, sort_order, company_id, updated_at)
             SELECT id, name, gender, age, education, major, title, role, certs,
-                   has_wenshen_cert, sort_order, company_id, updated_at
+                   cert_no, has_wenshen_cert, sort_order, company_id, updated_at
               FROM company_personnel
         """)
         c.execute("DROP TABLE company_personnel")

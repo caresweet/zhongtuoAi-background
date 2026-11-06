@@ -457,24 +457,9 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     agency = tender.get("agency") or ""
     from datetime import date as _date
 
-    _D = "〇一二三四五六七八九"
-
-    def _cn_small(n: int) -> str:
-        if n <= 0:
-            return ""
-        if n < 10:
-            return _D[n]
-        if n == 10:
-            return "十"
-        if n < 20:
-            return "十" + _D[n - 10]
-        if n % 10 == 0:
-            return _D[n // 10] + "十"
-        return _D[n // 10] + "十" + _D[n % 10]
-
+    # 人工稿日期用阿拉伯数字（「日期：2026 年 11 月 6 日」），不用汉字年号
     _d = _date.today()
-    today = (f"{''.join(_D[int(c)] for c in str(_d.year))}年"
-             f"{_cn_small(_d.month)}月{_cn_small(_d.day)}日")
+    today = f"{_d.year}年{_d.month}月{_d.day}日"
 
     doc = Document()
     sec = doc.sections[0]
@@ -482,23 +467,32 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     sec.left_margin = sec.right_margin = Cm(3.0)
     sec.top_margin = sec.bottom_margin = Cm(2.5)
 
-    # ── 封面（照人工案例版式：22pt 标题 + 18pt 项目信息 + 3cm 左右页边距）──
-    for _ in range(3):
-        doc.add_paragraph()
-    _p(doc, "投 标 文 件", size=22, bold=True, align="center", indent=False)
-    _p(doc, "【正/副本】", size=22, align="center", indent=False)
-    for _ in range(3):
-        doc.add_paragraph()
-    _p(doc, f"项目名称：{project}", size=18, bold=True, indent=False)
-    doc.add_paragraph()
-    _p(doc, f"项目编号：{no}", size=18, bold=True, indent=False)
-    for _ in range(3):
-        doc.add_paragraph()
-    _p(doc, f"投标人名称：{co_name}（盖公章）", size=18, bold=True, indent=False)
-    _p(doc, "法定代表人或其被授权代表人：（签名）", size=18, bold=True, indent=False)
+    # ── 封面（照人工案例逐项对版：60pt 仿宋标题、16pt 仿宋信息、3cm 页边距）──
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _t = _p(doc, "投 标 文 件", size=60, bold=False, align="center",
+            indent=False, name="仿宋", space_after=0)
+    _t.paragraph_format.space_before = Pt(40)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, f"项目编号：{no}", size=16, align="center", indent=False,
+       name="仿宋", space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, f"项目名称：{project}", size=16, indent=False, name="仿宋",
+       space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, f"投标人名称：{co_name}", size=16, indent=False, name="仿宋",
+       space_after=0)
+    _p(doc, "（盖公章）", size=16, indent=False, name="仿宋", space_after=0)
+    _p(doc, "", indent=False, space_after=0)
+    _p(doc, "法定代表人或其被授权代表人：", size=16, indent=False,
+       name="仿宋", space_after=0)
+    _p(doc, "（签名）", size=16, indent=False, name="仿宋", space_after=0)
     for _ in range(4):
-        doc.add_paragraph()
-    _p(doc, today, size=20, bold=True, align="center", indent=False)
+        _p(doc, "", indent=False, space_after=0)
+    _p(doc, f"日期：{today}", size=16, align="center", indent=False,
+       name="仿宋", space_after=0)
     doc.add_page_break()
 
     # ── （一）投标函 ──
@@ -652,8 +646,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"投标人名称（盖章）：{co_name}        项目编号：{no}", indent=False)
     rows = []
     for i, p in enumerate(people, 1):
-        cert_no = next((c for c in (p.get("certs") or [])
-                        if "注册" in c or "编号" in c or "证书" in c), "—")
+        # 证书编号只认人员库的 cert_no；没有就印「—」，**不拿证书名称顶编号**。
+        cert_no = str(p.get("cert_no") or "").strip() or "—"
         rows.append([str(i), p.get("name") or "", p.get("gender") or "",
                      str(p.get("age") or ""), p.get("role") or "",
                      p.get("education") or "", p.get("title") or "", cert_no])
@@ -710,6 +704,13 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
             for para in texts[key].splitlines():
                 if para.strip():
                     _p(doc, para.strip(), align="justify")
+
+    # 🔴 招标文件明确「不接受联合体」时，补一份非联合体声明（人工稿有这份）
+    if tender.get("no_consortium"):
+        _p(doc, "非联合体投标声明", bold=True, indent=False)
+        _p(doc, f"我单位郑重声明：本项目由{co_name}独立投标，未与其他单位组成联合体，"
+                "未以任何形式借用或挂靠其他单位资质；中标后由我单位独立履行合同义务，"
+                "不进行转包和违法分包。如有不实，愿承担相应法律责任。", align="justify")
 
     # 身份证复印件
     _h(doc, "6. 法定代表人及被授权代表身份证复印件", 2)

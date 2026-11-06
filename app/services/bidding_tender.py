@@ -245,13 +245,18 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
 
     db = _P(__file__).resolve().parents[2] / "data" / "knowledge_base.db"
     conn = sqlite3.connect(str(db))
+    # 老库可能还没跑人员库迁移（没有 cert_no 列）：按列存在与否取，别让投标停在这
+    _cols = {r[1] for r in conn.execute("PRAGMA table_info(company_personnel)")}
+    _cert_col = "cert_no" if "cert_no" in _cols else "''"
     rows = conn.execute(
-        "select id,name,gender,age,education,major,title,certs from company_personnel "
+        f"select id,name,gender,age,education,major,title,certs,{_cert_col} "
+        "from company_personnel "
         "where company_id=? order by sort_order,id", (company_id,)).fetchall()
     conn.close()
     people = [{"id": r[0], "name": r[1], "gender": r[2], "age": r[3], "education": r[4],
                "major": r[5], "title": r[6],
-               "certs": json.loads(r[7] or "[]") if r[7] else []}
+               "certs": json.loads(r[7] or "[]") if r[7] else [],
+               "cert_no": r[8] or ""}
               for r in rows if r[1]]
     rng = random.Random(seed)
 

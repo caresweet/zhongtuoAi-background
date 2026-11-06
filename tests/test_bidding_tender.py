@@ -92,3 +92,33 @@ def test_service_plan_outline_aligns_with_human_bid():
     assert len(subs) == 23
     total = sum(s[2] for s in subs)
     assert 90000 <= total <= 100000
+
+
+@pytest.mark.asyncio
+async def test_cover_and_personnel_table_match_human_bid(tmp_path):
+    """封面按人工稿：60pt 仿宋标题、无【正/副本】、日期带「日期：」；证书编号不拿证书名顶。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    people = [
+        {"id": 0, "name": "张三", "gender": "男", "age": 40, "education": "本科",
+         "major": "测绘", "title": "高级工程师", "role": "项目负责人",
+         "certs": ["注册测绘师"], "cert_no": "CH-001"},
+        {"id": 0, "name": "李四", "gender": "女", "age": 35, "education": "本科",
+         "major": "土地", "title": "工程师", "role": "项目组成员", "certs": []},
+    ]
+    out = tmp_path / "封面测试.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=1, personnel=people, use_llm=False)
+    d = Document(str(out))
+    ps = [p for p in d.paragraphs if p.text.strip()]
+    title = ps[0]
+    assert title.text.replace(" ", "") == "投标文件"
+    assert title.runs[0].font.size.pt == 60
+    assert "【正/副本】" not in "\n".join(p.text for p in ps)
+    assert any(p.text.startswith("日期：") for p in ps)
+    hdr = next(t for t in d.tables
+               if "资格证书编号" in " ".join(c.text for c in t.rows[0].cells))
+    vals = [[c.text for c in r.cells] for r in hdr.rows[1:]]
+    assert vals[0][-1] == "CH-001"
+    assert vals[1][-1] == "—"

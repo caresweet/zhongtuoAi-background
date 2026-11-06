@@ -24,8 +24,12 @@ anthropic==0.42.0
 python-docx==1.1.2
 lxml==5.3.0
 pdfplumber==0.11.4
-pymupdf==1.24.10
+pymupdf==1.28.0
 openpyxl==3.1.5
+
+# 注意：langchain 0.3.x 要求 numpy<2；不要安装 pdf2docx
+#（它会把 numpy 升到 2.x、附带 opencv，且转换出来的 Word 表格是单字格，不能用）
+numpy<2
 
 # Data Validation
 pydantic==2.10.3

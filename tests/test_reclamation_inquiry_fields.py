@@ -86,6 +86,31 @@ def test_reclamation_inquiry_respects_confirmed_skip():
     assert "project_name" not in {f["key"] for f in fields}
 
 
+def test_reclamation_inquiry_treats_build_unit_as_project_unit():
+    """材料里叫「建设单位」(build_unit) 时，不再追问「用地单位」(project_unit)。"""
+    fields = _interrupt_fields({
+        "_domain": "reclamation",
+        "filled_data": {"build_unit": "淮安市博里城镇建设投资有限公司"},
+    })
+    assert "project_unit" not in {f["key"] for f in fields}
+
+
+def test_reclamation_inquiry_seeds_company_archive(monkeypatch):
+    """编制单位那几栏来自公司档案 —— 档案有值就不要问（业主 2026-11-09）。"""
+    import app.services.company_service as cs
+
+    async def _fake(company_id):
+        return {"qualification_authority": "江苏省自然资源厅",
+                "qualification_level": "乙级",
+                "contact": "张红艳", "phone": "15949194424"}
+
+    monkeypatch.setattr(cs, "load_company", _fake)
+    fields = _interrupt_fields({"_domain": "reclamation", "_company_id": 999})
+    keys = {f["key"] for f in fields}
+    assert not ({"qualification_authority", "qualification_level",
+                 "company_contact", "company_phone"} & keys)
+
+
 def test_stability_inquiry_unchanged():
     """稳评那条路一行不动：仍会问到稳评专有字段。"""
     fields = _interrupt_fields({"_domain": "stability", "filled_data": {}})

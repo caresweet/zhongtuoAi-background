@@ -36,6 +36,7 @@ def test_roundtrip(tmp_path):
         path,
         {"项目名称": "张兴储气库", "建设单位": "苏盐井神一分公司",
          "项目位置": "淮安市淮安区山阳街道黄土桥村", "所属地区": "淮安区",
+         "法人代表": "张三", "单位性质": "有限责任公司",
          "主体工程用地面积(公顷)": "8.0762", "用地期限(月)": "24",
          "复垦期(月)": "12", "管护期(月)": "12"},
         [("井场", "0.2310", "挖损和压占", "重度", "水田", "水田"),
@@ -60,6 +61,8 @@ def test_roundtrip(tmp_path):
     changed = apply_intake(filled, data)
     assert "land_use_zones" in changed
     assert filled["project_name"] == "张兴储气库"
+    assert filled["legal_rep"] == "张三"
+    assert filled["unit_nature"] == "有限责任公司"
     assert filled["_land_use_zones"][0]["name"] == "井场"
     assert filled["topsoil_thickness"] == "30"
 

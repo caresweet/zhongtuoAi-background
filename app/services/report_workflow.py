@@ -710,6 +710,31 @@ async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
             #    复垦只问报告表「项目概况」那一小批（`RECLAMATION_NEED_FIELDS`），
             #    且**资料里已有值 / 用户已确认过**的不问。
             from app.agent.reclamation_definitions import RECLAMATION_NEED_FIELDS
+            # 🔴 编制单位那几栏本来就在**公司档案**里 —— 档案有值就先回填，
+            #    不要再问用户（业主 2026-11-09：「这些资料都给了，为什么还缺」）。
+            try:
+                from app.services.company_service import load_company
+                _co = await load_company(state.get("_company_id")) or {}
+                _co_contact = str(_co.get("contact") or "").strip()
+                _co_is_phone = bool(re.match(
+                    r'^(1[3-9]\d{9}|0\d{2,3}-?\d{7,8})$', _co_contact))
+                for _fk, _fv in (
+                        ("qualification_authority", _co.get("qualification_authority")),
+                        ("qualification_level", _co.get("qualification_level")),
+                        ("company_contact", "" if _co_is_phone else _co_contact),
+                        ("company_phone", (_co.get("phone")
+                                           or (_co_contact if _co_is_phone else ""))),
+                ):
+                    _fv = str(_fv or "").strip()
+                    if _fv and not str(filled.get(_fk) or "").strip():
+                        filled[_fk] = _fv
+            except Exception as _coe:
+                logger.warning(f"[询问字段] 公司档案回填跳过: {_coe}")
+
+            # 同一事实在不同来源里的别名键（如「用地单位」在材料里叫 `build_unit`）
+            _FIELD_ALIASES = {
+                "project_unit": ("build_unit", "land_user_unit"),
+            }
             _seen = set()
             for _ch in sorted(RECLAMATION_NEED_FIELDS or {}):
                 for _spec in (RECLAMATION_NEED_FIELDS.get(_ch) or []):
@@ -721,6 +746,11 @@ async def node_data_inquiry(state: ReportWorkflowState) -> ReportWorkflowState:
                         continue
                     _seen.add(_k)
                     _v = str(filled.get(_k) or "").strip()
+                    if not _v:
+                        for _ak in _FIELD_ALIASES.get(_k, ()):
+                            _v = str(filled.get(_ak) or "").strip()
+                            if _v:
+                                break
                     if _v and not _v.startswith(("【待", "待补充")):
                         continue                          # 有值不问
                     if filled.get(f"_confirmed_{_k}"):

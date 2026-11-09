@@ -61,3 +61,38 @@ def test_drop_location_dupes_keeps_only_non_location():
     keep, drop = drop_location_dupes(imgs)
     assert len(drop) == 2
     assert [x["path"] for x in keep] == ["images/现状图.jpg"]
+
+
+def test_user_location_figure_beats_system(tmp_path):
+    """用户自己传了位置图 → 只留用户那张，系统图摘掉（业主 2026-11-09）。"""
+    from app.services.report_assembler import prefer_user_location
+    sys_p = tmp_path / "images" / "图3-1 工程位置示意图.jpg"
+    sys_p.parent.mkdir(parents=True)
+    sys_p.write_bytes(b"x")
+    user_p = tmp_path / "uploads" / "图3-1 工程位置示意图_ab12cd34.jpg"
+    user_p.parent.mkdir()
+    user_p.write_bytes(b"x")
+    imgs = [
+        {"path": "images/图3-1 工程位置示意图.jpg", "label": "项目地理位置示意图"},
+        {"path": str(user_p), "original_name": "图3-1 工程位置示意图.jpg"},
+        {"path": "images/现状图.jpg", "original_name": "土地利用现状图.jpg"},
+    ]
+    keep, drop, used = prefer_user_location(imgs, tmp_path)
+    assert used is True
+    assert [x["path"] for x in keep] == [str(user_p), "images/现状图.jpg"]
+    assert len(drop) == 1
+
+
+def test_no_user_location_keeps_system(tmp_path):
+    """没有用户位置图时不动系统图（仍按原逻辑走）。"""
+    from app.services.report_assembler import prefer_user_location
+    sys_p = tmp_path / "images" / "图3-1 工程位置示意图.jpg"
+    sys_p.parent.mkdir(parents=True)
+    sys_p.write_bytes(b"x")
+    imgs = [
+        {"path": "images/图3-1 工程位置示意图.jpg", "label": "项目地理位置示意图"},
+        {"path": "images/现状图.jpg", "original_name": "土地利用现状图.jpg"},
+    ]
+    keep, drop, used = prefer_user_location(imgs, tmp_path)
+    assert used is False
+    assert keep == imgs and drop == []

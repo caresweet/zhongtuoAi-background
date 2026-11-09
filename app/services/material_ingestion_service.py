@@ -539,11 +539,22 @@ class MaterialIngestionService:
                 if key in result:
                     continue
                 for alias in aliases:
-                    if alias in line and ("：" in line or ":" in line):
-                        parts = line.split("：", 1) if "：" in line else line.split(":", 1)
-                        if len(parts) == 2 and parts[1].strip():
-                            result[key] = self._clean_field_value(key, parts[1].strip())
-                            break
+                    # 🔴 取值必须紧跟**这个标签自己的冒号**，不能拿行里第一个冒号切 ——
+                    #    实测 2026-11-09：材料里的「公示内容包括：项目名称、…公众认为
+                    #    必要时向建设单位提供建议时的**联系方式**。」被当成「联系方式：」
+                    #    的取值，扉页电话印成了一整句话。别名只是行里出现还不够，
+                    #    必须形如「联系方式：xxx」。
+                    m = re.search(re.escape(alias) + r'\s*[：:]', line)
+                    if not m:
+                        continue
+                    val = line[m.end():].strip()
+                    if not val:
+                        continue
+                    val = self._clean_field_value(key, val)
+                    if not val and key == "contact_phone":
+                        continue          # 不是电话号码（如整句公示内容）→ 不收
+                    result[key] = val
+                    break
 
         # ── 日期字段：标签就近取日期，中文日期归一化为 ISO ────────────────
         # 🔴 日期是报告里最容易出错的地方（报告编制 / 现场公示 / 座谈会 / 评审…），
@@ -601,7 +612,9 @@ class MaterialIngestionService:
                 return m.group(1)
         if key == "contact_phone":
             m = re.search(r'(?:0\d{2,3}[-\s]?\d{7,8}|1[3-9]\d{9})', v)
-            return m.group(0) if m else v
+            # 🔴 抽不到号码就返回空 —— 不能把整句（「…提供建议时的联系方式」）
+            #    当电话写进扉页（业主 2026-11-09 实测）。
+            return m.group(0) if m else ""
         if key in ("contact_name", "doc_reference", "project_name", "location",
                    "responsible_unit", "compensation_standard"):
             # 截到下一项标签之前（多空格 / 下一个「XX：」）

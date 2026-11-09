@@ -586,6 +586,43 @@ def drop_location_dupes(imgs):
     return keep, drop
 
 
+# 系统按界址点画出来的位置图固定落盘成这个名字（见 `reclamation_figures`）。
+SYSTEM_LOCATION_NAME = "图3-1 工程位置示意图.jpg"
+
+
+def is_system_location_figure(item, storage_dir) -> bool:
+    """这张图是不是**系统生成**的位置示意图。
+
+    只认 `storage/images/图3-1 工程位置示意图.jpg` 这个确定路径 —— 用户上传的
+    同名文件也会有同样的 `original_name`，但真实路径在 uploads 下，不能靠文件名判。
+    """
+    p = str((item or {}).get("path") or "") if isinstance(item, dict) else ""
+    if not p or os.path.basename(p) != SYSTEM_LOCATION_NAME:
+        return False
+    base = os.path.abspath(str(storage_dir))
+    cand = p if os.path.isabs(p) else os.path.join(base, p)
+    return os.path.abspath(cand) == os.path.join(
+        base, "images", SYSTEM_LOCATION_NAME)
+
+
+def prefer_user_location(imgs, storage_dir):
+    """用户自己传了位置图 → 就用用户的，系统图和其他同名图一并摘掉。
+
+    业主 2026-11-09：第3章印了两张一模一样的位置图（图3-1、图3-2）。
+    材料/用户既然给了图，就以用户的为准，只留一张。
+    返回 (保留, 摘掉, 是否采用了用户图)。
+    """
+    imgs = list(imgs or [])
+    user_loc = [i for i in imgs
+                if is_location_figure(i) and not is_system_location_figure(i, storage_dir)]
+    if not user_loc:
+        return imgs, [], False
+    pick = user_loc[0]
+    keep = [i for i in imgs if (not is_location_figure(i)) or i is pick]
+    drop = [i for i in imgs if i not in keep]
+    return keep, drop, True
+
+
 def drop_raw_redline_from_ch3(by_chapter) -> int:
     """系统卫星图存在时，把原始红线渲染从**第3章正文图位**摘掉（附件仍保留）。
 
@@ -2921,22 +2958,35 @@ class ReportAssembler:
             _fig_ok = (int(ch_num) == 3
                        and ((self._session_state or {}).get("filled_data") or {}
                             ).get("_fig_location_generated"))
-            if _fig_ok:
-                _imgs_a, _raw = split_raw_redline(_imgs_a)
-                if _raw:
-                    logger.info(f"[配图] 第3章已有系统位置图，跳过原始红线渲染 {len(_raw)} 张")
-                # 🔴 系统图之外，任何「位置示意图」类的图也一并去掉 ——
-                #    样本/用户材料里常自带一张同名位置图，插进来就是
-                #    图3-1、图3-2 两张一样的图（业主 2026-11-04 实测）。
-                _imgs_a, _dup = drop_location_dupes(_imgs_a)
-                if _dup:
-                    logger.info(f"[配图] 第3章已有系统位置图，跳过重复位置图 {len(_dup)} 张")
+            _reclam_ch3 = int(ch_num) == 3 and self._domain == "reclamation"
+            # 用户自己上传了位置图（排除系统落盘那一张）
+            _has_user_loc = _reclam_ch3 and any(
+                is_location_figure(i) and not is_system_location_figure(i, self.storage_dir)
+                for i in _imgs_a)
+            if _fig_ok or _has_user_loc:
+                if _fig_ok:
+                    _imgs_a, _raw = split_raw_redline(_imgs_a)
+                    if _raw:
+                        logger.info(f"[配图] 第3章已有系统位置图，跳过原始红线渲染 {len(_raw)} 张")
+                # 🔴 业主 2026-11-09：「如果用户提供了就用用户的，只保留一个」。
+                #    用户自己传了位置图 → 用它，系统图与其它同名图都摘掉。
+                _imgs_a, _dup, _user_loc = prefer_user_location(_imgs_a, self.storage_dir)
+                if _user_loc:
+                    logger.info(f"[配图] 第3章采用用户上传的位置图，系统图及重复图摘掉 "
+                                f"{len(_dup)} 张")
+                elif _fig_ok:
+                    # 🔴 系统图之外，任何「位置示意图」类的图也一并去掉 ——
+                    #    样本/用户材料里常自带一张同名位置图，插进来就是
+                    #    图3-1、图3-2 两张一样的图（业主 2026-11-04 实测）。
+                    _imgs_a, _dup = drop_location_dupes(_imgs_a)
+                    if _dup:
+                        logger.info(f"[配图] 第3章已有系统位置图，跳过重复位置图 {len(_dup)} 张")
                 # 🔴 **无论过滤后还剩什么都要清空本章图位** —— 原来只在 `_imgs_a`
                 #    非空时才清；若系统图没进图库（正文每类限 2 张，原始红线先占了名额），
                 #    过滤后为空 → 章末兜底又把那两张红线图插回来，图3-1 变成白底红线图
                 #    （2026-11-03 线上实测）。
                 _cim_a[ch_num] = []
-                if not _imgs_a:
+                if _fig_ok and not _imgs_a and not _user_loc:
                     # 系统图确定存在（`_fig_location_generated`）就直接补一条，
                     # 不让它因为图库名额/去重被吃掉。
                     _gp = Path(str(self.storage_dir)) / "images" / "图3-1 工程位置示意图.jpg"

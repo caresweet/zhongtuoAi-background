@@ -43,6 +43,10 @@ _JUNK_LEAD = (
 
 _JUNK_MAX_LEN = 24      # 只有短值才判为话术，长句可能是真内容
 
+# 电话字段的合法形态（座机 / 手机）。抽不到号码的「电话」一律当作空值。
+_PHONE_RE = re.compile(r'(?:0\d{2,3}[-\s]?\d{7,8}|1[3-9]\d{9})')
+_PHONE_KEYS = ("contact_phone", "company_phone", "org_phone", "phone")
+
 
 def is_junk(v: Any) -> bool:
     """判断一个字段值是不是「没有答案」的自述式回答。"""
@@ -193,6 +197,21 @@ def sanitize_fields(filled: Dict[str, Any], *, verbose: bool = False,
         if is_junk(v):
             filled[k] = ""
             cleared.append(k)
+
+    # ①-b 电话字段：只允许号码本身 —— 混进来的整句（「…提供建议时的联系方式」）
+    #     或带说明的值，抽得出号码就归一成号码，抽不出就当空值。
+    for k in _PHONE_KEYS:
+        v = str(filled.get(k) or "").strip()
+        if not v or is_junk(v):
+            continue
+        m = _PHONE_RE.search(v)
+        if m:
+            if m.group(0) != v:
+                filled[k] = m.group(0)
+                cleared.append(f"{k}(只留号码)")
+        else:
+            filled[k] = ""
+            cleared.append(f"{k}(非电话号码)")
 
     # ② 项目名：先去末尾的位置括注，再回填
     _loc = filled.get("location") or filled.get("land_location") or ""

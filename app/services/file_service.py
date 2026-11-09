@@ -336,15 +336,30 @@ class FileService:
 
             try:
                 doc = Document(converted)
-                paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                return "\n\n".join(paragraphs)
+                return cls._docx_full_text(doc)
             finally:
                 if os.path.exists(converted):
                     os.unlink(converted)
 
         doc = Document(str(file_path))
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        return "\n\n".join(paragraphs)
+        return cls._docx_full_text(doc)
+
+    @staticmethod
+    def _docx_full_text(doc) -> str:
+        """docx 全文：段落 + **表格内容**（用户上传的施工报告/概况里，
+        井场面积、地层分层、坐标等常在表格里 —— 只取段落会丢一半事实）。"""
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                # 合并单元格会让同一段文字重复出现，相邻去重
+                uniq = []
+                for c in cells:
+                    if not uniq or uniq[-1] != c:
+                        uniq.append(c)
+                if any(uniq):
+                    parts.append(" | ".join(uniq))
+        return "\n\n".join(parts)
 
     @classmethod
     def extract_pdf_text_fast(cls, relative_path: str) -> str:

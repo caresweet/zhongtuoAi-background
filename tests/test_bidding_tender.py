@@ -351,3 +351,53 @@ async def test_toc_and_headings_follow_human_pdf(tmp_path):
     part = next(p for p in ps if p.text.strip() == "（一）投标函")
     r = part.runs[0]
     assert r.font.name == "宋体" and r.font.size.pt == 15 and not r.bold
+
+
+# ── 最低评标价法的简式招标文件（大冈镇佳富村）──────────────────────
+DAGANG = Path.home() / "Downloads" / "招标文件--大冈镇佳富村村庄规划测绘服务.docx"
+
+
+@pytest.mark.skipif(not DAGANG.exists(), reason="大冈镇招标样本不在本机")
+def test_compact_tender_parsing():
+    """采购人/代理/元为单位的预算/日历天工期/按户计价 —— 不写死丁蜀镇口径。"""
+    from app.services.bidding_tender import parse_tender
+    r = parse_tender(DAGANG)
+    assert r["project_name"] == "大冈镇佳富村村庄规划测绘服务"
+    assert r["purchaser"] == "盐城市盐都区大冈镇佳富村村民委员会"
+    assert "伟业" in r["agency"]
+    assert r["budget_wan"] == "6.2"
+    assert r["max_price_wan"] == "5.828"
+    assert r["duration_days"] == 60
+    assert r["households"] == "124"
+    assert r["unit_price"] == "470"
+    assert r["bid_format"] == "compact"
+    assert len(r["format_titles"]) == 8
+    assert r["format_titles"][0] == "资格性和符合性检查响应对照表"
+
+
+@pytest.mark.skipif(not DAGANG.exists(), reason="大冈镇招标样本不在本机")
+@pytest.mark.asyncio
+async def test_compact_bid_follows_tender_format(tmp_path):
+    """简式八件套：检查表 → 资格文件 → 投标函 → 开标一览表 → 报价清单 →
+    商务偏离表 → 人员表 → 信用承诺书，不写服务方案。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "大冈投标.docx"
+    await build_bid_document(tender_path=DAGANG, company_id=4, price_wan=5.7,
+                             out_path=out, seed=2026, use_llm=False)
+    d = Document(str(out))
+    text = "\n".join(p.text for p in d.paragraphs)
+    for kw in ("资格性和符合性检查响应对照表", "资格信誉等证明文件", "投标函",
+               "开标一览表", "报价清单", "商务条款响应及偏离表",
+               "项目组成员一览表", "信用承诺书"):
+        assert kw in text, kw
+    # 最低价法不出 57 节服务方案
+    assert "服务内容的详细说明及服务方案" not in text
+    assert "5.7" not in text or "57000" in text
+    assert "伍万柒仟元整" in text
+    # 检查表的页码列已回填数字
+    check = next(t for t in d.tables
+                 if "资格性和符合性检查响应内容" in " ".join(c.text for c in t.rows[0].cells))
+    page_cell = check.rows[1].cells[-1].text.strip()
+    assert page_cell.isdigit()

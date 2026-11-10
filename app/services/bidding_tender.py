@@ -89,10 +89,26 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
                 project_name = ln
                 break
     project_no = grab(r'项目编号[:：]\s*([^\s，,]+)')
-    purchaser = grab(r'采\s*购\s*人[:：]\s*(.+)')
-    agency = grab(r'采购代理机构[:：]\s*(.+)')
+    # 采购人/代理的标签各家不同（采购人：/采购人名称：/采购单位：/招标代理机构：/招标代理：）
+    purchaser = (grab(r'采\s*购\s*人(?:名称)?[:：]\s*(.+)')
+                 or grab(r'采购单位[:：]\s*(.+)'))
+    agency = (grab(r'采购代理机构[:：]\s*(.+)')
+              or grab(r'招标代理(?:机构)?[:：]\s*(.+)'))
+    # 金额单位：万元 或 元（大冈镇这份写的是 62000.00 元）
     budget = grab(r'本项目预算为[:：]?\s*' + _UNIT)
+    budget_yuan = grab(r'预算金额[为:：]?\s*([0-9,]+(?:\.\d+)?)\s*元')
+    max_yuan = grab(r'最高限价[为:：]?\s*([0-9,]+(?:\.\d+)?)\s*元')
+    if budget_yuan and not budget:
+        try:
+            budget = f"{float(budget_yuan.replace(',', '')) / 10000:g}"
+        except ValueError:
+            budget = budget_yuan
     max_price = grab(r'最高限价[为:：]?\s*' + _UNIT) or budget
+    if max_yuan and not grab(r'最高限价[为:：]?\s*' + _UNIT):
+        try:
+            max_price = f"{float(max_yuan.replace(',', '')) / 10000:g}"
+        except ValueError:
+            max_price = max_yuan
 
     # ── 资格条件（2.1 段，①~⑦）──
     qualifications: List[str] = []
@@ -190,9 +206,55 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     no_consortium = "不接受联合体" in blob
     sme_required = "中小企业" in blob and ("专门面向" in blob or "中小企业声明" in blob)
 
+    # ── 资格条件（部分招标文件用「（1）（2）」编号）──
+    if not qualifications:
+        q0 = blob.find("主要资格条件")
+        if q0 >= 0:
+            seg = blob[q0:q0 + 2000]
+            _items = re.split(r'（\d+）', seg)[1:]
+            for it in _items:
+                piece = _clean(it.split("\n")[0])[:160]
+                if piece and piece not in qualifications:
+                    qualifications.append(piece)
+
+    # ── 投标文件格式目录（有的写「投标主要文件目录」+ 一、二、三…）──
+    format_titles: List[str] = []
+    # 优先「投标主要文件目录」——它后面紧跟真正的一、二、三…条目；
+    # 只找「投标文件格式」会命中前面的 7.1.6 目录行，抓到别的章标题。
+    f0 = blob.find("投标主要文件目录")
+    if f0 < 0:
+        f0 = blob.find("投标文件格式")
+    if f0 >= 0:
+        seg = blob[f0:f0 + 1200]
+        _seen_no = set()
+        for m in re.finditer(r'^([一二三四五六七八九十]+)、\s*([^\n]{2,30})$',
+                             seg, re.M):
+            no, t = m.group(1), _clean(m.group(2))
+            if no in _seen_no or not t:
+                continue          # 后面的同名章标题（二、…要求 / 三、…格式）不再重复收
+            _seen_no.add(no)
+            format_titles.append(t)
+    # 只有「最低评标价法」的招标文件走简式八件套；其余沿用综合评分法的全量版
+    if "最低评标价法" in blob or "最低投标价法" in blob:
+        bid_format = "compact"
+    else:
+        bid_format = "full"
+
+    # ── 户数 / 单价（村庄测绘这类按户计价）──
+    households = ""
+    mh = re.search(r'约?\s*(\d{2,5})\s*户', blob)
+    if mh:
+        households = mh.group(1)
+    unit_price = ""
+    mu = re.search(r'(\d+(?:\.\d+)?)\s*元\s*/\s*户', blob)
+    if mu:
+        unit_price = mu.group(1)
+
     # ── 工期（服务期限：签订合同后 90 日内完成）──
     duration_days = 0
     m = re.search(r'(\d{2,4})\s*日内(?:完成|提交|交付)', blob)
+    if not m:
+        m = re.search(r'(\d{2,4})\s*日历天', blob)
     if not m:
         m = re.search(r'服务期限[^\n]{0,40}?(\d{2,4})\s*[天日]', blob)
     if m:
@@ -252,6 +314,12 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "sme_required": sme_required,
         "duration_days": duration_days,
         "plots": plots,
+        "budget_yuan": budget_yuan,
+        "max_price_yuan": max_yuan,
+        "bid_format": bid_format,
+        "format_titles": format_titles,
+        "households": households,
+        "unit_price": unit_price,
         "text_chars": len(text),
     }
 

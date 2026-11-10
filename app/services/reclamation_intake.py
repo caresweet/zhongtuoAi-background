@@ -650,11 +650,22 @@ def apply_intake_from_state(state: Dict[str, Any]) -> int:
             paths.append(rp)
 
     filled = state.setdefault("filled_data", {})
+    changed = 0
     for p in paths:
         data = read_intake_workbook(p)
-        if not data:
+        if data:
+            _n = apply_intake(filled, data)
+            logger.info(f"[基础资料] 读取《{p.name}》：写入 {_n} 项")
+            changed += _n
             continue
-        changed = apply_intake(filled, data)
-        logger.info(f"[基础资料] 读取《{p.name}》：写入 {len(changed)} 项")
-        return len(changed)
-    return 0
+        # 🔴 不是《复垦基础资料》模板 → 当**可研/项目资料 Excel** 扫标签取数
+        #    （业主 2026-11-10：「是可研 excel 然后最后才是弹窗」）。
+        try:
+            from app.services.reclamation_fs_excel import scan_workbook
+            _got = scan_workbook(p, filled)
+            if _got:
+                logger.info(f"[可研Excel] 《{p.name}》：写入 {len(_got)} 项")
+                changed += len(_got)
+        except Exception as _fe:
+            logger.warning(f"[可研Excel] {p.name} 扫描跳过: {_fe}")
+    return changed

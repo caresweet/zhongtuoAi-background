@@ -242,3 +242,50 @@ def score_factors(filled: dict) -> Dict[str, int]:
 def grade_of(total: float) -> str:
     """表4-8 备注：一等地 80—100；二等地 60—80；三等地 <60。"""
     return "一等地" if total >= 80 else ("二等地" if total >= 60 else "三等地")
+
+
+# ── 可研/项目资料 Excel：标签 → 值 ────────────────────────────────
+def normalize_factor(key: str, raw) -> str:
+    """把 Excel/正文里的原始写法归一到评分器认的取值。"""
+    v = str(raw or "").strip().strip("：:")
+    if not v:
+        return ""
+    if key == "slope_grade":
+        g = _slope_grade(f"坡度{v}") or _slope_grade(v)
+        return g or v
+    if key == "effective_soil_depth_cm":
+        m = re.search(r'(\d+(?:\.\d+)?)\s*(cm|厘米|mm|毫米|m|米)?', v)
+        if not m:
+            return ""
+        num = float(m.group(1))
+        u = (m.group(2) or "cm").lower()
+        if u in ("m", "米"):
+            num *= 100.0
+        elif u in ("mm", "毫米"):
+            num /= 10.0
+        return f"{num:g}"
+    if key == "organic_matter":
+        m = re.search(r'(\d+(?:\.\d+)?)', v)
+        return str(round(float(m.group(1)), 2)) if m else ""
+    if key == "soil_texture":
+        m = re.search(r'(中壤土|轻壤土|壤土|粘土|黏土|砂壤土|重粘土|砂土|砂砾土)', v)
+        return m.group(1) if m else v
+    if key == "landform":
+        m = re.search(r'(平地|岗坡地|坡地|平原)', v)
+        return ("平地" if m and m.group(1) == "平原" else (m.group(1) if m else v))
+    if key == "irrigation_guarantee":
+        return ("充分满足" if "充分" in v or "良好" in v
+                else ("无灌溉系统" if "无" in v else "一般满足"))
+    if key == "irrigation_method":
+        m = re.search(r'(喷灌|滴灌|喷滴灌|地面灌溉|漫灌|天然降水)', v)
+        return m.group(1) if m else v
+    if key == "drainage_condition":
+        return ("健全" if "健全" in v or "良好" in v
+                else ("无" if "无" in v else "一般"))
+    if key in ("road_access",):
+        m = re.search(r'(良好|一般|较差)', v)
+        return m.group(1) if m else v
+    if key == "field_flatness":
+        m = re.search(r'(非常平坦|比较平坦|高低不平)', v)
+        return m.group(1) if m else v
+    return v

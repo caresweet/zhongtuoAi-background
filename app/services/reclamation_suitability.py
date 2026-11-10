@@ -102,7 +102,8 @@ def _slope_grade(text: str) -> str:
     if not m:
         return ""
     nums = [float(x) for x in m.groups() if x]
-    v = max(nums) if nums else 0.0
+    # 区间（5-15°）按**下限**定档；单值（<5°、25°）不变
+    v = min(nums) if nums else 0.0
     # 「小于 5°」「<5°」 → 上界；用于选分级档
     _less = (m.re is _SLOPE[0]) or (m.re is _SLOPE[3]) or any(
         k in (m.group(0) or "") or k in text[max(0, m.start() - 8):m.start()]

@@ -36,6 +36,8 @@ async def main() -> int:
                     help="制式《土地分类面积汇总表》.xls/.xlsx（主体用地表）")
     ap.add_argument("--cost-excel", default="",
                     help="第七章投资估算 Excel（管道费用表）；不传则按资料名自动找")
+    ap.add_argument("--fs-excel", default="",
+                    help="可研/项目资料 Excel：先于材料正文与弹窗取数（标签→值）")
     args = ap.parse_args()
 
     from app.agent.state import create_initial_state
@@ -79,6 +81,16 @@ async def main() -> int:
         print("[公司档案] 读取失败（报告表编制单位栏将留空）:", _ce, flush=True)
     changed = apply_intake(filled, data)
     print(f"[基础资料] {Path(args.intake).name}：写入 {len(changed)} 项", flush=True)
+
+    # 🔴 可研 Excel：先于材料正文与弹窗取数（业主 2026-11-10 的先后顺序）
+    if args.fs_excel:
+        try:
+            from app.services.reclamation_fs_excel import scan_workbook
+            _fs = scan_workbook(args.fs_excel, filled)
+            print(f"[可研Excel] {Path(args.fs_excel).name}：写入 {len(_fs)} 项 {_fs}",
+                  flush=True)
+        except Exception as _fe:
+            print("[可研Excel] 读取失败:", _fe, flush=True)
 
     if args.land_summary:
         from app.services.land_summary_excel import read_land_summary

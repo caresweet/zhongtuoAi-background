@@ -80,3 +80,25 @@ def test_scanned_factors_score_in_table_4_9(tmp_path):
     assert row[3] == "90"      # 中壤土
     assert row[4] == "80"      # 有机质 0.8%
     assert row[12] == "一等地"
+
+
+def test_apply_intake_from_state_scans_fs_excel(tmp_path):
+    """界面/上传通道：基础资料 Excel + 可研 Excel 一起扫，顺序与返回值都要对。"""
+    from app.services.reclamation_intake import (
+        apply_intake_from_state, build_intake_workbook)
+
+    base = tmp_path / "复垦基础资料_测试.xlsx"
+    build_intake_workbook(base)
+    fs = _make(tmp_path / "可研资料.xlsx")
+    state = {
+        "_domain": "reclamation",
+        "_uploaded_files": [
+            {"path": str(base), "original_name": base.name},
+            {"path": str(fs), "original_name": fs.name},
+        ],
+    }
+    n = apply_intake_from_state(state)
+    assert isinstance(n, int) and n > 0
+    f = state["filled_data"]
+    assert f["soil_texture"] == "中壤土"
+    assert f["slope_grade"] == "<5°"

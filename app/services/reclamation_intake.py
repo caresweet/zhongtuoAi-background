@@ -632,7 +632,7 @@ def _resolve(p: Any) -> Optional[Path]:
 
 def apply_intake_from_state(state: Dict[str, Any]) -> int:
     """从会话已上传文件里找《复垦基础资料》xlsx，读入 filled_data。返回写入字段数。"""
-    from app.agent.chapter_catalog import domain_of_state
+    from app.domains import domain_of_state
     if domain_of_state(state) != "reclamation":
         return 0
 
@@ -655,8 +655,8 @@ def apply_intake_from_state(state: Dict[str, Any]) -> int:
         data = read_intake_workbook(p)
         if data:
             _n = apply_intake(filled, data)
-            logger.info(f"[基础资料] 读取《{p.name}》：写入 {_n} 项")
-            changed += _n
+            logger.info(f"[基础资料] 读取《{p.name}》：写入 {len(_n)} 项")
+            changed += len(_n)
             continue
         # 🔴 不是《复垦基础资料》模板 → 当**可研/项目资料 Excel** 扫标签取数
         #    （业主 2026-11-10：「是可研 excel 然后最后才是弹窗」）。

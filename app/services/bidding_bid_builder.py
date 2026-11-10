@@ -172,8 +172,6 @@ def _fill_scoring_pages(d, pages: Dict[str, int]) -> None:
         if title not in pages or i >= len(tbl.rows):
             continue
         cell = tbl.rows[i].cells[-2]
-        if "见投标文件" not in cell.text:
-            continue
         cell.text = ""
         r = cell.paragraphs[0].add_run(str(pages[title]))
         _set_font(r, name="仿宋", size=14)
@@ -1309,14 +1307,16 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         ["开户名称", co_name, "", ""],
         ["开户银行", "/", "开户账号", "/"],
     ], widths=[2.5, 5.5, 2.5, 4.5])
-    doc.add_paragraph()
-    _p(doc, f"投标人（盖章）：{co_name}", indent=False)
-    _p(doc, "法定代表人或被授权代表人（签名）：", indent=False)
+    # 落款三行必须同页（否则「日期」会被单独挤到下一页）
+    _sig1 = _p(doc, f"投标人（盖章）：{co_name}", indent=False)
+    _sig2 = _p(doc, "法定代表人或被授权代表人（签名）：", indent=False)
+    _sig1.paragraph_format.keep_with_next = True
+    _sig2.paragraph_format.keep_with_next = True
     _p(doc, f"日期：{today}", indent=False)
-    doc.add_page_break()
 
     # ── （二）报价文件（照招标第六章模板逐项对版）──
-    _h(doc, "（二）报价文件", 1)
+    # 用「段前分页」而不是空段落分页：空段落在满页时会多出一张白页
+    _h(doc, "（二）报价文件", 1).paragraph_format.page_break_before = True
     _h(doc, "1、开标一览表：", 2)
     _p(doc, "开标一览表", size=14, align="center", indent=False)
     _p_two(doc, f"投标人名称（盖章）：{co_name}", "单位：元", size=14,

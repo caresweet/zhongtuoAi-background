@@ -60,6 +60,11 @@ def _p(doc, text: str, *, size=12, bold=False, align="left", indent=True,
 
 
 def _h(doc, text: str, level=1, *, toc=True, size=None):
+    """章节标题（照人工稿：**一律不加粗**）。
+
+    人工稿 PDF 实测：部分标题宋体 15、部分标题仿宋 18/15，字重都是常规
+    （PDF 字体 flags 无 bold 位）。旧实现全部用黑体加粗，观感比人工稿重。
+    """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
     # 一级标题挂 Heading 1，供目录域抓取；服务方案里的分章不挂（目录只列 8 个部分）
@@ -69,18 +74,19 @@ def _h(doc, text: str, level=1, *, toc=True, size=None):
     p.paragraph_format.space_before = Pt(10 if level == 1 else 6)
     p.paragraph_format.space_after = Pt(6)
     r = p.add_run(text)
-    _set_font(r, name="黑体",
-              size=size or (16 if level == 1 else 14 if level == 2 else 12),
-              bold=True)
+    # 八个部分用宋体 15；方案内分章/分节用仿宋 18/15
+    _font = "宋体" if (level == 1 and toc) else "仿宋"
+    _size = size or (15 if level == 1 else 14 if level == 2 else 15)
+    _set_font(r, name=_font, size=_size, bold=False)
     from docx.shared import RGBColor
     r.font.color.rgb = RGBColor(0, 0, 0)
     return p
 
 
 def _plan_p(doc, text: str):
-    """服务方案正文：15pt、固定 28 磅行距、首行缩进 2 字符（对齐人工稿）。"""
+    """服务方案正文：仿宋 15pt、固定 28 磅行距、首行缩进 2 字符（对齐人工稿）。"""
     from docx.shared import Cm, Pt
-    p = _p(doc, text, size=15, align="justify")
+    p = _p(doc, text, size=15, align="justify", name="仿宋")
     p.paragraph_format.line_spacing = Pt(28)
     p.paragraph_format.space_after = Pt(0)
     p.paragraph_format.first_line_indent = Cm(1.06)
@@ -215,7 +221,7 @@ def _stamp_toc(path) -> bool:
 
         from docx import Document
         from docx.enum.text import WD_TAB_ALIGNMENT, WD_TAB_LEADER
-        from docx.shared import Cm
+        from docx.shared import Cm, Pt
         d = Document(str(path))
         paras = d.paragraphs
         ph = next((p for p in paras
@@ -230,7 +236,8 @@ def _stamp_toc(path) -> bool:
                 for r in list(q.runs):
                     r._element.getparent().remove(r._element)
                 r = q.add_run(f"{title}\t{pages[title]}")
-                _set_font(r, size=12)
+                _set_font(r, name="黑体", size=14, bold=False)
+                q.paragraph_format.space_after = Pt(2)
             _fill_scoring_pages(d, anchor_pages)
             d.save(str(path))
             return True
@@ -240,11 +247,12 @@ def _stamp_toc(path) -> bool:
         for title in _BID_TOP_TITLES:
             q = (anchor.insert_paragraph_before() if anchor is not None
                  else ph.insert_paragraph_before())
+            # 人工稿目录：黑体 14 磅、点线引导、页码右对齐到版心右边界（3cm 页边距 → 15cm）、段后 2 磅
             q.paragraph_format.tab_stops.add_tab_stop(
                 Cm(15.0), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
-            q.paragraph_format.space_after = 0
+            q.paragraph_format.space_after = Pt(2)
             r = q.add_run(f"{title}\t{pages[title]}")
-            _set_font(r, size=12)
+            _set_font(r, name="黑体", size=14, bold=False)
         ph._p.getparent().remove(ph._p)
         _fill_scoring_pages(d, anchor_pages)
         d.save(str(path))
@@ -263,7 +271,8 @@ def _add_toc(doc) -> None:
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run("目  录")
-    _set_font(r, name="黑体", size=18, bold=True)
+    # 人工稿 PDF：目录标题黑体 20 磅、不加粗
+    _set_font(r, name="黑体", size=20, bold=False)
 
     q = doc.add_paragraph()
     run = q.add_run()
@@ -395,7 +404,8 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
         cell.text = ""
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         r = cell.paragraphs[0].add_run(str(h))
-        _set_font(r, size=font_size, bold=True)
+        # 人工稿 PDF 的表头也是常规字重（仿宋 14～15，无 bold 位），靠边框区分
+        _set_font(r, size=font_size, bold=False)
         cell.paragraphs[0].alignment = 1
     for ri, row in enumerate(rows, 1):
         for ci in range(len(headers)):
@@ -415,6 +425,52 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
             if i < len(t.rows):
                 t.rows[i].height = Cm(h)
     return t
+
+
+def _grid(doc, rows: Sequence[Sequence[str]],
+          widths: Optional[Sequence[float]] = None, *, font_size=12):
+    """无表头栅格（关联单位表、地址/联系信息表用）：全部单元格同字号、不加粗。"""
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.shared import Cm
+    if not rows:
+        return None
+    t = doc.add_table(rows=len(rows), cols=len(rows[0]))
+    t.style = "Table Grid"
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for ri, row in enumerate(rows):
+        for ci in range(len(rows[0])):
+            cell = t.cell(ri, ci)
+            cell.text = ""
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            val = row[ci] if ci < len(row) else ""
+            r = cell.paragraphs[0].add_run(str(val))
+            _set_font(r, size=font_size)
+            cell.paragraphs[0].alignment = 1
+    if widths:
+        for ci, w in enumerate(widths):
+            for r in t.rows:
+                r.cells[ci].width = Cm(w)
+    return t
+
+
+def _related_companies(company_id: int, leader: str) -> str:
+    """与本公司同一法定代表人的其他单位（投标函 13 关联单位表按此填）。
+
+    人工稿该表填的是「江苏众拓项目代理咨询有限公司」——同一法定代表人。
+    数据从 auth.db 的 companies 表按 leader_name 反查，不写死公司名。
+    """
+    if not leader:
+        return ""
+    try:
+        c = sqlite3.connect(str(AUTH))
+        rows = c.execute(
+            "select name from companies where id<>? and leader_name=? "
+            "and coalesce(status,'')<>'deleted' order by id",
+            (company_id, leader)).fetchall()
+        c.close()
+        return "、".join(str(r[0]) for r in rows if r[0])
+    except Exception:
+        return ""
 
 
 def _center_all_cells(doc) -> None:
@@ -820,7 +876,7 @@ def _md_to_docx(doc, md: str, ctx: Dict[str, Any] = None):
         if s.startswith("###"):
             _h(doc, s.lstrip("#").strip(), 3, size=15)
         elif s.startswith("##"):
-            _h(doc, s.lstrip("#").strip(), 2, size=16)
+            _h(doc, s.lstrip("#").strip(), 2, size=15)
         elif s.startswith("#"):
             _h(doc, s.lstrip("#").strip(), 1, toc=False, size=18)
         elif re.match(r'^\s*[-*]\s+', s):
@@ -841,8 +897,8 @@ def _render_plan_table(doc, key: str, ctx: Dict[str, Any]) -> None:
     spec = build_table(key, ctx)
     if not spec:
         return
-    _p(doc, spec["caption"], size=10.5, bold=True, align="center",
-       indent=False, space_after=2)
+    _p(doc, spec["caption"], size=15, bold=False, align="center",
+       indent=False, space_after=2, name="仿宋")
     headers = spec["headers"]
     _table(doc, headers, spec["rows"],
            font_size=9.5 if len(headers) >= 6 else 10.5)
@@ -1163,15 +1219,37 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         "11. 我方承诺一旦中标，提供的服务质量不低于招标文件要求，符合国家相关标准，"
         "并接受采购人的检查与验收要求。",
         "12. 我方不是为本项目提供整体设计、规范编制或者项目管理、监理、检测等服务的投标人。",
-        "13. 关联单位情况说明：与我方单位负责人为同一人的其他单位：无；"
-        "与我方存在直接控股、管理关系的其他单位：无。",
-        "14. 与本投标有关的一切正式往来函电，请联系：",
-        f"地址：{_company_addr(co_name)}    邮编：223005",
-        f"联系人：{_company_contact(co_name)}    办公电话：0517-83663008",
-        "开户名称：江苏众拓测绘有限公司    开户银行：/    开户账号：/",
     ]
     for ln in lines:
         _p(doc, ln, align="justify")
+
+    # 13/14 照人工稿做成表格（业主 2026-11-10：这两项「都没有表格」）
+    _af0 = _auth_fields(texts)
+    _contact = str(_af0.get("agent") or "").strip()
+    _mobile = str(_af0.get("mobile") or "").strip()
+    if not (_contact and _mobile):
+        _pc = _company_contact(co_name).split()
+        _contact = _contact or (_pc[0] if _pc else "")
+        _mobile = _mobile or (_pc[1] if len(_pc) > 1 else "")
+    _rel = _related_companies(company_id, str(_af0.get("legal") or ""))
+
+    _p(doc, "13. 关联单位情况说明：", align="justify")
+    _p(doc, "注：没有请填无。", align="justify")
+    _grid(doc, [
+        ["与我方单位负责人为同一人的其他单位", _rel or "无"],
+        ["与我方存在直接控股、管理关系的其他单位", _rel or "无"],
+    ], widths=[8.5, 6.5], font_size=12)
+
+    _p(doc, "14. 与本投标有关的一切正式往来函电，请联系：", align="justify")
+    _grid(doc, [["地址", _company_addr(co_name) or _af0.get("address") or "",
+                 "邮编", "223005"]],
+          widths=[2.2, 8.3, 2.2, 2.3], font_size=12)
+    _grid(doc, [
+        ["传真", "无", "办公电话", "0517-83663008"],
+        ["联系人", _contact, "手机号码", _mobile],
+        ["开户名称", co_name, "", ""],
+        ["开户银行", "/", "开户账号", "/"],
+    ], widths=[2.5, 5.5, 2.5, 4.5], font_size=12)
     doc.add_paragraph()
     _p(doc, f"投标人（盖章）：{co_name}", indent=False)
     _p(doc, "法定代表人或被授权代表人（签名）：", indent=False)
@@ -1234,12 +1312,12 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     # 法定代表人身份证随《关于资格的声明函》一起提交（模板位置）
     _legal_imgs = _asset_images(f"{af['legal']} 身份证", limit=2)
     if _legal_imgs:
-        _p(doc, "法定代表人身份证复印件：", bold=True, indent=False)
+        _p(doc, "法定代表人身份证复印件：", bold=False, indent=False)
         _image_row(doc, _legal_imgs)
     doc.add_page_break()
 
     _h(doc, "2、法定代表人授权委托书：", 2)
-    _p(doc, "法定代表人授权书", size=14, bold=True, align="center",
+    _p(doc, "法定代表人授权书", size=14, bold=False, align="center",
        indent=False, name="宋体")
     _p(doc, f"日期：{today}", indent=False, align="right")
     _p(doc, f"{purchaser}、{agency}：", indent=False)
@@ -1265,7 +1343,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     # 授权书后贴被授权代表身份证正反面（并排，带细边框，无图题）
     _agent_imgs = _asset_images(f"{af['agent']} 身份证", limit=2)
     if _agent_imgs and af["agent"] != af["legal"]:
-        _p(doc, "被授权代表身份证复印件：", bold=True, indent=False)
+        _p(doc, "被授权代表身份证复印件：", bold=False, indent=False)
         _image_row(doc, _agent_imgs)
     doc.add_page_break()
 
@@ -1398,7 +1476,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
            font_size=9.5, row_heights=[0.8] + [0.78] * len(rows))
     _p(doc, "注：上述人员在项目执行过程中如需更换，须经采购人同意；"
             "擅自更换或不到位属违约行为。", size=10.5, indent=False)
-    _p(doc, "拟投入人员简历：", bold=True, indent=False)
+    _p(doc, "拟投入人员简历：", bold=False, indent=False)
     for p in people:
         certs = "、".join(p.get("certs") or []) or "—"
         _p(doc, f"{p.get('name')}，{p.get('gender') or ''}，{p.get('age') or ''}岁，"
@@ -1440,7 +1518,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         if pid:
             imgs = _person_images(int(pid))
             if imgs:
-                _p(doc, f"{p.get('name')}（{p.get('role')}）", bold=True, indent=False)
+                _p(doc, f"{p.get('name')}（{p.get('role')}）", bold=False, indent=False)
                 for nm, data in imgs[:6]:
                     _img(doc, data, 14.0, nm)
 
@@ -1448,7 +1526,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     for key in ("具备履行合同所必需设备和专业技术能力声明", "无重大违法记录声明",
                 "中小企业声明函", "供应商独立性承诺书", "信用记录承诺书"):
         if texts.get(key):
-            _p(doc, key, bold=True, indent=False)
+            _p(doc, key, bold=False, indent=False)
             for para in texts[key].splitlines():
                 if para.strip():
                     # 素材里的旧落款日期换成本次投标日期（「出生日期」不动）
@@ -1459,7 +1537,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     # 🔴 招标文件明确「不接受联合体」时，补一份非联合体声明（人工稿有这份）
     if tender.get("no_consortium"):
-        _p(doc, "非联合体投标声明", bold=True, indent=False)
+        _p(doc, "非联合体投标声明", bold=False, indent=False)
         _p(doc, f"我单位郑重声明：本项目由{co_name}独立投标，未与其他单位组成联合体，"
                 "未以任何形式借用或挂靠其他单位资质；中标后由我单位独立履行合同义务，"
                 "不进行转包和违法分包。如有不实，愿承担相应法律责任。", align="justify")
@@ -1519,7 +1597,7 @@ def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], captio
         kw = name_tuple[0]
         for nm, data in _asset_images(kw, limit=20):
             if count == 0 and caption:
-                _p(doc, caption, bold=True, indent=False)
+                _p(doc, caption, bold=False, indent=False)
             _img(doc, data, 15.0)
             if break_after:
                 doc.add_page_break()

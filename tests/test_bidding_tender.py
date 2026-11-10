@@ -77,8 +77,17 @@ async def test_build_bid_document_follows_tender_format(tmp_path):
     assert "叁拾柒万元整" in text
     assert "江苏众拓测绘有限公司" in text
     assert len(d.tables) >= 5
-    hdr = " ".join(c.text for c in d.tables[0].rows[0].cells)
-    assert "内容（大写）" in hdr
+    opening = next(t for t in d.tables
+                   if "内容（大写）" in " ".join(c.text for c in t.rows[0].cells))
+    assert opening is not None
+    # 投标函 13/14 项必须是表格（人工稿：关联单位表 + 地址/联系信息表）
+    related = next(t for t in d.tables
+                   if "与我方单位负责人为同一人的其他单位"
+                   in " ".join(c.text for c in t.rows[0].cells))
+    assert "江苏众拓项目代理咨询有限公司" in related.rows[0].cells[1].text
+    contact = next(t for t in d.tables
+                   if "传真" in [c.text for c in t.rows[0].cells])
+    assert any("开户账号" in c.text for r in contact.rows for c in r.cells)
 
 
 def test_service_plan_outline_aligns_with_human_bid():
@@ -317,3 +326,24 @@ async def test_default_personnel_is_leader_plus_five(tmp_path):
     pers = next(t for t in d.tables
                 if "资格证书编号" in "".join(c.text for c in t.rows[0].cells))
     assert len(pers.rows) == 7                    # 表头 + 6 人
+
+
+@pytest.mark.asyncio
+async def test_toc_and_headings_follow_human_pdf(tmp_path):
+    """目录黑体 20/14 且不加粗；部分标题宋体 15 不加粗（人工稿 PDF 实测）。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "目录格式.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    ps = [p for p in Document(str(out)).paragraphs if p.text.strip()]
+    title = next(p for p in ps if p.text.strip() == "目  录")
+    r = title.runs[0]
+    assert r.font.name == "黑体" and r.font.size.pt == 20 and not r.bold
+    entry = next(p for p in ps if p.text.startswith("（一）投标函\t"))
+    r = entry.runs[0]
+    assert r.font.name == "黑体" and r.font.size.pt == 14 and not r.bold
+    part = next(p for p in ps if p.text.strip() == "（一）投标函")
+    r = part.runs[0]
+    assert r.font.name == "宋体" and r.font.size.pt == 15 and not r.bold

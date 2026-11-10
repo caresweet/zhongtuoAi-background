@@ -73,6 +73,8 @@ REPORT_MATERIAL_GUIDE = {
             {"name": "专家评审意见", "format": "图片", "note": "专家签字评审表、签到表"},
         ],
         "optional": [
+            {"name": "稳评数据资料表（Excel）", "format": "Excel",
+             "note": "项目基本信息/时间节点/调查数据/联系人一次填完，生成时优先读取（空表可从模板下载）"},
             {"name": "公示照片", "format": "图片", "note": "公告栏张贴照片"},
             {"name": "现场照片", "format": "图片", "note": "地块现状、现场勘查照片"},
             {"name": "补偿标准文件", "format": "PDF", "note": "征地区片综合地价标准"},
@@ -361,6 +363,17 @@ async def _analyze_session_attachments(state: dict, attachments: list[str]) -> d
         except Exception as _lce:
             import logging as _lg
             _lg.getLogger(__name__).warning(f"[地类] 勘测定界地类抽取跳过: {_lce}")
+
+    # 🔴 稳评：读用户上传的《稳评数据资料表》Excel（项目/时间/调查/联系人）。
+    #    必须在字段核对与逐章生成之前 —— 表里填了就不要再弹窗问。
+    if (state.get("_domain") or "stability") == "stability":
+        try:
+            from app.services.stability_intake import apply_intake_from_state
+            _n_st = apply_intake_from_state(state)
+            if _n_st:
+                logger.info(f"[稳评资料] 已读取稳评数据资料 Excel：{_n_st} 项")
+        except Exception as _ste:
+            logger.warning(f"[稳评资料] 读取失败（不影响出报告）: {_ste}")
 
     # 🔴 复垦：优先读用户上传的《复垦基础资料》Excel。
     #    这张表是业主在《1井神安井组复垦报告11.2》的 49 条批注基础上定的取数清单：

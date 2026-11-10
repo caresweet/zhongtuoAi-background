@@ -33,6 +33,15 @@ LABEL_MAP: Dict[str, str] = {
     "项目性质": "construction_nature",
     "批复文号": "doc_reference",
     "项目批复文号": "doc_reference",
+    # 稳评常用
+    "决策主体": "decision_unit",
+    "稳评责任单位": "org_name",
+    "责任单位": "org_name",
+    "土地用途": "land_use",
+    "涉及户数": "household_count",
+    "补偿标准": "compensation_standard",
+    "补偿安置方案文号": "compensation_doc",
+    "资金筹措单位": "funding",
     # 面积/投资/年限
     "临时用地面积": "area_m2",
     "项目总投资": "project_investment",

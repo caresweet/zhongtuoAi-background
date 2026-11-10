@@ -190,6 +190,50 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     no_consortium = "不接受联合体" in blob
     sme_required = "中小企业" in blob and ("专门面向" in blob or "中小企业声明" in blob)
 
+    # ── 工期（服务期限：签订合同后 90 日内完成）──
+    duration_days = 0
+    m = re.search(r'(\d{2,4})\s*日内(?:完成|提交|交付)', blob)
+    if not m:
+        m = re.search(r'服务期限[^\n]{0,40}?(\d{2,4})\s*[天日]', blob)
+    if m:
+        try:
+            duration_days = int(m.group(1))
+        except ValueError:
+            duration_days = 0
+
+    # ── 地块清单（服务方案表1-1 用）：名称 / 规模 / 位置 ──
+    plots: List[Dict[str, Any]] = []
+    for idx, ln in enumerate(lines):
+        mm = re.match(r'^(\d{1,2})\s*[、.．]\s*([^\s，,。：:]{2,20}?地块)\s*(?:项目)?', ln)
+        if not mm:
+            continue
+        name = _clean(mm.group(2))
+        # 采购需求里也有「2、付款方式：项目各地块…」这类带编号的条款，不是地块
+        if any(k in name for k in ("付款", "方式", "时间", "地点", "标准", "要求")):
+            continue
+        # 本段只取到下一个编号条目前，避免把后一个地块的面积串进来
+        seg_lines = [ln]
+        for nxt in lines[idx + 1: idx + 6]:
+            if re.match(r'^\d{1,2}\s*[、.．]', nxt):
+                break
+            seg_lines.append(nxt)
+        seg = " ".join(seg_lines)
+        area = ""
+        # 优先「本次报批/先导区」的面积，避免把园区总规划面积当成报批规模
+        am = re.search(r'(?:本次报批|先导区)[^。]{0,40}?(\d+(?:\.\d+)?)\s*亩', seg)
+        if not am:
+            am = re.search(r'(?:总占地面积|新增用地|规划用地|用地)[^。]{0,12}?约?\s*'
+                           r'(\d+(?:\.\d+)?)\s*亩', seg)
+        if am:
+            area = am.group(1)
+        loc = ""
+        lm = re.search(r'落地(?:于)?([^，,。]{2,30})', seg)
+        if lm:
+            loc = _clean(lm.group(1))
+        kind = "单独选址" if "单独选址" in seg else "批次用地报批"
+        plots.append({"name": _clean(mm.group(2)), "type": kind,
+                      "area": area, "location": loc})
+
     return {
         "source": str(path),
         "project_name": project_name,
@@ -206,6 +250,8 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "format_sections": fmt_sections,
         "no_consortium": no_consortium,
         "sme_required": sme_required,
+        "duration_days": duration_days,
+        "plots": plots,
         "text_chars": len(text),
     }
 

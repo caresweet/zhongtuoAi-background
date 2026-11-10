@@ -82,16 +82,21 @@ async def test_build_bid_document_follows_tender_format(tmp_path):
 
 
 def test_service_plan_outline_aligns_with_human_bid():
-    """服务方案按人工稿 5 章 23 节组织，目标约 9.4 万字。"""
-    from app.services.bidding_bid_builder import _PLAN_CHAPTERS
+    """服务方案按人工稿的分节粒度组织：5 章 57 节（人工稿 53 节 + 14 子节）。"""
+    from app.services.bidding_bid_builder import _PLAN_CHAPTERS, _SECTION_TABLES
 
     titles = [c[0] for c in _PLAN_CHAPTERS]
     assert titles == ["第一章 对项目的理解", "第二章 项目组织实施方案",
                       "第三章 质量保障措施", "第四章 进度安排", "第五章 安全保密保障措施"]
     subs = [s for _, ss in _PLAN_CHAPTERS for s in ss]
-    assert len(subs) == 23
+    assert len(subs) == 57
     total = sum(s[2] for s in subs)
-    assert 90000 <= total <= 100000
+    assert 80000 <= total <= 95000
+    # 每章都要有表（人工稿 29 张表；分节号必须真的存在于大纲里）
+    nos = {s[0].split(" ", 1)[0] for s in subs}
+    assert set(_SECTION_TABLES) <= nos
+    assert len({k for ks in _SECTION_TABLES.values() for k in ks}) >= 25
+    assert {"1.10", "4.7", "5.9"} <= set(_SECTION_TABLES)
 
 
 @pytest.mark.asyncio
@@ -224,3 +229,91 @@ def test_runaway_subsections_are_trimmed():
     # 模型一上来就写错号（正文太短）→ 原样返回，宁多不空
     tiny = "## 9.9 别的章节\n\n短正文。"
     assert _drop_runaway_sections(tiny, "4.1") == tiny
+
+
+def test_tender_parses_duration_and_plots(tender):
+    """工期与地块清单从招标文件取（表1-1、进度表要用），不写死 90 天/四个地块。"""
+    assert tender["duration_days"] == 90
+    plots = tender["plots"]
+    assert [p["name"] for p in plots] == [
+        "蜀浦路东西两侧地块", "湖光中路南侧地块", "航空产业园地块"]
+    assert [p["area"] for p in plots] == ["300", "10.03", "131"]
+
+
+def test_plan_tables_follow_human_bid():
+    """方案表按人工稿表式：表头与列数一致，内容取项目事实（地块/人员/工期）。"""
+    from app.services.bidding_bid_builder import _plan_ctx
+    from app.services.bidding_plan_tables import PLAN_TABLES, build_table
+
+    tender = {"project_name": "某地块用地报批服务项目", "purchaser": "某采购人",
+              "duration_days": 90,
+              "plots": [{"name": "A地块", "type": "批次用地报批", "area": "100",
+                         "location": "某村"}]}
+    people = [{"name": "张三", "role": "项目负责人", "title": "高级工程师",
+               "major": "测绘", "certs": ["注册测绘师"]},
+              {"name": "李四", "role": "项目组成员", "title": "工程师",
+               "major": "土地", "certs": []}]
+    ctx = _plan_ctx(tender, "某公司", people)
+
+    assert len(PLAN_TABLES) == 29
+    plots = build_table("plots", ctx)
+    assert plots["headers"] == ["地块名称", "报批类型", "用地规模", "重点难点",
+                                "特殊关注事项", "预计耗时"]
+    assert plots["rows"][0][0].endswith("A地块")
+
+    duties = build_table("duties", ctx)
+    assert [r[1] for r in duties["rows"]] == ["张三", "李四"]
+
+    gantt = build_table("gantt", ctx)
+    assert len(gantt["headers"]) == 10          # 工作内容 + 9 个时间段
+    assert all(len(r) == 10 for r in gantt["rows"])
+
+    for key in PLAN_TABLES:
+        spec = build_table(key, ctx)
+        assert spec and spec["headers"] and spec["rows"], key
+        assert all(len(r) == len(spec["headers"]) for r in spec["rows"]), key
+
+
+@pytest.mark.asyncio
+async def test_deviation_and_scoring_tables_match_human_bid(tmp_path):
+    """偏离表逐条 6 行；评分导读表 9 项（4 客观 + 5 方案）。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "偏离评分.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    d = Document(str(out))
+    dev = next(t for t in d.tables
+               if "正偏离/负偏离" in "".join(c.text for c in t.rows[0].cells))
+    assert len(dev.rows) == 7                     # 表头 + 6 条
+    texts = [r.cells[2].text for r in dev.rows[1:]]
+    assert any("服务期限" in x for x in texts)
+    assert any("验收标准" in x for x in texts)
+    assert any("人员配备" in x for x in texts)
+
+    sc = next(t for t in d.tables
+              if "自评分" in "".join(c.text for c in t.rows[0].cells))
+    assert len(sc.rows) == 10                     # 表头 + 9 项
+    names = [r.cells[1].text for r in sc.rows[1:]]
+    for kw in ("对项目的理解", "项目组织实施方案", "质量保障措施",
+               "进度安排", "安全保密保障措施"):
+        assert kw in names
+    # 客观分项的自评分按公司档案计算，不再写死
+    assert sc.rows[2].cells[4].text.isdigit()
+    assert int(sc.rows[2].cells[4].text) <= 10
+
+
+@pytest.mark.asyncio
+async def test_default_personnel_is_leader_plus_five(tmp_path):
+    """默认投入 1 名负责人 + 5 名组员（对齐人工稿，招标最低 1+3 只是底线）。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    out = tmp_path / "人员六人.docx"
+    await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
+                             out_path=out, seed=2026, use_llm=False)
+    d = Document(str(out))
+    pers = next(t for t in d.tables
+                if "资格证书编号" in "".join(c.text for c in t.rows[0].cells))
+    assert len(pers.rows) == 7                    # 表头 + 6 人

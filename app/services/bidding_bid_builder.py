@@ -133,6 +133,41 @@ _BID_TOP_TITLES = [
     "（六）服务内容的详细说明及服务方案", "（七）项目人员配置清单", "（八）其他",
 ]
 
+# 评分导读表 9 行的「投标文件对应页码」锚点（顺序与 _score_rows 一致）
+_SCORING_ANCHORS = (
+    "3. 类似项目业绩",
+    "（七）项目人员配置清单",
+    "1. 体系认证证书",
+    "2. 仪器设备",
+    "第一章 对项目的理解",
+    "第二章 项目组织实施方案",
+    "第三章 质量保障措施",
+    "第四章 进度安排",
+    "第五章 安全保密保障措施",
+)
+
+
+def _fill_scoring_pages(d, pages: Dict[str, int]) -> None:
+    """把评分导读表里的「见投标文件」换成真实页码（与目录同一次分页）。"""
+    if not pages:
+        return
+    tbl = None
+    for t in d.tables:
+        if t.rows and any("自评分" in c.text for c in t.rows[0].cells):
+            tbl = t
+            break
+    if tbl is None:
+        return
+    for i, title in enumerate(_SCORING_ANCHORS, start=1):
+        if title not in pages or i >= len(tbl.rows):
+            continue
+        cell = tbl.rows[i].cells[-2]
+        if "见投标文件" not in cell.text:
+            continue
+        cell.text = ""
+        r = cell.paragraphs[0].add_run(str(pages[title]))
+        _set_font(r, size=10.5)
+
 
 def _stamp_toc(path) -> bool:
     """把目录域换成**带真实页码的静态条目**（用 LibreOffice 分页）。
@@ -158,15 +193,23 @@ def _stamp_toc(path) -> bool:
             return False
         import fitz
         src = fitz.open(str(pdf))
-        pages = {}
-        for title in _BID_TOP_TITLES:
-            # 跳过封面/目录页，按**整行等于标题**匹配，避免命中目录条目
-            for i in range(2, src.page_count):
-                lines = [ln.strip() for ln in src[i].get_text().splitlines()]
-                if title in lines:
-                    pages[title] = i          # 页码从 0 起，封面隐藏
-                    break
+        _wanted = list(_BID_TOP_TITLES) + list(_SCORING_ANCHORS)
+        _found: Dict[str, int] = {}
+        for i in range(2, src.page_count):
+            # 跳过封面/目录页，按**整行等于标题**匹配，避免命中目录条目。
+            # ⚠️ LibreOffice 会把「第一章 对项目的理解」中间的空格吃掉，
+            #    所以同时比对去空格后的行（实测导致方案章节页码一直填不上）。
+            raw_lines = [ln.strip() for ln in src[i].get_text().splitlines()]
+            lines = set(raw_lines) | {ln.replace(" ", "").replace("　", "")
+                                      for ln in raw_lines}
+            for title in _wanted:
+                if title in _found:
+                    continue
+                if title in lines or title.replace(" ", "") in lines:
+                    _found[title] = i          # 页码从 0 起，封面隐藏
         src.close()
+        pages = {t: _found[t] for t in _BID_TOP_TITLES if t in _found}
+        anchor_pages = {t: _found[t] for t in _SCORING_ANCHORS if t in _found}
         if len(pages) < len(_BID_TOP_TITLES):
             return False
 
@@ -188,6 +231,7 @@ def _stamp_toc(path) -> bool:
                     r._element.getparent().remove(r._element)
                 r = q.add_run(f"{title}\t{pages[title]}")
                 _set_font(r, size=12)
+            _fill_scoring_pages(d, anchor_pages)
             d.save(str(path))
             return True
         nxt = ph._p.getnext()
@@ -202,6 +246,7 @@ def _stamp_toc(path) -> bool:
             r = q.add_run(f"{title}\t{pages[title]}")
             _set_font(r, size=12)
         ph._p.getparent().remove(ph._p)
+        _fill_scoring_pages(d, anchor_pages)
         d.save(str(path))
         return True
     finally:
@@ -466,81 +511,158 @@ def _person_images(personnel_id: int) -> List[Tuple[str, bytes]]:
 # ═══════════════════════════════════════════════════════════════
 # 服务方案（agent 写）
 # ═══════════════════════════════════════════════════════════════
-# 服务方案章节结构（对齐人工稿：5 章 24 节，目标约 9.4 万字）
+# 服务方案章节结构（对齐人工稿 232 页稿：5 章 57 节，目标约 8.6 万字）
+# 🔴 业主 2026-11-10：「服务方案分节要多，学习人工稿中的表格书写习惯和内容」——
+#    人工稿每章 9～14 节、节内配管理表格；这里按人工稿的分节粒度重排，
+#    表格由 `bidding_plan_tables` 按小节号插入（见 _SECTION_TABLES）。
 _PLAN_CHAPTERS: List[Tuple[str, List[Tuple[str, List[str], int]]]] = [
     ("第一章 对项目的理解", [
-        ("1.1 项目背景与区域概况",
-         ["项目来源、采购人、四个地块基本情况", "丁蜀镇区位、自然地理、社会经济概况",
-          "四个地块产业定位与报批需求"], 4000),
+        ("1.1 项目基本情况",
+         ["项目来源、采购人与项目编号", "各地块位置、规模与建设内容",
+          "服务范围与成果形式"], 2000),
         ("1.2 采购需求与工作内容理解",
-         ["招标文件第三章采购内容逐项解读", "服务边界、成果形式与配合要求",
-          "从采购人视角理解核心诉求"], 4000),
-        ("1.3 项目重点与难点分析",
-         ["多地块并行、村域广、权属复杂", "报批类型差异（批次/单独选址）",
-          "政策要件、耕地占补、社保审核等难点", "应对思路"], 4000),
-        ("1.4 政策依据与成果深度理解",
-         ["土地管理法及实施条例、江苏省报批政策", "电子报件与审查标准",
-          "成果深度、时效与一次通过率要求"], 3000),
+         ["招标文件第三章项目技术要求逐项解读", "服务边界、配合要求与成果深度",
+          "从采购人视角理解核心诉求"], 1800),
+        ("1.3 丁蜀镇区位条件与自然地理概况",
+         ["地理位置、地形地貌、气候水文", "交通区位与基础设施条件"], 1800),
+        ("1.4 宜兴市社会经济与产业发展格局",
+         ["经济总量、产业结构与用地需求", "产业空间布局与转型方向"], 1600),
+        ("1.5 支撑重大产业项目落地实施",
+         ["项目对地方产业培育的意义", "用地保障对项目落地的作用"], 1400),
+        ("1.6 促进低空经济产业集聚发展",
+         ["航空产业园定位与分期开发", "先导区报批的示范意义"], 1400),
+        ("1.7 落实最严格的耕地保护制度",
+         ["耕地占补平衡与永久基本农田避让", "节约集约用地要求"], 1400),
+        ("1.8 政策法规需求分析",
+         ["土地管理法及实施条例要求", "江苏省用地报批政策口径"], 1600),
+        ("1.9 技术服务需求分析",
+         ["勘测定界、组卷报批的技术要求", "成果深度与审查标准"], 1600),
+        ("1.10 各地块报批需求差异化分析",
+         ["各地块位置、规模与报批类型对比", "重点难点与特殊关注事项", "预计耗时的差异化安排"], 1800),
+        ("1.11 用地报批审批流程与审查要点分析",
+         ["县、市、省三级审查流程", "各环节审查要点与常见退件原因"], 1800),
+        ("1.12 项目关键风险识别与应对",
+         ["要件、权属、政策与进度风险", "风险应对的总体思路"], 1600),
+        ("1.13 法律法规依据",
+         ["土地管理法、土地管理法实施条例", "江苏省土地管理条例等地方性法规"], 1500),
+        ("1.14 部门规章与规范性文件",
+         ["自然资源部及江苏省自然资源厅文件", "用地报批组卷与电子报件规范"], 1400),
+        ("1.15 技术规范与标准",
+         ["勘测定界、土地利用现状分类等技术标准", "成果质量检查验收规定"], 1400),
     ]),
     ("第二章 项目组织实施方案", [
-        ("2.1 项目组织架构与人员配备",
-         ["公司资质与同类业绩支撑", "项目负责人负责制、技术负责人/质检/外业/内业分工",
-          "人员到岗与更换管理"], 4500),
-        ("2.2 总体工作思路与技术路线",
-         ["前期准备—资料收集—勘测定界—组卷—报批—跟踪全流程",
-          "技术方法、软件、坐标与数据标准", "与采购人及主管部门的衔接"], 4500),
-        ("2.3 前期准备与资料收集",
-         ["项目启动、政策研读、资料清单", "立项/规划/资金/社保等要件收集",
-          "资料交接与缺件催办"], 4000),
-        ("2.4 地类权属核查与勘测定界",
-         ["权属界线确认、指界签字", "地类认定与变更调查衔接",
-          "勘测定界成果与面积汇总"], 4500),
-        ("2.5 征前程序与补偿安置配合",
-         ["拟征收土地公告、现状调查", "补偿安置方案与公告、听证",
-          "补偿登记、社保审核配合"], 4500),
-        ("2.6 报批材料组卷与电子报件",
-         ["一方案三信息及附件编制", "电子报件系统录入与校验",
-          "纸质材料装订与归档"], 4500),
-        ("2.7 审批跟踪与协调保障",
-         ["县级、市级、省级审查跟踪", "补正材料响应", "取得建设用地批复"], 3500),
+        ("2.1 组织架构设计原则与层级模型",
+         ["项目负责人负责制的层级架构", "管理层级与作业组设置", "人员配置与到岗要求"], 1600),
+        ("2.2 关键岗位设置与职责分工",
+         ["项目负责人、技术负责人、质检、外业、内业职责", "岗位协作与接口管理"], 1500),
+        ("2.3 项目管理制度体系",
+         ["进度、质量、资料、考勤、保密等制度", "制度执行与考核"], 1400),
+        ("2.4 总体技术路线设计",
+         ["前期准备—外业调查—内业编制—组卷报批—跟踪批复", "各阶段成果与时间安排"], 1600),
+        ("2.5 核心技术方法与作业流程",
+         ["权属调查、地类认定、勘测定界方法", "面积汇总与图件编制流程", "坐标与数据标准"], 1800),
+        ("2.6 设备配置与技术保障",
+         ["测量仪器、无人机、成图软件与工作站配置", "设备检定与维护"], 1400),
+        ("2.7 各地块实施方案",
+         ["按地块制定差异化实施要点", "多地块并行的资源调配"], 1800),
+        ("2.8 前期准备—耕地占补与规划空间指标落实",
+         ["耕地占补平衡指标落实", "规划空间与农用地转用计划指标"], 1500),
+        ("2.9 前期准备—违法用地及信访情况核查",
+         ["违法用地核查与处置", "信访矛盾排查与化解"], 1300),
+        ("2.10 征前程序—预公告与现状调查",
+         ["征收土地预公告发布", "拟征收土地现状调查与确认"], 1500),
+        ("2.11 征前程序—社会稳定风险评估与补偿安置方案",
+         ["社会稳定风险评估组织", "补偿安置方案拟定与测算"], 1500),
+        ("2.12 征前程序—公告、听证与补偿登记",
+         ["补偿安置方案公告与听证", "补偿登记与协议签订"], 1400),
+        ("2.13 报批材料组卷与电子报件",
+         ["一书四方案及附件编制", "电子报件系统录入与校验", "纸质材料装订归档"], 1600),
+        ("2.14 审批跟踪与批复获取",
+         ["县、市、省三级审查跟踪", "补正响应与批复取得", "成果移交与后续服务"], 1500),
     ]),
     ("第三章 质量保障措施", [
-        ("3.1 质量管理体系与质量目标",
-         ["ISO9001 体系与公司质量方针", "本项目质量目标与责任体系"], 4000),
-        ("3.2 三级校审与过程质量控制",
-         ["作业组自检、项目组复核、公司质检", "关键节点检查与记录"], 4000),
-        ("3.3 成果质量指标与检查",
-         ["面积、权属、地类、图件、文本质量指标", "检查方法与抽检比例"], 4000),
-        ("3.4 质量问题整改与持续改进",
-         ["问题清单、整改闭环", "质量例会与经验固化"], 3000),
+        ("3.1 质量管理方针与目标体系",
+         ["公司质量方针与 ISO9001 体系", "本项目质量目标与量化指标"], 1600),
+        ("3.2 质量管理组织架构与职责分工",
+         ["质量管理岗位设置与人员", "质量责任体系"], 1400),
+        ("3.3 质量管理制度与标准体系",
+         ["质量检查验收、地类认定、组卷规范等制度", "标准体系与适用范围"], 1400),
+        ("3.4 前期准备阶段质量控制",
+         ["基础资料完整性与准确性控制", "政策口径统一"], 1400),
+        ("3.5 外业调查核查阶段质量控制",
+         ["权属调查与指界质量控制", "地类认定与勘界精度控制"], 1500),
+        ("3.6 内业编制与成果审核质量控制",
+         ["面积汇总、图件、文本质量控制", "三级校审与过程记录"], 1500),
+        ("3.7 核心专项工作质量保障措施",
+         ["耕地占补、社保审核、林地报批等专项", "专项成果的质量把关"], 1400),
+        ("3.8 质量检查验收标准与成果交付",
+         ["检查维度与验收标准", "成果交付与移交管理"], 1500),
+        ("3.9 质量持续改进与事后服务",
+         ["质量问题整改闭环", "质量例会、经验固化与事后服务"], 1300),
     ]),
     ("第四章 进度安排", [
-        ("4.1 总体进度计划与编制依据",
-         ["合同工期 90 日约束", "法律法规与审批时限",
-          "同类项目工期经验"], 4500),
-        ("4.2 分阶段进度安排",
-         ["准备、调查、组卷、报批、跟踪各阶段工期", "四个地块并行安排"], 4500),
-        ("4.3 关键路径与里程碑",
-         ["关键路径识别", "里程碑节点与交付物"], 4000),
-        ("4.4 进度保障与纠偏措施",
-         ["组织、人员、资源保障", "周计划/周报/纠偏", "外部要件催办"], 4000),
+        ("4.1 编制依据与原则",
+         ["合同工期约束与审批时限", "统筹安排、并行推进原则"], 1300),
+        ("4.2 总体工期安排与里程碑节点",
+         ["总体工期与阶段划分", "里程碑节点与交付物"], 1400),
+        ("4.3 工作分解结构与并行策略",
+         ["工作包分解与工期分配", "多地块并行的资源与逻辑关系"], 1400),
+        ("4.4 前期准备与外业调查阶段进度安排",
+         ["启动、资料收集、权属调查、勘界的时间安排", "阶段交付成果"], 1400),
+        ("4.5 内业编制与组卷报批阶段进度安排",
+         ["面积汇总、图件、文本、组卷的时间安排", "阶段交付成果"], 1400),
+        ("4.6 审批跟踪与批复获取阶段进度安排",
+         ["逐级审查、补正、批复的时间安排", "阶段交付成果"], 1300),
+        ("4.7 项目全周期进度横道图",
+         ["横道图编制说明", "关键工作的时间分布"], 1200),
+        ("4.8 组织保障与资源保障",
+         ["人员、设备、经费保障", "投入阶段与数量"], 1400),
+        ("4.9 沟通协调与技术保障",
+         ["与采购人、主管部门的沟通机制", "技术支撑与专家咨询"], 1300),
+        ("4.10 进度风险识别与应对预案",
+         ["要件、权属、审查、资源等进度风险", "应对措施与责任人"], 1400),
     ]),
     ("第五章 安全保密保障措施", [
-        ("5.1 安全生产管理体系",
-         ["安全方针、组织机构、责任制", "安全制度与教育培训"], 4000),
-        ("5.2 外业与交通安全措施",
-         ["外业作业安全、仪器设备安全", "车辆与交通安全"], 4000),
-        ("5.3 数据安全与保密管理",
-         ["涉密测绘成果管理", "人员保密、设备与介质管理",
-          "数据传输、备份与销毁"], 5000),
-        ("5.4 应急处置与监督检查",
-         ["应急预案与演练", "安全检查与考核"], 4000),
+        ("5.1 安全生产管理架构与制度",
+         ["安全生产组织机构与责任制", "安全制度与教育培训"], 1400),
+        ("5.2 外业作业安全保障措施",
+         ["交通、作业、环境风险辨识", "控制措施与责任人"], 1500),
+        ("5.3 内业作业与设备安全保障",
+         ["用电、消防、设备安全检查", "检查频次与整改"], 1400),
+        ("5.4 数据安全管理体系",
+         ["数据分类分级", "存储、传输与访问控制"], 1500),
+        ("5.5 信息系统安全与数据备份",
+         ["备份策略与执行周期", "系统安全防护"], 1400),
+        ("5.6 测绘成果与涉密数据管理",
+         ["涉密成果领取、使用、传递、归还与销毁", "涉密介质管理"], 1500),
+        ("5.7 保密制度体系与人员管理",
+         ["保密制度与保密协议", "岗位保密职责与考核"], 1400),
+        ("5.8 资料档案保密管理",
+         ["档案分级保管与借阅审批", "复制与销毁管理"], 1300),
+        ("5.9 应急预案与处置机制",
+         ["应急组织与响应等级", "各类事件处置措施与报告"], 1400),
     ]),
 ]
 
+# 小节号 → 表键（bidding_plan_tables.PLAN_TABLES）。人工稿每章配 3～9 张表。
+_SECTION_TABLES: Dict[str, Tuple[str, ...]] = {
+    "1.10": ("plots",),
+    "2.1": ("org",), "2.2": ("duties",), "2.3": ("rules",), "2.4": ("route",),
+    "2.6": ("equip",), "2.14": ("guarantee",),
+    "3.1": ("quality_goals",), "3.2": ("quality_org",),
+    "3.3": ("quality_rules",), "3.6": ("qc_stage",), "3.8": ("acceptance",),
+    "4.2": ("milestones",), "4.3": ("workpackages",),
+    "4.4": ("schedule_prep",), "4.5": ("schedule_draft",),
+    "4.6": ("schedule_appr",), "4.7": ("gantt",), "4.8": ("resources",),
+    "4.10": ("schedule_risk",),
+    "5.1": ("safety_duty",), "5.2": ("field_risk",), "5.3": ("safety_check",),
+    "5.4": ("data_class",), "5.5": ("backup",), "5.6": ("confidential_flow",),
+    "5.7": ("confidential_duty",), "5.8": ("archive",), "5.9": ("emergency",),
+}
+
 
 def _plan_chunks(chapter) -> List[List[Tuple[str, List[str], int]]]:
-    """一小节一次调用 —— 单次目标 3000～5000 字，23 节并行拼出约 9 万字。"""
+    """一小节一次调用 —— 单次 1200～2000 字，57 节并行拼出约 8.6 万字。"""
     return [[sub] for sub in chapter[1]]
 
 
@@ -552,7 +674,7 @@ async def _gen_chunk(llm, system: str, facts: str, chapter_title: str, chunk,
         no, title = (full.split(" ", 1) + [""])[:2]
         outline.append(f"## {no} {title}".strip())
         outline.append("要点：" + "；".join(pts))
-        _ask = int(chars * 1.6)
+        _ask = int(chars * 1.05)      # 实测模型基本按目标字数产出；57 节合计约 9.5 万字
         outline.append(f"目标字数：不少于 {_ask} 字")
         target += _ask
     user = (
@@ -561,9 +683,10 @@ async def _gen_chunk(llm, system: str, facts: str, chapter_title: str, chunk,
         f"本次只写以下小节（严格按编号和标题，用 ## 输出）：\n"
         + "\n".join(outline)
         + f"\n\n前文已写小节：{prior}。不要重复前文内容，做好承接。\n"
-        f"写作要求：合计不少于 {target} 字；每节 5～8 个完整段落，开头一句总述，"
+        f"写作要求：合计不少于 {target} 字；每节 4～6 个完整段落，开头一句总述，"
         "再展开做法、标准、责任人和时间；不使用项目符号，步骤用「1）2）3）」；"
         "结合招标文件采购内容写具体做法，不写空话；"
+        "不要用 Markdown 表格（系统会在小节末尾统一插入管理表格），"
         "不得出现「待补充」「以实际为准」等占位语。"
     )
     try:
@@ -653,6 +776,9 @@ async def _write_plan(tender: dict, *, llm=None) -> str:
             # 每块只写一个小节；模型越界续写的别的小节要截掉（见函数注释）
             _no = str(chunk[0][0]).split(" ", 1)[0].strip()
             parts.append(_drop_runaway_sections(text, _no) + "\n")
+            # 人工稿在大节末尾配管理表格：按小节号插表（渲染见 _md_to_docx）
+            for _tk in _SECTION_TABLES.get(_no, ()):
+                parts.append(f"[[table:{_tk}]]\n")
         else:
             logger.warning(f"[投标文件] 「{chapter_title}」有一块没有生成内容")
     return "\n".join(parts)
@@ -673,12 +799,23 @@ def _fallback_plan(tender: dict) -> str:
     )
 
 
-def _md_to_docx(doc, md: str):
-    """简易 markdown → docx（标题/段落/列表）。"""
+def _md_to_docx(doc, md: str, ctx: Dict[str, Any] = None):
+    """简易 markdown → docx（标题/段落/列表/方案表格）。
+
+    `[[table:key]]` 是 `_write_plan` 按小节插的表标记，这里换成
+    「表题 + 三线表」（表头行数据见 bidding_plan_tables）。
+    """
     _seen_scope = False
     for line in str(md or "").splitlines():
         s = line.rstrip()
         if not s.strip():
+            continue
+        mt = re.match(r'^\s*\[\[table:([\w_]+)\]\]\s*$', s)
+        if mt:
+            if ctx is not None:
+                _render_plan_table(doc, mt.group(1), ctx)
+            continue
+        if s.lstrip().startswith("|"):      # 模型自画的 Markdown 表格一律丢弃
             continue
         if s.startswith("###"):
             _h(doc, s.lstrip("#").strip(), 3, size=15)
@@ -696,6 +833,22 @@ def _md_to_docx(doc, md: str):
             _plan_p(doc, "• " + body)
         else:
             _plan_p(doc, re.sub(r'\*\*(.+?)\*\*', r'\1', s))
+
+
+def _render_plan_table(doc, key: str, ctx: Dict[str, Any]) -> None:
+    """按人工稿表式渲染一张方案表：居中表题 + Table Grid + 表后留白。"""
+    from app.services.bidding_plan_tables import build_table
+    spec = build_table(key, ctx)
+    if not spec:
+        return
+    _p(doc, spec["caption"], size=10.5, bold=True, align="center",
+       indent=False, space_after=2)
+    headers = spec["headers"]
+    _table(doc, headers, spec["rows"],
+           font_size=9.5 if len(headers) >= 6 else 10.5)
+    # 表后留一点空，避免下一节标题贴着表格
+    gap = doc.add_paragraph()
+    gap.paragraph_format.space_after = 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -796,6 +949,125 @@ def _auth_fields(texts: Dict[str, str]) -> Dict[str, str]:
     }
 
 
+def _deviation_rows(tender: dict, project: str, duration: int) -> List[List[str]]:
+    """偏离表：按人工稿逐条拆行（资格条件/拒绝情形/人员/期限/地点/验收）。
+
+    旧实现把整段资格条件压成一行，评标专家无法逐条对照 —— 人工稿是 6 行。
+    """
+    quals = [q for q in (tender.get("qualifications") or []) if q]
+    if quals:
+        circled = "①②③④⑤⑥⑦⑧⑨"
+        q_text = "投标人参加本次采购活动应具备下列资格条件：\n" + "\n".join(
+            f"{circled[i] if i < len(circled) else f'({i + 1})'}{q}"
+            for i, q in enumerate(quals))
+    else:
+        q_text = ("投标人参加本次采购活动应具备下列资格条件：\n"
+                  "①具有独立承担民事责任的能力；\n"
+                  "②具有良好的商业信誉和健全的财务会计制度；\n"
+                  "③有依法缴纳税收和社会保障资金的良好记录；\n"
+                  "④具有履行合同所必需的设备和专业技术能力；\n"
+                  "⑤不接受联合体，不接受中标后分包；\n"
+                  "⑥良好的信用记录。")
+    q_resp = q_text.replace("投标人", "我单位", 1)
+    if "测绘资质" in q_text:
+        q_resp += "\n（我单位持有乙级测绘资质证书，证书在有效期内。）"
+
+    reject_text = ("拒绝下述供应商参加本次采购活动：①投标人负责人为同一人或者存在"
+                   "直接控股、管理关系的不同供应商，不得参加同一合同项下的采购活动；"
+                   "②凡为采购项目提供整体设计、规范编制或者项目管理、监理、检测等"
+                   "服务的供应商，不得再参加本项目的采购活动。")
+    reject_resp = ("我单位无以下情况：①与本项目其他投标人负责人不为同一人，且不存在"
+                   "直接控股、管理关系；②未为本项目提供整体设计、规范编制或者项目"
+                   "管理、监理、检测等服务。")
+
+    n_staff = max(sum((tender.get("staff_min") or {}).values()), 4)
+    staff_text = (f"人员配备要求：中标供应商派专人负责与采购方联系协调，成立专门项目组，"
+                  f"项目人员不得少于 {n_staff} 人，主要人员保持稳定。")
+    staff_resp = (f"我单位派专人负责对接采购方，成立由项目负责人、技术负责人及专业"
+                  f"技术人员组成的项目组，投入人员不少于 {n_staff} 人，人员更换事先"
+                  f"报采购人同意。")
+
+    def _same(t: str) -> str:
+        return t
+
+    return [
+        ["1", project, q_text, q_resp, "完全响应"],
+        ["2", project, reject_text, reject_resp, "完全响应"],
+        ["3", project, staff_text, staff_resp, "完全响应"],
+        ["4", project, f"服务期限：签订合同后 {duration} 日内完成。",
+         _same(f"服务期限：签订合同后 {duration} 日内完成。"), "完全响应"],
+        ["5", project, "服务地点：采购人指定地点。",
+         _same("服务地点：采购人指定地点。"), "完全响应"],
+        ["6", project, "验收标准：符合国家相关规范标准及招标文件的要求。",
+         _same("验收标准：符合国家相关规范标准及招标文件的要求。"), "完全响应"],
+    ]
+
+
+def _personnel_score(people: List[Dict[str, Any]]) -> str:
+    """按评分办法算人员项自评分：负责人（高级 2 + 注册测绘师 2，封顶 4）
+    + 组员（高级 2 / 中级 1，封顶 6）。"""
+    from app.services.bidding_tender import _title_rank
+    if not people:
+        return ""
+    lead = people[0]
+    s = 0
+    if _title_rank(lead.get("title")) >= 2 and any(
+            k in str(lead.get("major") or "") for k in ("土地", "测绘")):
+        s += 2
+    if any("注册测绘师" in str(c) for c in (lead.get("certs") or [])):
+        s += 2
+    s = min(s, 4)
+    ms = 0
+    for p in people[1:]:
+        t = str(p.get("title") or "")
+        if "高级" in t:
+            ms += 2
+        elif "中级" in t or "工程师" in t:
+            ms += 1
+    return str(s + min(ms, 6))
+
+
+def _cert_count() -> int:
+    """公司档案里体系认证证书的种数（质量/环境/职业健康/测量管理）。"""
+    keys = ("质量管理体系认证", "环境管理体系认证", "职业健康安全管理体系认证",
+            "测量管理体系认证")
+    n = 0
+    try:
+        c = sqlite3.connect(str(KB))
+        names = {str(r[0] or "") for r in c.execute(
+            "select image_name from asset_images where is_active=1")}
+        c.close()
+        n = sum(1 for k in keys if any(k in x for x in names))
+    except Exception:
+        pass
+    return max(n, 1)
+
+
+def _equip_count() -> int:
+    """拟投入设备类别数（评分每类 1 分，最高 5 分）。"""
+    cats = ("全站仪", "GNSS接收器", "无人机", "CASS成图软件", "绘图仪")
+    try:
+        c = sqlite3.connect(str(KB))
+        names = {str(r[0] or "") for r in c.execute(
+            "select image_name from asset_images where is_active=1")}
+        c.close()
+        return min(sum(1 for k in cats if any(k in x for x in names)), 5)
+    except Exception:
+        return 5
+
+
+def _plan_ctx(tender: dict, company: str, people: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """服务方案表格用的上下文（项目事实 + 人员 + 工期 + 地块）。"""
+    return {
+        "project": tender.get("project_name") or "",
+        "purchaser": tender.get("purchaser") or "",
+        "company": company,
+        "people": people,
+        "duration_days": int(tender.get("duration_days") or 90),
+        "plots": tender.get("plots") or [],
+    }
+
+
 async def build_bid_document(*, tender_path: str | Path, company_id: int,
                              price_wan: float, out_path: str | Path,
                              seed: Optional[int] = None,
@@ -807,7 +1079,14 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     tender = parse_tender(tender_path)
     co_name = company_name(company_id) or "投标人"
-    people = personnel or select_bid_personnel(company_id=company_id, seed=seed)
+    # 人员配置对齐人工稿：1 名负责人 + 不少于 5 名组员（招标最低 1+3 只是底线；
+    # 高级职称组员每个 2 分、最多 6 分，配足 5 名组员才能拿满人员分）
+    _staff_min = max(
+        [int(v) for v in (tender.get("staff_min") or {}).values()
+         if str(v).isdigit()] + [3])
+    _members_n = max(_staff_min, 5)
+    people = personnel or select_bid_personnel(
+        company_id=company_id, seed=seed, members=_members_n)
     texts = _asset_texts(co_name)
     small, big = _price_text(price_wan)
     _total_yuan = int(round(float(price_wan) * 10000))
@@ -1037,22 +1316,11 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _h(doc, "（四）技术条款及相关要求偏离表", 1)
     _p(doc, "技术条款及相关要求偏离表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
-    _qual = (
-        "投标人参加本次采购活动应具备下列资格条件：\n"
-        "①具有独立承担民事责任的能力；\n"
-        "②具有良好的商业信誉和健全的财务会计制度；\n"
-        "③有依法缴纳税收和社会保障资金的良好记录；\n"
-        "④具有履行合同所必需的设备和专业技术能力；\n"
-        "⑤不接受联合体，不接受中标后分包；\n"
-        "⑥良好的信用记录：报价截止时间之前，未被“信用中国”网站列入失信执行人、"
-        "重大税收违法案件当事人名单、政府采购严重违法失信行为记录名单，未被"
-        "“中国政府采购网”网站列入政府采购严重违法失信行为记录名单。"
-    )
-    _resp = _qual.replace("投标人参加", "我单位参加", 1)
+    _dev_rows = _deviation_rows(tender, project,
+                                int(tender.get("duration_days") or 90))
     _table(doc, ["序号", "项目名称", "招标内容", "投标内容", "正偏离/负偏离"],
-           [["1", project, _qual, _resp, "完全响应"]],
-           widths=[0.8, 2.1, 5.5, 5.4, 1.2], font_size=9.0,
-           row_heights=[1.4])
+           _dev_rows, widths=[0.8, 2.1, 5.5, 5.4, 1.2], font_size=9.0,
+           row_heights=[1.4] + [2.6] * (len(_dev_rows) - 1))
 
     # ── （五）评分导读表（仍 A4 纵向）──
     doc.add_page_break()
@@ -1060,28 +1328,44 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, "技术商务部分评分导读表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
     _p(doc, f"项目编号：{no}", indent=False)
+
+    # 🔴 人工稿是 9 项：4 项客观分 + 5 项方案分（共 55 分）。旧实现只列客观分，
+    #    评分专家翻不到方案章节的对应页。页码由 _stamp_toc 按 PDF 分页回填。
+    _perf = _performance_rows()
+    _perf_score = str(min(len(_perf), 3) * 2) if _perf else "0"
+    _cert_n = _cert_count()
+    _equip_n = _equip_count()
+    _lead = people[0] if people else {}
+    _msen = "、".join(str(p.get("name") or "") for p in people[1:]
+                     if "高级" in str(p.get("title") or "")) or "—"
+    _score_rows = [
+        ["1", "投标人自2023年1月1日（含）以来承担过类似征地报批项目的，"
+              "每提供一个得2分，本项最高得6分，未提供不得分。",
+         f"已提供类似业绩 {len(_perf)} 项", "见投标文件", _perf_score],
+        ["2", "1、项目负责人具有土地类或测绘类高级及以上职称的得2分，同时具有注册"
+              "测绘师的得2分，本项最高得4分。\n2、项目组人员（除项目负责人外）中具有"
+              "国土规划类、土地类或测绘类高级及以上职称的每有一个得2分，具有中级及以上"
+              "职称的每有一个得1分，本项最多得6分。人员不重复计分，每人按最高职称计分。"
+              "【提供人员证书复印件及社保证明并加盖公章，未提供不得分】",
+         f"1.项目负责人{_lead.get('name') or ''}具有{_lead.get('title') or '高级职称'}；\n"
+         f"2.项目组高级职称人员：{_msen}；\n3.提供项目组成员社保证明材料",
+         "见投标文件", _personnel_score(people)],
+        ["3", "具有有效期内的质量管理体系、职业健康安全管理体系、环境管理体系证书、"
+              "测量管理体系认证证书的，每提供1个得1分，本项最高得4分。",
+         f"提供质量管理体系、职业健康安全管理体系、环境管理体系、测量管理体系"
+         f"认证证书（共 {_cert_n} 项）", "见投标文件", str(_cert_n)],
+        ["4", "投标人拟投入本项目具备全站仪、GNSS接收机、无人机、CASS成图软件、"
+              "水位仪、绘图仪、测高仪，每类得1分，同类设备不重复计分，最高5分。",
+         "提供全站仪、GNSS接收机、无人机、CASS成图软件、绘图仪等设备购买发票和照片",
+         "见投标文件", str(_equip_n)],
+        ["5", "对项目的理解", "提供方案", "见投标文件", "10"],
+        ["6", "项目组织实施方案", "提供实施方案", "见投标文件", "15"],
+        ["7", "质量保障措施", "提供质量保障措施", "见投标文件", "10"],
+        ["8", "进度安排", "提供进度安排", "见投标文件", "10"],
+        ["9", "安全保密保障措施", "提供安全保密保障措施", "见投标文件", "10"],
+    ]
     _table(doc, ["序号", "评审项目", "响应情况", "投标文件对应页码", "自评分"],
-           [["1", "投标人自2023年1月1日（含）以来承担过类似征地报批项目的，"
-                  "每提供一个得2分，本项最高得6分，未提供不得分。",
-             "已提供类似业绩", "见投标文件", "6"],
-            ["2", "1、项目负责人具有土地类或测绘类高级及以上职称的得2分，同时具有注册"
-                  "测绘师的得2分，本项最高得4分。\n2、项目组人员（除项目负责人外）中具有"
-                  "国土规划类、土地类或测绘类高级及以上职称的每有一个得2分，具有中级及以上"
-                  "职称的每有一个得1分，本项最多得6分。人员不重复计分，每人按最高职称计分。"
-                  "【提供人员证书复印件及社保证明并加盖公章，未提供不得分】",
-             "1.项目负责人具有测绘类高级职称并具有注册测绘师；\n"
-             "2.项目组成员具有高级职称；\n3.提供项目组成员社保证明材料",
-             "见投标文件", "9"],
-            ["3", "具有有效期内的质量管理体系、职业健康安全管理体系、环境管理体系证书、"
-                  "测量管理体系认证证书的，每提供1个得1分，本项最高得4分。",
-             "提供质量管理体系、职业健康安全管理体系、环境管理体系证书",
-             "见投标文件", "3"],
-            ["4", "投标人拟投入本项目具备全站仪、GNSS接收机、无人机、CASS成图软件、"
-                  "水位仪、绘图仪、测高仪，每类得1分，同类设备不重复计分，最高5分。",
-             "提供全站仪、GNSS接收机、无人机、CASS成图软件、绘图仪等设备购买发票和照片",
-             "见投标文件", "5"]],
-           widths=[1.1, 5.6, 4.0, 2.1, 2.2], font_size=10.5,
-           row_heights=[1.81, 2.22, 9.92, 2.77, 2.77])
+           _score_rows, widths=[1.1, 5.6, 4.0, 2.1, 2.2], font_size=10.5)
     doc.add_page_break()
 
     # ── （六）服务方案 ──
@@ -1093,7 +1377,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         except Exception as e:
             logger.warning(f"[投标文件] 方案生成失败，用内置框架: {e}")
             md = ""
-    _md_to_docx(doc, md or _fallback_plan(tender))
+    _md_to_docx(doc, md or _fallback_plan(tender),
+                _plan_ctx(tender, co_name, people))
     doc.add_page_break()
 
     # ── （七）人员配置清单（A4 纵向）──

@@ -583,6 +583,27 @@ async def _gen_chunk(llm, system: str, facts: str, chapter_title: str, chunk,
         return ""
 
 
+def _drop_runaway_sections(text: str, expect_no: str) -> str:
+    """截掉模型越界续写的小节。
+
+    实测（丁蜀镇线上测试）：让模型只写「4.1 总体进度计划与编制依据」，
+    它把整章 4.2～4.5 也一起写了出来 —— 成品正文里同一个章号出现两遍。
+    每块只该有一个小节，遇到第一个编号不符的 2～3 级标题就截断。
+    截断后剩得太少（模型一上来就写错号）则原样返回，宁可多不可空。
+    """
+    if not text or not expect_no:
+        return text
+    keep: List[str] = []
+    for line in str(text).splitlines():
+        m = re.match(r'^#{2,3}\s*(\d+(?:\.\d+)*)\s', line.strip())
+        if m and not (m.group(1) == expect_no
+                      or m.group(1).startswith(expect_no + ".")):
+            break
+        keep.append(line)
+    out = "\n".join(keep).strip()
+    return out if len(out) >= 300 else text
+
+
 async def _write_plan(tender: dict, *, llm=None) -> str:
     """按人工稿 5 章 23 节生成服务方案（约 9.4 万字），各块并行调用 LLM。"""
     try:
@@ -629,7 +650,9 @@ async def _write_plan(tender: dict, *, llm=None) -> str:
             parts.append(f"# {chapter_title}\n")
             cur_ch = chapter_title
         if isinstance(text, str) and text:
-            parts.append(text + "\n")
+            # 每块只写一个小节；模型越界续写的别的小节要截掉（见函数注释）
+            _no = str(chunk[0][0]).split(" ", 1)[0].strip()
+            parts.append(_drop_runaway_sections(text, _no) + "\n")
         else:
             logger.warning(f"[投标文件] 「{chapter_title}」有一块没有生成内容")
     return "\n".join(parts)

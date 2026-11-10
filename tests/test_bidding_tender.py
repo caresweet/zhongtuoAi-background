@@ -204,3 +204,23 @@ async def test_second_page_is_toc(tmp_path):
     heads = [p.text for p in d.paragraphs if p.style.name == "Heading 1"]
     assert len(heads) == 8
     assert heads[0] == "（一）投标函" and heads[-1] == "（八）其他"
+
+
+def test_runaway_subsections_are_trimmed():
+    """线上实测：让模型只写 4.1，它把 4.2～4.5 一并写了 —— 同章号出现两遍。
+
+    每块只保留自己的小节，遇到编号不符的 2～3 级标题截断；子标题（4.1.1）保留。
+    """
+    from app.services.bidding_bid_builder import _drop_runaway_sections
+
+    text = ("## 4.1 总体进度计划与编制依据\n\n" + "进度编制依据。" * 60
+            + "\n\n### 4.1.1 合同工期\n\n" + "工期为90日。" * 60
+            + "\n\n## 4.2 分阶段进度安排与节点控制\n\n" + "越界续写。" * 60)
+    out = _drop_runaway_sections(text, "4.1")
+    assert "## 4.1 总体进度计划与编制依据" in out
+    assert "### 4.1.1 合同工期" in out
+    assert "4.2 分阶段进度安排与节点控制" not in out
+
+    # 模型一上来就写错号（正文太短）→ 原样返回，宁多不空
+    tiny = "## 9.9 别的章节\n\n短正文。"
+    assert _drop_runaway_sections(tiny, "4.1") == tiny

@@ -43,8 +43,9 @@ def _set_font(run, name="宋体", size=12, bold=False):
     run.bold = bold
 
 
-def _p(doc, text: str, *, size=12, bold=False, align="left", indent=True,
+def _p(doc, text: str, *, size=15, bold=False, align="left", indent=True,
        name="宋体", space_after=4):
+    """正文段落。默认宋体 15 磅（人工稿正文字号），正文行距 1.5 倍。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Cm, Pt
     p = doc.add_paragraph()
@@ -53,7 +54,10 @@ def _p(doc, text: str, *, size=12, bold=False, align="left", indent=True,
                    "justify": WD_ALIGN_PARAGRAPH.JUSTIFY}.get(align, WD_ALIGN_PARAGRAPH.LEFT)
     p.paragraph_format.space_after = Pt(space_after)
     if indent:
-        p.paragraph_format.first_line_indent = Cm(0.74)
+        p.paragraph_format.first_line_indent = Cm(1.06)      # 15 磅正文两字符
+    if size >= 14 and align in ("justify", "left"):
+        p.paragraph_format.line_spacing = 1.5
+        p.paragraph_format.space_after = Pt(0)
     r = p.add_run(text)
     _set_font(r, name=name, size=size, bold=bold)
     return p
@@ -172,7 +176,7 @@ def _fill_scoring_pages(d, pages: Dict[str, int]) -> None:
             continue
         cell.text = ""
         r = cell.paragraphs[0].add_run(str(pages[title]))
-        _set_font(r, size=10.5)
+        _set_font(r, name="仿宋", size=14)
 
 
 def _stamp_toc(path) -> bool:
@@ -237,7 +241,8 @@ def _stamp_toc(path) -> bool:
                     r._element.getparent().remove(r._element)
                 r = q.add_run(f"{title}\t{pages[title]}")
                 _set_font(r, name="黑体", size=14, bold=False)
-                q.paragraph_format.space_after = Pt(2)
+                q.paragraph_format.space_after = Pt(0)
+                q.paragraph_format.line_spacing = Pt(31.2)
             _fill_scoring_pages(d, anchor_pages)
             d.save(str(path))
             return True
@@ -250,7 +255,8 @@ def _stamp_toc(path) -> bool:
             # 人工稿目录：黑体 14 磅、点线引导、页码右对齐到版心右边界（3cm 页边距 → 15cm）、段后 2 磅
             q.paragraph_format.tab_stops.add_tab_stop(
                 Cm(15.0), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
-            q.paragraph_format.space_after = Pt(2)
+            q.paragraph_format.space_after = Pt(0)
+            q.paragraph_format.line_spacing = Pt(31.2)   # 人工稿行距实测 31.2 磅
             r = q.add_run(f"{title}\t{pages[title]}")
             _set_font(r, name="黑体", size=14, bold=False)
         ph._p.getparent().remove(ph._p)
@@ -270,9 +276,11 @@ def _add_toc(doc) -> None:
     from docx.shared import Pt
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("目  录")
-    # 人工稿 PDF：目录标题黑体 20 磅、不加粗
+    r = p.add_run("目　录")          # 全角空格，与人工稿「目　录」同宽
+    # 人工稿 PDF：目录标题黑体 20 磅、不加粗，标题与条目之间空约 30 磅
     _set_font(r, name="黑体", size=20, bold=False)
+    p.paragraph_format.space_before = Pt(7)    # 人工稿标题距上边距约 7 磅
+    p.paragraph_format.space_after = Pt(30)
 
     q = doc.add_paragraph()
     run = q.add_run()
@@ -302,6 +310,24 @@ def _add_toc(doc) -> None:
             st.append(uf)
     except Exception:
         pass
+
+
+def _new_section(doc, landscape: bool):
+    """新起一节并设纸张方向（人工稿：偏离表、人员配置清单是横排 A4）。"""
+    from docx.enum.section import WD_ORIENT, WD_SECTION
+    from docx.shared import Cm
+    sec = doc.add_section(WD_SECTION.NEW_PAGE)
+    if landscape:
+        sec.orientation = WD_ORIENT.LANDSCAPE
+        sec.page_width, sec.page_height = Cm(29.7), Cm(21.0)
+        sec.left_margin = sec.right_margin = Cm(2.5)
+        sec.top_margin = sec.bottom_margin = Cm(2.5)
+    else:
+        sec.orientation = WD_ORIENT.PORTRAIT
+        sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
+        sec.left_margin = sec.right_margin = Cm(3.0)
+        sec.top_margin = sec.bottom_margin = Cm(3.0)
+    return sec
 
 
 def _page_number_footer(doc) -> None:
@@ -357,30 +383,32 @@ def _quote_detail_table(doc, items, total_yuan: int, big: str):
         cell = t.cell(0, ci)
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         r = cell.paragraphs[0].add_run(h)
-        _set_font(r, size=10.5)
+        _set_font(r, name="仿宋", size=14)
         cell.paragraphs[0].alignment = 1
     for i, (name, amt) in enumerate(items, 1):
         for ci, val in enumerate((str(i), name, "1", str(amt), str(amt))):
             cell = t.cell(i, ci)
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             r = cell.paragraphs[0].add_run(val)
-            _set_font(r, size=10.5)
+            _set_font(r, name="仿宋", size=14)
             cell.paragraphs[0].alignment = 1
     # 合计：左侧两列纵向合并，右侧三列拆成「小写/大写」两行
     left = t.cell(1 + n, 0).merge(t.cell(2 + n, 1))
     left.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
     left.text = ""
     r = left.paragraphs[0].add_run("合计")
-    _set_font(r, size=10.5)
+    _set_font(r, name="仿宋", size=14)
     left.paragraphs[0].alignment = 1
     for ri, txt in ((1 + n, f"（小写）{total_yuan} 元"), (2 + n, f"（大写）{big}")):
         c = t.cell(ri, 2).merge(t.cell(ri, 4))
         c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         c.text = ""
         r = c.paragraphs[0].add_run(txt)
-        _set_font(r, size=10.5)
+        _set_font(r, name="仿宋", size=14)
         c.paragraphs[0].alignment = 1
-    for ci, w in enumerate([1.47, 5.4, 3.5, 3.51, 3.52]):
+    t.autofit = False
+    for ci, w in enumerate([1.2, 4.9, 2.6, 3.2, 3.1]):
+        t.columns[ci].width = Cm(w)
         for row in t.rows:
             row.cells[ci].width = Cm(w)
     t.rows[0].height = Cm(1.38)
@@ -392,21 +420,48 @@ def _quote_detail_table(doc, items, total_yuan: int, big: str):
 
 
 def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
-           widths: Optional[Sequence[float]] = None, *, font_size=10.5,
-           row_heights: Optional[Sequence[float]] = None):
+           widths: Optional[Sequence[float]] = None, *, font_size=None,
+           row_heights: Optional[Sequence[float]] = None,
+           header_fill: Optional[str] = None,
+           aligns: Optional[Sequence[str]] = None):
+    """带表头的表格。
+
+    单元格格式照人工稿 PDF：
+      · 字体仿宋，字号随列数——≤6 列用 15 磅，7 列以上用 12 磅（甘特图等宽表）；
+      · 表头行可加浅蓝底纹（方案表用 #D9E1F3，表单类表格不加）；
+      · 默认横向居中，可按列指定 left（如偏离表/评分表的长文本列）；
+      · 全部纵向居中，边框 Table Grid。
+    """
     from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     from docx.shared import Cm
+    if font_size is None:
+        font_size = 15 if len(headers) <= 6 else 12
+    aligns = list(aligns) if aligns else []
     t = doc.add_table(rows=len(rows) + 1, cols=len(headers))
     t.style = "Table Grid"
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    def _align_of(ci: int) -> int:
+        a = aligns[ci] if ci < len(aligns) else "center"
+        return {"left": 0, "center": 1, "right": 2}.get(a, 1)
+
     for ci, h in enumerate(headers):
         cell = t.cell(0, ci)
         cell.text = ""
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         r = cell.paragraphs[0].add_run(str(h))
-        # 人工稿 PDF 的表头也是常规字重（仿宋 14～15，无 bold 位），靠边框区分
-        _set_font(r, size=font_size, bold=False)
-        cell.paragraphs[0].alignment = 1
+        # 人工稿 PDF 的表头也是常规字重（仿宋 14～15，无 bold 位），靠底纹/边框区分
+        _set_font(r, name="仿宋", size=font_size, bold=False)
+        cell.paragraphs[0].alignment = _align_of(ci)
+        if header_fill:
+            tcPr = cell._tc.get_or_add_tcPr()
+            shd = OxmlElement("w:shd")
+            shd.set(qn("w:val"), "clear")
+            shd.set(qn("w:color"), "auto")
+            shd.set(qn("w:fill"), header_fill)
+            tcPr.append(shd)
     for ri, row in enumerate(rows, 1):
         for ci in range(len(headers)):
             cell = t.cell(ri, ci)
@@ -414,10 +469,12 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             val = row[ci] if ci < len(row) else ""
             r = cell.paragraphs[0].add_run(str(val))
-            _set_font(r, size=font_size)
-            cell.paragraphs[0].alignment = 1
+            _set_font(r, name="仿宋", size=font_size)
+            cell.paragraphs[0].alignment = _align_of(ci)
     if widths:
+        t.autofit = False
         for ci, w in enumerate(widths):
+            t.columns[ci].width = Cm(w)
             for r in t.rows:
                 r.cells[ci].width = Cm(w)
     if row_heights:
@@ -428,7 +485,7 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
 
 
 def _grid(doc, rows: Sequence[Sequence[str]],
-          widths: Optional[Sequence[float]] = None, *, font_size=12):
+          widths: Optional[Sequence[float]] = None, *, font_size=15):
     """无表头栅格（关联单位表、地址/联系信息表用）：全部单元格同字号、不加粗。"""
     from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
     from docx.shared import Cm
@@ -444,10 +501,12 @@ def _grid(doc, rows: Sequence[Sequence[str]],
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             val = row[ci] if ci < len(row) else ""
             r = cell.paragraphs[0].add_run(str(val))
-            _set_font(r, size=font_size)
+            _set_font(r, name="仿宋", size=font_size)
             cell.paragraphs[0].alignment = 1
     if widths:
+        t.autofit = False
         for ci, w in enumerate(widths):
+            t.columns[ci].width = Cm(w)
             for r in t.rows:
                 r.cells[ci].width = Cm(w)
     return t
@@ -474,14 +533,13 @@ def _related_companies(company_id: int, leader: str) -> str:
 
 
 def _center_all_cells(doc) -> None:
-    """全篇表格单元格上下左右居中（含模板/后续追加的表）。"""
+    """全篇表格单元格**纵向**居中；横向对齐保留各表自己的设置
+    （人工稿：方案表居中，偏离表/评分表的长文本列左对齐）。"""
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
     for t in doc.tables:
         for row in t.rows:
             for cell in row.cells:
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                for p in cell.paragraphs:
-                    p.alignment = 1
 
 
 def _img(doc, data: bytes, width_cm=15.0, caption=""):
@@ -900,8 +958,8 @@ def _render_plan_table(doc, key: str, ctx: Dict[str, Any]) -> None:
     _p(doc, spec["caption"], size=15, bold=False, align="center",
        indent=False, space_after=2, name="仿宋")
     headers = spec["headers"]
-    _table(doc, headers, spec["rows"],
-           font_size=9.5 if len(headers) >= 6 else 10.5)
+    # 人工稿方案表：仿宋、≤6 列 15 磅、宽表 12 磅，表头浅蓝底纹
+    _table(doc, headers, spec["rows"], header_fill="D9E1F3")
     # 表后留一点空，避免下一节标题贴着表格
     gap = doc.add_paragraph()
     gap.paragraph_format.space_after = 0
@@ -1160,7 +1218,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     sec = doc.sections[0]
     sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
     sec.left_margin = sec.right_margin = Cm(3.0)
-    sec.top_margin = sec.bottom_margin = Cm(2.5)
+    sec.top_margin = sec.bottom_margin = Cm(3.0)   # 人工稿页边距 3cm
 
     # ── 封面（照人工案例逐项对版：60pt 仿宋标题、16pt 仿宋信息、3cm 页边距）──
     _p(doc, "", indent=False, space_after=0)
@@ -1196,6 +1254,7 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
 
     # ── （一）投标函 ──
     _h(doc, "（一）投标函", 1)
+    _p(doc, "投标函", size=15, align="center", indent=False)   # 人工稿标题下再居中一行「投标函」
     lines = [
         f"致{purchaser}、{agency}：",
         "我方收到你们招标文件，经仔细阅读和研究，我方决定参加投标。",
@@ -1234,22 +1293,22 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _rel = _related_companies(company_id, str(_af0.get("legal") or ""))
 
     _p(doc, "13. 关联单位情况说明：", align="justify")
-    _p(doc, "注：没有请填无。", align="justify")
     _grid(doc, [
         ["与我方单位负责人为同一人的其他单位", _rel or "无"],
         ["与我方存在直接控股、管理关系的其他单位", _rel or "无"],
-    ], widths=[8.5, 6.5], font_size=12)
+    ], widths=[6.2, 8.8])
+    _p(doc, "注：没有请填无。", align="justify")
 
     _p(doc, "14. 与本投标有关的一切正式往来函电，请联系：", align="justify")
     _grid(doc, [["地址", _company_addr(co_name) or _af0.get("address") or "",
                  "邮编", "223005"]],
-          widths=[2.2, 8.3, 2.2, 2.3], font_size=12)
+          widths=[2.2, 8.3, 2.2, 2.3])
     _grid(doc, [
         ["传真", "无", "办公电话", "0517-83663008"],
         ["联系人", _contact, "手机号码", _mobile],
         ["开户名称", co_name, "", ""],
         ["开户银行", "/", "开户账号", "/"],
-    ], widths=[2.5, 5.5, 2.5, 4.5], font_size=12)
+    ], widths=[2.5, 5.5, 2.5, 4.5])
     doc.add_paragraph()
     _p(doc, f"投标人（盖章）：{co_name}", indent=False)
     _p(doc, "法定代表人或被授权代表人（签名）：", indent=False)
@@ -1389,19 +1448,19 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
                  caption="测绘资质证书", break_after=False)
 
-    # ── （四）偏离表（A4 纵向）──
-    doc.add_page_break()
+    # ── （四）偏离表（人工稿是横排 A4，表格更宽）──
+    _new_section(doc, True)
     _h(doc, "（四）技术条款及相关要求偏离表", 1)
     _p(doc, "技术条款及相关要求偏离表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
     _dev_rows = _deviation_rows(tender, project,
                                 int(tender.get("duration_days") or 90))
     _table(doc, ["序号", "项目名称", "招标内容", "投标内容", "正偏离/负偏离"],
-           _dev_rows, widths=[0.8, 2.1, 5.5, 5.4, 1.2], font_size=9.0,
-           row_heights=[1.4] + [2.6] * (len(_dev_rows) - 1))
+           _dev_rows, widths=[1.6, 5.4, 7.65, 7.65, 2.4], font_size=12,
+           aligns=["center", "center", "left", "left", "center"])
 
-    # ── （五）评分导读表（仍 A4 纵向）──
-    doc.add_page_break()
+    # ── （五）评分导读表（回纵向 A4）──
+    _new_section(doc, False)
     _h(doc, "（五）技术商务部分评分导读表", 1)
     _p(doc, "技术商务部分评分导读表", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
@@ -1443,7 +1502,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
         ["9", "安全保密保障措施", "提供安全保密保障措施", "见投标文件", "10"],
     ]
     _table(doc, ["序号", "评审项目", "响应情况", "投标文件对应页码", "自评分"],
-           _score_rows, widths=[1.1, 5.6, 4.0, 2.1, 2.2], font_size=10.5)
+           _score_rows, widths=[1.1, 5.6, 4.0, 2.1, 2.2], font_size=12,
+           aligns=["center", "left", "left", "center", "center"])
     doc.add_page_break()
 
     # ── （六）服务方案 ──
@@ -1457,9 +1517,9 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
             md = ""
     _md_to_docx(doc, md or _fallback_plan(tender),
                 _plan_ctx(tender, co_name, people))
-    doc.add_page_break()
 
-    # ── （七）人员配置清单（A4 纵向）──
+    # ── （七）人员配置清单（人工稿横排 A4）──
+    _new_section(doc, True)
     _h(doc, "（七）项目人员配置清单", 1)
     _p(doc, "项目人员配置清单", size=14, align="center", indent=False)
     _p(doc, f"投标人名称（盖章）：{co_name}", indent=False)
@@ -1472,20 +1532,29 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
                      str(p.get("age") or ""), p.get("role") or "",
                      p.get("education") or "", p.get("title") or "", cert_no])
     _table(doc, ["序号", "姓名", "性别", "年龄", "岗位名称", "学历", "职称", "资格证书编号"],
-           rows, widths=[0.9, 1.5, 1.3, 1.3, 1.9, 1.3, 1.6, 5.2],
-           font_size=9.5, row_heights=[0.8] + [0.78] * len(rows))
+           rows, widths=[1.5, 3.0, 2.0, 2.0, 3.5, 2.2, 2.8, 7.7],
+           font_size=12)
     _p(doc, "注：上述人员在项目执行过程中如需更换，须经采购人同意；"
             "擅自更换或不到位属违约行为。", size=10.5, indent=False)
     _p(doc, "拟投入人员简历：", bold=False, indent=False)
     for p in people:
         certs = "、".join(p.get("certs") or []) or "—"
-        _p(doc, f"{p.get('name')}，{p.get('gender') or ''}，{p.get('age') or ''}岁，"
-                f"{p.get('education') or ''}学历，{p.get('major') or ''}专业，"
-                f"{p.get('title') or ''}，拟任{p.get('role') or ''}；持有证书：{certs}。",
+        # 人员库缺年龄/学历时不要印成「，岁，学历」——缺项直接跳过
+        _bits = [str(p.get("name") or ""), str(p.get("gender") or "")]
+        if p.get("age"):
+            _bits.append(f"{p['age']}岁")
+        if p.get("education"):
+            _bits.append(f"{p['education']}学历")
+        if p.get("major"):
+            _bits.append(f"{p['major']}专业")
+        if p.get("title"):
+            _bits.append(str(p["title"]))
+        _bits.append(f"拟任{p.get('role') or ''}")
+        _p(doc, "，".join(x for x in _bits if x) + f"；持有证书：{certs}。",
            align="justify")
 
-    # ── （八）其他（A4 纵向）──
-    doc.add_page_break()
+    # ── （八）其他（回纵向 A4）──
+    _new_section(doc, False)
     _h(doc, "（八）其他", 1)
     _h(doc, "1. 体系认证证书", 2)
     _asset_block(doc, "", [("质量管理体系认证",), ("环境管理体系认证",),

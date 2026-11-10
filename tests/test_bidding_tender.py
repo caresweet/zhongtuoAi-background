@@ -164,9 +164,9 @@ async def test_quotation_tables_follow_tender_template(tmp_path):
     assert "（小写）370000 元" in total_txt
     assert "叁拾柒万元整" in total_txt
 
-    # 表格数据上下左右居中
+    # 报价表单元格：纵向居中 + 横向居中（其他表的长文本列允许左对齐）
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
-    for t in d.tables:
+    for t in (opening, detail):
         for r in t.rows:
             for c in r.cells:
                 assert c.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -209,7 +209,8 @@ async def test_second_page_is_toc(tmp_path):
     await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
                              out_path=out, seed=2026, use_llm=False)
     d = Document(str(out))
-    assert any(p.text.strip() == "目  录" for p in d.paragraphs)
+    assert any(p.text.strip().replace(" ", "").replace("\u3000", "") == "目录"
+               for p in d.paragraphs)
     # 有 soffice 时目录已写成静态条目（带页码）；没有则保留 TOC 域
     texts = [p.text for p in d.paragraphs]
     has_static = any(t.startswith("（一）投标函\t") for t in texts)
@@ -338,9 +339,12 @@ async def test_toc_and_headings_follow_human_pdf(tmp_path):
     await build_bid_document(tender_path=TENDER, company_id=4, price_wan=37,
                              out_path=out, seed=2026, use_llm=False)
     ps = [p for p in Document(str(out)).paragraphs if p.text.strip()]
-    title = next(p for p in ps if p.text.strip() == "目  录")
+    title = next(p for p in ps if p.text.strip().replace(" ", "").replace("\u3000", "") == "目录")
     r = title.runs[0]
     assert r.font.name == "黑体" and r.font.size.pt == 20 and not r.bold
+    # 人工稿行距实测 31.2 磅（旧稿 20.3 磅，条目挤在一起）
+    entry0 = next(p for p in ps if p.text.startswith("（一）投标函\t"))
+    assert round(entry0.paragraph_format.line_spacing.pt, 1) == 31.2
     entry = next(p for p in ps if p.text.startswith("（一）投标函\t"))
     r = entry.runs[0]
     assert r.font.name == "黑体" and r.font.size.pt == 14 and not r.bold

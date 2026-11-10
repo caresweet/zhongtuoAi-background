@@ -66,7 +66,16 @@ def is_junk(v: Any) -> bool:
     core = core.strip("　 \t.。:：,，;；()（）[]【】")
     if core.lower() in _JUNK_EXACT:
         return True
-    return any(core.startswith(p) for p in _JUNK_LEAD)
+    # 🔴 「未发现负面舆情」「不涉及生态红线」是**有内容的结论**，不是无答案；
+    #    只有前缀后面什么都没说才算伪值（线上实测：稳评网络舆情被这条误清空）。
+    for p in _JUNK_LEAD:
+        if not core.startswith(p):
+            continue
+        rest = core[len(p):].strip("　 \t.。:：,，;；()（）[]【】")
+        if p in ("未发现", "未见", "未涉及", "不涉及") and len(rest) >= 2:
+            return False
+        return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════

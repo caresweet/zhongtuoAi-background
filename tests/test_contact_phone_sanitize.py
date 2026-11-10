@@ -45,3 +45,13 @@ def test_material_ingestion_does_not_take_publicity_as_phone():
     out2 = material_ingestion_service._extract_structured_fields(
         _PUBLICITY + "\n联系电话：0517-85391266")
     assert out2.get("contact_phone") == "0517-85391266"
+
+
+def test_factual_negative_is_not_junk():
+    """「未发现负面舆情」「不涉及生态红线」是有内容的结论，不能被当伪值清掉。"""
+    from app.services.field_sanitizer import is_junk
+
+    assert is_junk("未发现") is True
+    assert is_junk("未发现负面舆情") is False
+    assert is_junk("不涉及生态保护红线") is False
+    assert is_junk("未检测到明确文档标题") is True

@@ -366,12 +366,25 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
         f"select id,name,gender,age,education,major,title,certs,{_cert_col} "
         "from company_personnel "
         "where company_id=? order by sort_order,id", (company_id,)).fetchall()
+    try:
+        _img_ids = {r[0] for r in conn.execute(
+            "select distinct personnel_id from company_personnel_images")}
+    except Exception:
+        _img_ids = set()
     conn.close()
     people = [{"id": r[0], "name": r[1], "gender": r[2], "age": r[3], "education": r[4],
                "major": r[5], "title": r[6],
                "certs": json.loads(r[7] or "[]") if r[7] else [],
-               "cert_no": r[8] or ""}
+               "cert_no": r[8] or "", "has_img": r[0] in _img_ids}
               for r in rows if r[1]]
+    # 人员库有同名重复（导入过两次）：保留有证书编号/证书图片的那条
+    _best = {}
+    for p in people:
+        k = p["name"]
+        score = (bool(p.get("has_img")), bool(p.get("cert_no")))
+        if k not in _best or score > _best[k][0]:
+            _best[k] = (score, p)
+    people = [v for _sc, v in _best.values()]
     rng = random.Random(seed)
 
     # 负责人评分只认「土地类或测绘类」高级职称（规划类只算组员分）
@@ -383,12 +396,17 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
                           if any(k in str(p["major"] or "") for k in ("土地", "测绘"))]
     if not leaders:
         return []
-    chosen = [rng.choice(leaders)]
+    # 负责人优先带注册测绘师（评审加分/资格要求里常点名）
+    _cert_leaders = [p for p in leaders
+                     if any("注册测绘师" in str(c) for c in (p.get("certs") or []))]
+    chosen = [rng.choice(_cert_leaders or leaders)]
     chosen[0]["role"] = "项目负责人"
 
     pool = [p for p in people if p not in chosen]
     mid = [p for p in pool if _title_rank(p["title"]) >= 1 and _major_ok(p["major"])]
     pool = mid or [p for p in pool if _major_ok(p["major"])] or pool
+    # 组员优先有证书图片的（同一个名字重复入库时已在上面去重）
+    pool = sorted(pool, key=lambda x: (not x.get("has_img"),))
     for p in rng.sample(pool, min(members, len(pool))):
         p = dict(p)
         p["role"] = "项目组成员"

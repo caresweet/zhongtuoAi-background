@@ -630,6 +630,13 @@ def _person_images(personnel_id: int) -> List[Tuple[str, bytes]]:
         rows = c.execute(
             "select image_name,image_path from company_personnel_images "
             "where personnel_id=? order by id", (personnel_id,)).fetchall()
+        if not rows:
+            # 同一人可能以另一家公司入库（历史数据重复导入），按姓名兜底取证书图
+            rows = c.execute(
+                "select i.image_name, i.image_path from company_personnel_images i "
+                "join company_personnel p on p.id = i.personnel_id "
+                "where p.name = (select name from company_personnel where id=?) "
+                "order by i.id", (personnel_id,)).fetchall()
         c.close()
     except Exception:
         return out
@@ -1472,6 +1479,11 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     doc.add_page_break()
 
     _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
+    _asset_block(doc, f"{af['legal']} 身份证", [(f"{af['legal']} 身份证",)],
+                 caption="法定代表人身份证复印件")
+    if af.get("agent") and af["agent"] != af["legal"]:
+        _asset_block(doc, f"{af['agent']} 身份证", [(f"{af['agent']} 身份证",)],
+                     caption="被授权代表身份证复印件")
     _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",),
                               ("2025年10—12月资产负债表",),
                               ("2025年10—12月利润表",)], caption="财务状况报告")
@@ -1838,17 +1850,43 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
     _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
 
-    for _kw, _names, _cap in (
-        ("营业执照", [("1.营业执照",)], "营业执照"),
-        ("财务", [("2024年度财务报告",), ("2025年度审计报告",)], "上一年度财务报表"),
-        ("税收", [("依法缴纳税收证明（2025年10月）",)], "依法缴纳税收证明"),
-        ("社保", [("依法社会保障资金证明（2025年11月）",)], "社会保障资金证明"),
-        ("信用", [("未被列入失信被执行人网站截图",),
-                  ("未被列入重大税收违法失信主体",)], "信用记录查询截图"),
-        ("测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
-         "测绘资质证书"),
-    ):
-        _asset_block(doc, _kw, _names, caption=_cap)
+    # 文件1～8 按招标目录逐件附扫描件（人工稿每件前有「1.营业执照」式小标题）
+    _p(doc, "文件1  法人或者其他组织的营业执照等证明文件，自然人的身份证明",
+       size=12, bold=False, indent=False, name="仿宋")
+    _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
+    _asset_block(doc, f"{af['legal']} 身份证", [(f"{af['legal']} 身份证",)],
+                 caption="法定代表人身份证复印件")
+    if af.get("agent") and af["agent"] != af["legal"]:
+        _asset_block(doc, f"{af['agent']} 身份证", [(f"{af['agent']} 身份证",)],
+                     caption="被授权代表身份证复印件")
+    _p(doc, "文件2  上一年度的财务报表", size=12, bold=False, indent=False,
+       name="仿宋")
+    _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",)],
+                 caption="上一年度财务报表")
+    _p(doc, "文件3  依法缴纳税收和社会保障资金的相关材料", size=12,
+       bold=False, indent=False, name="仿宋")
+    _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)],
+                 caption="依法缴纳税收证明")
+    _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)],
+                 caption="社会保障资金证明")
+    _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                 caption="社会保险权益记录单")
+    _p(doc, "文件7  投标人资质证书", size=12, bold=False, indent=False,
+       name="仿宋")
+    _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
+                 caption="测绘资质证书")
+    _p(doc, "文件8  招标文件中规定要求提供的证明材料和投标人认为需要提供的其他材料",
+       size=12, bold=False, indent=False, name="仿宋")
+    _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
+                              ("未被列入重大税收违法失信主体",),
+                              ("未被列入政府采购严重违法失信行为记录名单",)],
+                 caption="信用记录查询截图")
+    # 项目负责人职称证书 + 注册测绘师（对应招标「项目负责人具有测绘中级职称
+    # 或注册测绘师」的资格要求）
+    _lead_major = str((people[0] if people else {}).get("major") or "")
+    _cert_kw = "高级工程师——测绘" if "测绘" in _lead_major else "高级工程师——土地"
+    _asset_block(doc, _cert_kw, [(_cert_kw,)], caption="项目负责人职称证书")
+    _asset_block(doc, "注册测绘师", [("注册测绘师",)], caption="注册测绘师证书")
 
     # ── 三、投标函 ──
     _h(doc, t_letter, 1)
@@ -1967,6 +2005,28 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _p(doc, f"法定代表人或授权代表签字：{af['agent']}", size=12, indent=False,
        name="仿宋")
 
+    # ── 附件：中小企业声明函（工程、服务）──
+    doc.add_page_break()
+    _h(doc, "附件", 1)
+    _p(doc, "中小企业声明函（工程、服务）", size=14, align="center",
+       indent=False, name="仿宋")
+    _p(doc, "本公司郑重声明，根据《政府采购促进中小企业发展管理办法》"
+            "（财库﹝2020﹞46号）的规定，本公司参加" + purchaser +
+            "的" + project + "采购活动，服务全部由符合政策要求的中小企业承接。",
+       size=12, align="justify", name="仿宋")
+    _p(doc, "相关企业的具体情况如下：", size=12, align="justify", name="仿宋")
+    _p(doc, f"1. {project}，属于测绘服务行业；承接企业为{co_name}，"
+            "从业人员______人，营业收入为______万元，资产总额为______万元，"
+            "属于（中型企业、小型企业、微型企业）。", size=12,
+       align="justify", name="仿宋")
+    _p(doc, "以上企业，不属于大企业的分支机构，不存在控股股东为大企业的情形，"
+            "也不存在与大企业的负责人为同一人的情形。", size=12, align="justify",
+       name="仿宋")
+    _p(doc, "本企业对上述声明内容的真实性负责。如有虚假，将依法承担相应责任。",
+       size=12, align="justify", name="仿宋")
+    _p(doc, f"企业名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
+    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
+
     # ── 七、项目组成员一览表（横排）──
     _new_section(doc, True)
     _h(doc, t_team, 1)
@@ -2022,28 +2082,6 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, _ln, size=12, align="justify", name="仿宋")
     _p(doc, f"法定代表人签名：{af['legal']}", size=12, indent=False, name="仿宋")
     _p(doc, f"单位名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
-
-    # ── 附件：中小企业声明函（工程、服务）──
-    doc.add_page_break()
-    _h(doc, "附件", 1)
-    _p(doc, "中小企业声明函（工程、服务）", size=14, align="center",
-       indent=False, name="仿宋")
-    _p(doc, "本公司郑重声明，根据《政府采购促进中小企业发展管理办法》"
-            "（财库﹝2020﹞46号）的规定，本公司参加" + purchaser +
-            "的" + project + "采购活动，服务全部由符合政策要求的中小企业承接。",
-       size=12, align="justify", name="仿宋")
-    _p(doc, "相关企业的具体情况如下：", size=12, align="justify", name="仿宋")
-    _p(doc, f"1. {project}，属于测绘服务行业；承接企业为{co_name}，"
-            "从业人员______人，营业收入为______万元，资产总额为______万元，"
-            "属于（中型企业、小型企业、微型企业）。", size=12,
-       align="justify", name="仿宋")
-    _p(doc, "以上企业，不属于大企业的分支机构，不存在控股股东为大企业的情形，"
-            "也不存在与大企业的负责人为同一人的情形。", size=12, align="justify",
-       name="仿宋")
-    _p(doc, "本企业对上述声明内容的真实性负责。如有虚假，将依法承担相应责任。",
-       size=12, align="justify", name="仿宋")
-    _p(doc, f"企业名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
     _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
     _apply_body_format(doc)

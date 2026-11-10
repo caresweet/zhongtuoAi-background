@@ -116,7 +116,7 @@ def test_damage_inventory_splits_per_plot_rows():
     ]
     t = table_damage_inventory(f)
     assert t["plot_groups"] is True
-    assert t["headers"][2] == "面积（hm2）" and t["headers"][3] == ""
+    assert t["headers"][2] == "面积（hm²）" and t["headers"][3] == ""
     assert t["group_sizes"] == [2, 1]
     assert t["rows"][0][:4] == ["1", "施工场站", "0.9800", "0.4200"]
     assert t["rows"][1] == ["", "", "", "0.5600", "", ""]
@@ -142,7 +142,7 @@ def test_plot_group_cells_merged_like_template():
     a._render_table_from_dict(doc, t, caption="表4-2 临时用地拟损毁情况统计表")
     tb = doc.tables[0]
     # 表头「面积」跨两栏
-    assert tb.cell(0, 2).text == tb.cell(0, 3).text == "面积（hm2）"
+    assert tb.cell(0, 2).text == tb.cell(0, 3).text == "面积（hm²）"
     assert tb.cell(0, 2)._tc is tb.cell(0, 3)._tc
     # 施工场站两行：序号/名称/小计/地块个数/损毁程度 都是同一个合并单元格
     for col in (0, 1, 2, 4, 5):

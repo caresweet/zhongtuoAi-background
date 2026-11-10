@@ -761,6 +761,26 @@ def build_chapter_prompt(
         except Exception as _me:
             logger.warning(f"[材料摘录] 第{num}章注入失败: {_me}")
 
+    # 🔴 复垦：把**系统核定的表土口径**钉进提示词，并明确「只写本项目」。
+    #    专家评审实测：4.5.1 写 2.28 ha/6840 m³（那是耕地面积），与表4-11 的
+    #    2.59 ha/7770 m³ 打架；4.1.1 还把范文里「张兴矿区/采输卤」整段写进来。
+    if domain == "reclamation":
+        try:
+            from app.services.reclamation_text_guard import facts_block
+            _fb = facts_block(filled_data or {})
+            if _fb:
+                prompt += _fb
+            _proj = str((filled_data or {}).get("project_name") or "")
+            prompt += (
+                "\n\n【项目隔离】本章只能写本项目"
+                + (f"（{_proj}）" if _proj else "")
+                + "。范文/参考资料里其他项目的名称、井号、产能、规模、地点"
+                  "（如井神、张兴矿区、采输卤、明远、王元佳苑、宁淮等）一律不得出现；"
+                  "范文只学写法，不搬事实。\n"
+            )
+        except Exception as _rge:
+            logger.warning(f"[复垦口径] 第{num}章注入失败: {_rge}")
+
     # ── 末段「写作要求」块：稳评 / 复垦各一套，互不掺和 ──
     # 🔴 复垦：经 catalog 取复垦口径的要求文本（不含稳评规范/口径与稳评 DB 反馈）。
     # 🔴 稳评：沿用下面这份内联正文 —— 逐字保持不变（稳评护栏）。

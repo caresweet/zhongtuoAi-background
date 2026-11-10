@@ -71,6 +71,12 @@ async def main() -> int:
 
     filled = state["filled_data"] = {}
     filled["_company_id"] = 4
+    # 编制单位名称/法人/资质/联系人都来自公司档案（报告表「方案编制单位」栏）
+    try:
+        from app.services.company_service import load_company
+        state["_company"] = await load_company(4) or {}
+    except Exception as _ce:
+        print("[公司档案] 读取失败（报告表编制单位栏将留空）:", _ce, flush=True)
     changed = apply_intake(filled, data)
     print(f"[基础资料] {Path(args.intake).name}：写入 {len(changed)} 项", flush=True)
 

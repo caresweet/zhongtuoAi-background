@@ -158,13 +158,26 @@ def table_4_9(filled: dict, title: str = "") -> Optional[dict]:
     units = _eval_units(filled, title)
     if not units:
         return None
+    # 🔴 优先用**项目实际因子**（可研/勘测/弹窗/Excel 抽出来的），
+    #    抽不到的因子才回落到默认基准分，并按损毁程度折减
+    #    （业主 2026-11-10：「优先从可研和勘测报告中抽取，没有再弹窗/模板」）。
+    try:
+        from app.services.reclamation_suitability import score_factors, grade_of
+        _real = score_factors(filled or {})
+    except Exception:
+        _real, grade_of = {}, (lambda t: "一等地" if t >= 80 else
+                               ("二等地" if t >= 60 else "三等地"))
     rows = []
     for name, area, degree in units:
         deduct = _DAMAGE_DEDUCT.get(degree, {})
-        scores = {k: max(0, min(100, v - deduct.get(k, 0)))
-                  for k, v in _EVAL_BASE.items()}
+        scores = {}
+        for _k in _EVAL_WEIGHTS:
+            if _k in _real:
+                scores[_k] = int(_real[_k])          # 项目实测/用户填的值，原样用
+            else:
+                scores[_k] = max(0, min(100, _EVAL_BASE[_k] - deduct.get(_k, 0)))
         total = round(sum(scores[k] * _EVAL_WEIGHTS[k] for k in _EVAL_WEIGHTS), 2)
-        grade = "一等地" if total >= 80 else ("二等地" if total >= 60 else "三等地")
+        grade = grade_of(total)
         rows.append([name] + [str(scores[k]) for k in _EVAL_WEIGHTS]
                     + [f"{total:.2f}", grade])
     return {
@@ -219,7 +232,7 @@ def table_ownership(filled: dict) -> Optional[dict]:
                    [f"{vals[c] / 10000.0:.4f}" if vals[c] else "" for c in classes])
     return {
         "caption": "表4-O 临时用地土地权属状况统计表",
-        "headers": ["权属单位", "合计"] + [f"{c}（hm2）" for c in classes],
+        "headers": ["权属单位", "合计"] + [f"{c}（hm²）" for c in classes],
         "rows": out,
     }
 
@@ -285,7 +298,7 @@ def _land_status_table(filled: dict, source_key: str, caption: str) -> Optional[
     out.append(["合计", "合计", f"{total / 10000.0:.4f}", "100"])
     return {"caption": caption,
             "headers": ["地类名称及编码", "地类名称及编码",
-                        "面积（hm2）", "占比（%）"],
+                        "面积（hm²）", "占比（%）"],
             "rows": out, "land_groups": True}
 
 
@@ -368,11 +381,11 @@ def table_damage_inventory(filled: dict) -> Optional[dict]:
     if has_plots:
         rows.append(["合计", "", f"{total / 10000.0:.4f}", "", "", ""])
         return {"caption": "表4-D 临时用地拟损毁情况统计表",
-                "headers": ["序号", "地块名称", "面积（hm2）", "", "地块个数", "损毁程度"],
+                "headers": ["序号", "地块名称", "面积（hm²）", "", "地块个数", "损毁程度"],
                 "rows": rows, "plot_groups": True, "group_sizes": group_sizes}
     rows.append(["合计", "", f"{total / 10000.0:.4f}", "", ""])
     return {"caption": "表4-D 临时用地拟损毁情况统计表",
-            "headers": ["序号", "地块名称", "面积（hm2）", "地块个数", "损毁程度"],
+            "headers": ["序号", "地块名称", "面积（hm²）", "地块个数", "损毁程度"],
             "rows": rows}
 
 
@@ -405,7 +418,7 @@ def table_4_7(filled: dict, title: str = "") -> Optional[dict]:
         rows.append(["合计", "", "", f"{_zsum / 10000.0:.4f}", "", ""])
         return {
             "caption": "表4-7 评价单元土地损毁情况表",
-            "headers": ["评价单元", "单元类型", "损毁类型", "面积（hm2）",
+            "headers": ["评价单元", "单元类型", "损毁类型", "面积（hm²）",
                         "损毁程度", "复垦情况"],
             "rows": rows,
         }
@@ -464,7 +477,7 @@ def table_4_10(filled: dict, title: str = "") -> Optional[dict]:
     rows.append(["合计", "", "", f"{_zsum / 10000.0:.4f}", "", ""])
     return {
         "caption": "表4-10 评价单元复垦方向表",
-        "headers": ["序号", "评价单元", "占用原土地类型", "面积（hm2）",
+        "headers": ["序号", "评价单元", "占用原土地类型", "面积（hm²）",
                     "主要复垦措施", "复垦方向"],
         "rows": rows,
     }
@@ -505,8 +518,11 @@ def table_4_11(filled: dict) -> Optional[dict]:
 def table_4_12(filled: dict) -> Optional[dict]:
     """表4-12 临时用地水资源分析表。
 
-    样本口径：类型 = 临时用地；面积 = 临时用地合计面积；可复垦耕地面积 = 耕地面积；
-    复垦方向 = 耕地二级类（水田/水浇地/旱地，取不到就写「耕地」）；水源 = 周边水源。
+    样本口径：类型 = 临时用地；面积 = 临时用地合计面积；水源 = 周边水源。
+    🔴 「可复垦耕地面积」取**剥离表土面积**（耕地+园地+林地+草地），与表4-11
+       同一口径 —— 用「耕地面积」会漏掉复垦为旱地的园地（专家 2026-11-09：
+       表4-11 是 2.5900，本表写 2.2800 / 方向只写「旱地」，前后打架）。
+    🔴 复垦方向取分区表里用户填的方向（去重），不再取最后一个耕地二级类。
     """
     lc = ((filled or {}).get("land_classification") or {})
     rows_in = lc.get("rows") or []
@@ -516,19 +532,31 @@ def table_4_12(filled: dict) -> Optional[dict]:
         _total_m2 = _num((filled or {}).get("area_m2"))
     if _total_m2 <= 0:
         return None
-    _farm_m2, _dir = 0.0, "耕地"
-    for r in rows_in:
-        if _class_name(r.get("一级地类")) == "耕地":
-            _farm_m2 += _num(r.get("面积_m2"))
-            _sec = _class_name(r.get("二级地类"))
-            if _sec:
-                _dir = _sec
+    _farm_m2 = sum(
+        _num(r.get("面积_m2")) for r in rows_in
+        if _class_name(r.get("一级地类")) in _STRIP_TOP_CLASSES)
+    _dirs: List[str] = []
+    try:
+        from app.services.reclamation_zones import zones_from_filled
+        for _z in zones_from_filled(filled) or []:
+            _d = str((_z or {}).get("reclaim_direction") or "").strip()
+            if _d and _d not in _dirs:
+                _dirs.append(_d)
+    except Exception:
+        pass
+    if not _dirs:
+        for r in rows_in:
+            if _class_name(r.get("一级地类")) == "耕地":
+                _d = _class_name(r.get("二级地类"))
+                if _d and _d not in _dirs:
+                    _dirs.append(_d)
     return {
         "caption": "表4-12 临时用地水资源分析表",
         "headers": ["类型", "面积（公顷）", "可复垦耕地面积（公顷）",
                     "复垦方向", "水源"],
         "rows": [["临时用地", f"{_total_m2 / 10000.0:.4f}",
-                  f"{_farm_m2 / 10000.0:.4f}" if _farm_m2 else "—", _dir, "周边水源"]],
+                  f"{_farm_m2 / 10000.0:.4f}" if _farm_m2 else "—",
+                  "、".join(_dirs) or "耕地", "周边水源"]],
     }
 
 

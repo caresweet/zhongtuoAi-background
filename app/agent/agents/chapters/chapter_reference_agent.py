@@ -88,10 +88,29 @@ class ReferenceChapterAgent(BaseAgent):
         from app.services.reference_corpus import render_reference_markdown
         filled = (state or {}).get("filled_data") or {}
         res = render_reference_markdown(self.chapter_number, filled, self._ref_id)
+
+        # 🔴 复垦收口：第2/5/7/10章走参照件轨道（不走 ChapterAgentBase.act），
+        #    这里单独收口 —— 否则 hm2、串进来的其他项目名、错误土方量会原样出章。
+        _dom = getattr(self, "domain", "stability")
+        if _dom != "reclamation":
+            try:
+                from app.domains import domain_of_state
+                _dom = domain_of_state(state or {}) or _dom
+            except Exception:
+                pass
+
+        def _guard(md: str) -> str:
+            try:
+                from app.services.reclamation_text_guard import apply_guards
+                return apply_guards(md, filled, self.chapter_number, _dom)
+            except Exception as _e:
+                logger.warning(f"[复垦收口] 第{self.chapter_number}章参照件处理失败: {_e}")
+                return md
+
         out = {
             "chapter": self.chapter_number,
             "title": self.chapter_title,
-            "markdown": res.markdown,
+            "markdown": _guard(res.markdown),
             "filled_count": res.filled_count,
             "removed_count": res.removed_count,
             "gaps": res.gaps,
@@ -115,7 +134,7 @@ class ReferenceChapterAgent(BaseAgent):
             rag_text=rag_text,
             state=state,
         )
-        out["markdown"] = r.get("markdown") or res.markdown
+        out["markdown"] = _guard(r.get("markdown") or res.markdown)
         out["issues"] = r.get("issues") or []
         out["fallback"] = r.get("fallback") or ""
         out["guided"] = not out["fallback"]

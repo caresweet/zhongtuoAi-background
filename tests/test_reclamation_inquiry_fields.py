@@ -65,6 +65,11 @@ def test_reclamation_inquiry_does_not_ask_stability_fields():
         # 设计参数（不设范文默认值，每次新报告都问）
         "hard_surface_type", "hard_area_m2", "surface_thickness_cm",
         "cushion_thickness_cm",
+        # 土地适宜性评价因子（表4-9；材料抽不到才问）
+        "slope_grade", "effective_soil_depth_cm", "soil_texture",
+        "organic_matter", "landform", "irrigation_guarantee",
+        "irrigation_method", "drainage_condition", "road_access",
+        "field_flatness",
     }
 
 

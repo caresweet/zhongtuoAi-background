@@ -245,6 +245,18 @@ def fix_reclamation_fields(filled: dict, materials: list, title: str = "") -> di
     except Exception as _de:
         _log.warning(f"[复垦补全] 设计参数抽取跳过: {_de}")
 
+    # ④b 土地适宜性评价因子（表4-9）：同样先查可研/勘测/施工组织设计正文，
+    #     抽不到才留给弹窗与 Excel 模板（业主 2026-11-10）。
+    try:
+        from app.services.reclamation_suitability import extract_suitability_params
+        _suit = extract_suitability_params(filled, items)
+        if _suit:
+            from app.services import field_sources as _fs
+            _fs.mark(filled, _fs.MATERIAL, *_suit)
+            _log.info(f"[复垦补全] 适宜性因子取自材料：{_suit}")
+    except Exception as _se:
+        _log.warning(f"[复垦补全] 适宜性因子抽取跳过: {_se}")
+
     # ④a 材料没有硬化面积时才按分区倒算
     _derive_hard_area_from_zones(filled)
 

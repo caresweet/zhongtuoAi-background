@@ -1315,7 +1315,7 @@ def test_ch4_land_use_table_has_numbers_not_boilerplate(tmp_path):
                   {"一级地类": "农用地", "二级地类": "水田", "面积_m2": 22215},
                   {"一级地类": "农用地", "二级地类": "沟渠", "面积_m2": 1033}]}}
     _, text = _render(tmp_path, "reclamation", {4: {"markdown": md}}, filled)
-    assert "面积（hm2）" in text
+    assert "面积（hm²）" in text
     assert "水田" in text and "2.2215" in text
     assert "以勘测定界成果" not in text
     assert "合计" in text and "100" in text

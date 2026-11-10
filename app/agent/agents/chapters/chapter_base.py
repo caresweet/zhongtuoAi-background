@@ -443,6 +443,26 @@ class ChapterAgentBase(BaseAgent):
             await self._emit_thinking(reasoning[:500])
 
         content = self._clean_content(content)
+        # 🔴 复垦正文收口（业主 2026-11-09 专家批注）：
+        #    ① 删掉串进本项目的**别的项目**内容（范文事实）；
+        #    ② 剥离面积/土方量统一到系统口径（不得用耕地面积顶替）；
+        #    ③ hm→hm²、表土句里的 m→m³、「由图可知」无图时改依据表述。
+        # ⚠️ 第2/5/7/10章走 `ReferenceChapterAgent`（domain 不是 reclamation），
+        #    域要从 state 里判，否则这几章的 hm2/串项目/错误土方量会漏掉。
+        _guard_dom = self.domain
+        if _guard_dom != "reclamation":
+            try:
+                from app.domains import domain_of_state
+                _guard_dom = domain_of_state(state or {}) or _guard_dom
+            except Exception:
+                pass
+        try:
+            from app.services.reclamation_text_guard import apply_guards
+            content = apply_guards(
+                content, (state or {}).get("filled_data") or {},
+                self.chapter_number, _guard_dom)
+        except Exception as _rg:
+            logger.warning(f"[复垦收口] 第{self.chapter_number}章跳过: {_rg}")
         # 🔴 整章重复兜底（LLM 偶发输出两遍）
         content = self._dedup_repeated_blocks(content)
         # 🔴 三级标题规范化（LLM 屡次退回加粗写法，提示约束不住，用后处理兜底）。
@@ -458,6 +478,22 @@ class ChapterAgentBase(BaseAgent):
             content = self._strip_markdown_tables(content)
         # 🔴 字数不足 → 定向续写补足（复垦专开；稳评在 catalog 里恒 False）
         content = await self._top_up_length(content, system_prompt)
+        # 🔴 续写是在收口之后追加的新文本，可能又带进 hm2/其他项目/错误土方量 ——
+        #    出章前再过一次收口（幂等）。域同样以 state 为准（第2/5/7/10章）。
+        try:
+            from app.services.reclamation_text_guard import apply_guards
+            _gd = self.domain
+            if _gd != "reclamation":
+                try:
+                    from app.domains import domain_of_state
+                    _gd = domain_of_state(state or {}) or _gd
+                except Exception:
+                    pass
+            content = apply_guards(
+                content, (state or {}).get("filled_data") or {},
+                self.chapter_number, _gd)
+        except Exception as _rg2:
+            logger.warning(f"[复垦收口] 第{self.chapter_number}章续写后处理失败: {_rg2}")
 
         # 🔴 金湖模板：不注入系统表格，LLM生成markdown表格即可
         tables = self._extract_tables(content)

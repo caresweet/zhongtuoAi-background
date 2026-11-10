@@ -160,6 +160,17 @@ RECLAMATION_KEY_LABELS: Dict[str, str] = {
     "hard_area_m2": "硬化/压占面积（平方米）",
     "surface_thickness_cm": "结构层厚度（厘米）",
     "cushion_thickness_cm": "垫层厚度（厘米）",
+    # 土地适宜性评价因子（表4-9）：可研/勘测抽取 → 弹窗 → Excel 模板
+    "slope_grade": "自然坡度",
+    "effective_soil_depth_cm": "有效土层厚度（厘米）",
+    "soil_texture": "土壤质地",
+    "organic_matter": "有机质含量（%）",
+    "landform": "地貌部位",
+    "irrigation_guarantee": "灌溉保证程度",
+    "irrigation_method": "灌溉方式",
+    "drainage_condition": "排水条件",
+    "road_access": "道路通达性",
+    "field_flatness": "田块平整度",
     "reclamation_direction": "复垦方向",
     "dynamic_total_investment": "动态总投资",
     # ── 以下为事实卡（`RECLAMATION_CARD_KEYS`）新启用的字段标注 ──
@@ -239,6 +250,24 @@ RECLAMATION_NEED_FIELDS: Dict[int, List[tuple]] = {
         # 仅当「硬化结构做法」填混凝土时需要：垫层厚度
         ("cushion_thickness_cm", "垫层厚度（厘米，混凝土做法时填）", "number",
          r'^\d+(\.\d+)?$', 5, "8"),
+        # 🔴 土地适宜性评价因子（表4-9）—— 先抽可研/勘测报告，抽不到才问；
+        #    按表4-8 的标准映射分值（一等地≥80 / 二等地≥60 / 三等地<60）。
+        ("slope_grade", "自然坡度（如 <5° / 5-15° / 15-25° / >25°）",
+         "text", None, 20, "<5°"),
+        ("effective_soil_depth_cm", "有效土层厚度（厘米）", "number",
+         r'^\d+(\.\d+)?$', 5, "30"),
+        ("soil_texture", "土壤质地（中壤土/轻壤土/粘土/砂壤土/砂土）",
+         "text", None, 20, "中壤土"),
+        ("organic_matter", "有机质含量（%）", "number", r'^\d+(\.\d+)?$', 6, "0.8"),
+        ("landform", "地貌部位（平地/岗坡地/坡地）", "text", None, 10, "平地"),
+        ("irrigation_guarantee", "灌溉保证程度（充分满足/一般满足/无灌溉系统）",
+         "text", None, 20, "一般满足"),
+        ("irrigation_method", "灌溉方式（喷灌/滴灌/地面灌溉/天然降水）",
+         "text", None, 10, "地面灌溉"),
+        ("drainage_condition", "排水条件（健全/一般/无）", "text", None, 10, "一般"),
+        ("road_access", "道路通达性（良好/一般/较差）", "text", None, 10, "良好"),
+        ("field_flatness", "田块平整度（非常平坦/比较平坦/高低不平）",
+         "text", None, 20, "比较平坦"),
         # 🔴 服务年限是方案口径，不是算出来的：人工稿（井神 11.2）是
         #    「占用 24 个月 + 复垦 6 个月 + 管护 6 个月 = 36 个月」，
         #    而系统默认按明远样本取 30。材料里没有时必须问，不能默认替业主定。
@@ -305,6 +334,10 @@ RECLAMATION_CARD_KEYS: List[str] = [
     # 复垦方向
     "reclamation_direction", "damage_type", "damage_degree", "suitability_grade",
     "topsoil_thickness", "reclamation_target",
+    # 适宜性评价因子（表4-9 用；可研/勘测抽取 → 弹窗 → Excel）
+    "slope_grade", "effective_soil_depth_cm", "soil_texture", "organic_matter",
+    "landform", "irrigation_guarantee", "irrigation_method",
+    "drainage_condition", "road_access", "field_flatness",
     # 工程量与钱
     "earthwork_volume", "unit_price", "construction_cost", "other_cost",
     "monitor_care_cost", "reserve_cost", "investment_summary",

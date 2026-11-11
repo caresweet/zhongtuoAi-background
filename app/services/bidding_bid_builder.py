@@ -2072,19 +2072,24 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                          width_cm=_imgw["financial_cm"])
             return
         if "财务" in t:
-            _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",)],
-                         caption="上一年度财务报表",
+            # 「上一年度财务报表」= 上一年度审计报告及其后的资产负债表/利润表/
+            # 现金流量表等（公司档案里整套扫描件按「年度审计报告 第N页」命名），
+            # 再附前一年度的审计意见。人工稿第2项也是这套材料。
+            _pages = [(f"2025年度审计报告 第{i}页",) for i in range(1, 14)]
+            _asset_block(doc, "2025年度审计报告", _pages,
+                         caption="2025年度审计报告及财务报表",
                          width_cm=_imgw["financial_cm"])
+            _asset_block(doc, "2024年度财务报告",
+                         [("2024年度财务报告",)],
+                         caption="2024年度审计报告", width_cm=_imgw["financial_cm"])
             return
         if "税收" in t or "社会保障" in t or "社保" in t:
+            # 人工稿顺序：先社保证明（2 页），再税收证明（1 页）
+            _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)],
+                         caption="依法缴纳社会保障资金证明",
+                         width_cm=_imgw["screenshot_cm"])
             _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)],
                          caption="依法缴纳税收证明",
-                         width_cm=_imgw["screenshot_cm"])
-            _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)],
-                         caption="社会保障资金证明",
-                         width_cm=_imgw["screenshot_cm"])
-            _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
-                         caption="社会保险权益记录单",
                          width_cm=_imgw["screenshot_cm"])
             return
         if "设备" in t and "专业技术能力" in t:
@@ -2296,6 +2301,10 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                    indent=False, name="仿宋")
                 for nm, data in imgs[:6]:
                     _img(doc, data, style["images"]["cert_cm"], nm)
+    # 人员证书后附社保权益记录单（人工稿第七章也有这套参保材料）
+    _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                 caption="江苏省社会保险权益记录单",
+                 width_cm=style["images"]["financial_cm"])
 
     # ── 八、盐都区政府采购事前信用承诺书 ──
     _new_section(doc, False)

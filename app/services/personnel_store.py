@@ -73,6 +73,7 @@ def ensure_tables() -> None:
             certs             TEXT DEFAULT '[]',
             cert_no           TEXT DEFAULT '',
             has_wenshen_cert  INTEGER DEFAULT 0,
+            is_active         INTEGER NOT NULL DEFAULT 1,
             sort_order        INTEGER DEFAULT 0,
             company_id        INTEGER NOT NULL DEFAULT 1,
             updated_at        TEXT DEFAULT '',
@@ -141,6 +142,12 @@ def _migrate_personnel_company() -> None:
         if _table_sql("company_personnel") and "cert_no" not in _cols("company_personnel"):
             c.execute("ALTER TABLE company_personnel ADD COLUMN cert_no TEXT DEFAULT ''")
             logger.warning("人员库迁移：company_personnel 加 cert_no 列")
+
+        # ── company_personnel.is_active：离职人员不能再出现在投标人员表里 ──
+        #    业主 2026-11-11：「部分人员其实都已经离职了就不能出现在报告上」。
+        if _table_sql("company_personnel") and "is_active" not in _cols("company_personnel"):
+            c.execute("ALTER TABLE company_personnel ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+            logger.warning("人员库迁移：company_personnel 加 is_active 列")
 
         # 索引**无论新旧库都要建**（新库的建表脚本里已不再包含它们）
         c.execute("CREATE INDEX IF NOT EXISTS idx_cpi_company ON company_personnel_images(company_id)")
@@ -449,6 +456,7 @@ def personnel_for(names: Optional[List[str]], company_id: Optional[int]) -> List
                 "拟任角色": r["role"],
                 "执业资格证书": json.loads(r["certs"] or "[]"),
                 "has_wenshen_cert": bool(r["has_wenshen_cert"]),
+                "is_active": bool(r["is_active"]) if "is_active" in r.keys() else True,
                 "_id": r["id"],
             })
         # 按用户勾选顺序返回

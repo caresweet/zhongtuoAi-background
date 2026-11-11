@@ -54,6 +54,13 @@ async def analyze_tender(
     except Exception:
         people = []
 
+    # 法定代表人固定取公司档案（陈春），被授权人由前端询问（其他都不固定）
+    from app.services.bidding_bid_builder import _asset_texts, _auth_fields
+    from app.services.company_service import load_company
+    company = await load_company(company_id) or {}
+    af = _auth_fields(_asset_texts(str(company.get("name") or "")),
+                      company=company)
+
     max_price = req.get("max_price_wan") or req.get("budget_wan") or ""
     return ApiResponse(
         message="招标文件解析完成",
@@ -63,6 +70,9 @@ async def analyze_tender(
             "requirements": req,
             "personnel": people,
             "company_id": company_id,
+            # 授权代表：前端弹窗询问（可改）
+            "agent_name": af.get("agent") or "",
+            "legal_name": af.get("legal") or "",
             # 报价交互：前端据此弹窗询问
             "need_price": True,
             "max_price_wan": max_price,
@@ -80,6 +90,7 @@ class BidGenerateRequest(BaseModel):
     seed: Optional[int] = None
     use_llm: bool = True
     personnel: Optional[List[Dict[str, Any]]] = None
+    agent_name: str = ""
 
 
 @router.post("/generate", response_model=ApiResponse)
@@ -105,7 +116,8 @@ async def generate_bid(request: BidGenerateRequest):
         await build_bid_document(
             tender_path=tender, company_id=request.company_id,
             price_wan=request.price_wan, out_path=out, seed=request.seed,
-            personnel=request.personnel, use_llm=request.use_llm)
+            personnel=request.personnel, use_llm=request.use_llm,
+            agent_name=request.agent_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"投标文件生成失败：{e}")
 

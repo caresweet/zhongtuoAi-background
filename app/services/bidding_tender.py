@@ -445,11 +445,13 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
     _cert_col = "cert_no" if "cert_no" in _cols else "''"
     _id_col = "id_no" if "id_no" in _cols else "''"
     _tel_col = "phone" if "phone" in _cols else "''"
+    # 离职人员（is_active=0）一律不进投标人员表（业主 2026-11-11）
+    _active_sql = " and coalesce(is_active,1)=1" if "is_active" in _cols else ""
     rows = conn.execute(
         f"select id,name,gender,age,education,major,title,certs,{_cert_col},"
         f"{_id_col},{_tel_col} "
         "from company_personnel "
-        "where company_id=? order by sort_order,id", (company_id,)).fetchall()
+        f"where company_id=?{_active_sql} order by sort_order,id", (company_id,)).fetchall()
     try:
         _img_ids = {r[0] for r in conn.execute(
             "select distinct personnel_id from company_personnel_images")}
@@ -481,9 +483,12 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
                           if any(k in str(p["major"] or "") for k in ("土地", "测绘"))]
     if not leaders:
         return []
-    # 负责人优先带注册测绘师（评审加分/资格要求里常点名）
+    # 负责人优先带注册测绘师（评审加分/资格要求里常点名）；同等条件下优先
+    # **证书图片齐全**的（投标文件要贴职称/注册测绘师证书，缺图就得空着）。
     _cert_leaders = [p for p in leaders
                      if any("注册测绘师" in str(c) for c in (p.get("certs") or []))]
+    _cert_leaders = ([p for p in _cert_leaders if p.get("has_img")]
+                     or _cert_leaders)
     chosen = [rng.choice(_cert_leaders or leaders)]
     chosen[0]["role"] = "项目负责人"
 

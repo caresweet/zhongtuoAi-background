@@ -12,7 +12,9 @@
   · 正文 宋体 14 磅、首行缩进 0.87cm、固定行距 25 磅
   · 表格 宋体 12 磅、表头加粗
   · 目录 宋体 20 磅标题 + 14 磅条目、33 磅行距
-  · 身份证/证书类图片宽 7.5cm，截图 15.8cm，财务报表 16cm
+  · 身份证 7.3cm；资质/职称证书、信用截图 15.8cm；财务报表 16cm；
+    营业执照横放扫描件 20.98cm 并旋转 90°（人工稿整页竖排）
+  · 资格检查表/商务偏离表的列宽与行高见 checklist / commerce
 """
 from __future__ import annotations
 
@@ -35,12 +37,19 @@ DEFAULT_STYLE: Dict[str, Any] = {
     "heading3": {"font": "宋体", "size": 15, "bold": True, "align": "left"},
     "body": {"font": "宋体", "size": 14, "first_line_cm": 0.87, "line_pt": 25},
     "table": {"font": "宋体", "size": 12, "header_bold": True},
+    # 资格性和符合性检查响应对照表（列宽取招标模板，行高保证不挤）
+    "checklist": {"widths": [1.14, 9.3, 3.27, 3.15],
+                  "header_row_cm": 1.55, "row_cm": 1.75},
+    # 商务条款响应及偏离表（列宽取人工稿，行高把版面撑满但留出签字位）
+    "commerce": {"widths": [2.71, 5.87, 2.43, 5.16],
+                 "header_row_cm": 1.1, "row_cm": 1.75},
     "toc": {"title": "投标主要文件目录", "title_font": "宋体", "title_size": 20,
             "title_bold": True,
             "entry_font": "宋体", "entry_size": 14, "line_pt": 33,
             "show_page_numbers": False},
-    "images": {"id_card_cm": 7.0, "cert_cm": 7.5, "screenshot_cm": 15.8,
-               "financial_cm": 16.0},
+    "images": {"id_card_cm": 7.3, "cert_cm": 15.8, "screenshot_cm": 15.8,
+               "financial_cm": 16.0, "license_cm": 20.98,
+               "rotate_license": True},
 }
 
 _CACHE: Dict[str, Any] = {}

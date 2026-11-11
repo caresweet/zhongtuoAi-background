@@ -188,6 +188,7 @@ async def list_personnel(
             "certs": p.get("执业资格证书", []),
             "default_role": p.get("拟任角色", "项目组成员"),
             "has_wenshen_cert": bool(p.get("has_wenshen_cert")),
+            "is_active": p.get("is_active", True),
             "cert_images": img_cache[name],
             "cert_image_count": len(img_cache[name]),
         })
@@ -223,6 +224,7 @@ _ROSTER_COLUMN_MAP = {
     "职称": "职称", "职务": "职称", "职称/职务": "职称",
     "拟任角色": "拟任角色", "角色": "拟任角色",
     "执业资格证书": "执业资格证书", "证书": "执业资格证书",
+    "在职状态": "在职状态", "是否在职": "在职状态", "状态": "在职状态",
 }
 
 
@@ -329,17 +331,20 @@ async def import_personnel(
             c.execute(
                 "INSERT INTO company_personnel "
                 "(name, gender, age, education, major, title, role, certs, "
-                " has_wenshen_cert, sort_order, company_id, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
+                " has_wenshen_cert, is_active, sort_order, company_id, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now')) "
                 "ON CONFLICT(name, company_id) DO UPDATE SET "
                 "gender=excluded.gender, age=excluded.age, education=excluded.education, "
                 "major=excluded.major, title=excluded.title, role=excluded.role, "
                 "certs=excluded.certs, has_wenshen_cert=excluded.has_wenshen_cert, "
+                "is_active=excluded.is_active, "
                 "updated_at=excluded.updated_at",
                 (r["姓名"], r.get("性别", ""), r.get("年龄", ""), r.get("学历", ""),
                  r.get("专业", ""), r.get("职称", ""),
                  r.get("拟任角色") or "项目组成员", json.dumps(certs, ensure_ascii=False),
-                 1 if any("培训" in x for x in certs) else 0, i, user.company_id),
+                 1 if any("培训" in x for x in certs) else 0,
+                 0 if str(r.get("在职状态") or "").strip() in ("离职", "否", "0", "已离职") else 1,
+                 i, user.company_id),
             )
             added += 1
         c.commit()
@@ -452,6 +457,11 @@ async def update_personnel(
             sets += ["certs = ?", "has_wenshen_cert = ?"]
             params += [json.dumps(certs, ensure_ascii=False),
                        1 if any("培训" in x for x in certs) else 0]
+
+        if "is_active" in payload or "在职" in payload:
+            _v = payload.get("is_active", payload.get("在职"))
+            _v = 0 if str(_v).strip().lower() in ("0", "false", "否", "离职") else 1
+            sets.append("is_active = ?"); params.append(_v)
 
         if not sets:
             return ApiResponse(message="没有需要修改的字段")

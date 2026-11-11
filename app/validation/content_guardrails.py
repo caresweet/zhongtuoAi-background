@@ -1396,7 +1396,8 @@ def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
     ch13 = chapters.get(13) or chapters.get("13")
     if not isinstance(ch11, dict) or not isinstance(ch13, dict):
         return 0
-    items = _ch11_items(str(ch11.get("markdown") or ""))
+    md11 = str(ch11.get("markdown") or "")
+    items = _ch11_items(md11)
     if len(items) < 3:
         return 0
     md = str(ch13.get("markdown") or "")
@@ -1406,7 +1407,10 @@ def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
                   and "防范化解措施" in ln), None)
 
     def _norm(s: str) -> str:
-        return re.sub(r'(方面的风险|引发的风险|环境影响|的风险|风险|方面|的)', '', s)
+        # 🔴 不要剥「环境影响」：它是「水系」类风险的主体词组，
+        #    剥掉后「周边水系及环境影响」只剩「周边水系及」，与
+        #    「控制施工及环境影响」小节标题的二字组完全对不上（实测配错措施）。
+        return re.sub(r'(方面的风险|引发的风险|的风险|风险|方面|的)', '', s)
 
     # 本章小节：标题 → 正文（新增风险的措施来源）
     _secs = []
@@ -1423,16 +1427,66 @@ def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
                     body.append(s)
             _secs.append((m.group(1).strip(), " ".join(body)))
 
+    def _bigrams(s: str) -> set:
+        s = re.sub(r'\s+', '', s)
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+
+    def _core(s: str) -> set:
+        return _bigrams(_norm(s))
+
+    def _pick_sentence(body: str, core: set) -> str:
+        """小节正文里挑与本风险最相关的一句（二字组命中最多，其次取第一句）。"""
+        sents = [s.strip() for s in re.split(r'[。；]', body) if s.strip()]
+        if not sents:
+            return ""
+        best, score = sents[0], -1
+        for s in sents:
+            ov = len(core & _bigrams(s))
+            if ov > score:
+                best, score = s, ov
+        return best[:80]
+
     def _measure_for(name: str) -> str:
-        core = set(_norm(name))
+        """第11章有、表里没有对应行时的措施：先本章对应小节，再第11章风险分析。
+
+        匹配用**二字组**而不是单字：「征收决策实施」与各小节正文几乎每句都有
+        「征收」，按单字重叠会随便挑中一段（实测把资金句配给了舆论媒体）。
+        """
+        core = _core(name)
+        # ① 小节标题的二字组（最可靠）
         best, score = "", 0
         for title, body in _secs:
-            ov = len(core & set(title + body))
+            ov = len(core & _bigrams(title))
             if ov > score:
                 best, score = body, ov
-        if not best:
+        if score >= 2:
+            return _pick_sentence(best, core)
+        # ② 小节正文的二字组（至少 3 个才敢用）
+        best, score = "", 0
+        for title, body in _secs:
+            ov = len(core & _bigrams(body))
+            if ov > score:
+                best, score = body, ov
+        if score >= 3:
+            return _pick_sentence(best, core)
+        # ③ 本章没有对应小节（如「征收决策实施」未单列）→ 取第11章该风险的
+        #    「风险分析」段里**措施性**的一句，绝不凭空编
+        idx = md11.find(name)
+        if idx < 0:
             return ""
-        return re.split(r'[。；]', best.strip())[0][:80]
+        seg = md11[idx: idx + 900]
+        m = re.search(r'风险分析[：:]\s*([\s\S]{0,400})', seg)
+        if not m:
+            return ""
+        body = m.group(1)
+        _sents = [s.strip() for s in re.split(r'[。；]', body) if s.strip()]
+        # 优先「应/须/将/建立/落实」这类措施句，排除纯回顾（「已于…发布」）
+        for s in _sents:
+            if any(k in s for k in ("应", "须", "将", "建立", "落实", "完善",
+                                    "专人", "台账", "制度", "宣传", "引导")) \
+                    and not s.startswith("已"):
+                return s[:80]
+        return _sents[0][:80] if _sents else ""
 
     # 🔴 模型这一版**没写**「风险防范与化解措施汇总表」时，不硬造一张：
     #    本章没有对应措施小节的风险（如舆论媒体）就没有措施可引，
@@ -1465,6 +1519,18 @@ def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
              and cs[org_ci]]
     common_org = max(set(_orgs), key=_orgs.count) if _orgs else ""
 
+    # 同义主题：第11章叫「舆论媒体风险」，第13章措施小节/行常写「信访及舆情」
+    _TOPIC_ALIASES = {
+        "舆论": ("舆情", "信访", "媒体", "网络", "宣传"),
+        "媒体": ("舆情", "信访", "媒体", "网络"),
+    }
+
+    def _topic_match(b: str, a: str) -> bool:
+        for base, alts in _TOPIC_ALIASES.items():
+            if base in b and any(k in a for k in alts):
+                return True
+        return False
+
     new_rows, used = [], set()
     for i, (name, _lv) in enumerate(items, 1):
         b = _norm(name)
@@ -1473,7 +1539,7 @@ def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
             if k in used:
                 continue
             a = _norm(cs[name_ci])
-            if a == b or (a in b or b in a) or \
+            if a == b or (a in b or b in a) or _topic_match(b, a) or \
                     difflib.SequenceMatcher(None, a, b).ratio() >= 0.8:
                 matched, used_k = cs, k
                 break

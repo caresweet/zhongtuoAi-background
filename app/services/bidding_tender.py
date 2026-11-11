@@ -373,6 +373,20 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
             if len(credit_pledge) >= 15:
                 break
 
+    # ── 拟派人员的社保要求 ──
+    # 有的招标文件要求「项目负责人/技术人员」提供社保缴纳证明，有的只要求公司
+    # 整体的税收社保材料（资格文件）。两者不能混：前者要挑**参保的人**，
+    # 后者只要公司证明。业主 2026-11-11：「根据招标文件中的人员要求……交社保」。
+    _si_kw = r'(?:社保|社会保险|社会保障)'
+    _person_kw = (r'(?:项目负责人|技术负责人|项目组|技术人员|拟派人员|'
+                  r'配置人员|投入人员|项目管理人员)')
+    personnel_si = bool(
+        re.search(_person_kw + r'[^。；\n]{0,60}' + _si_kw, blob)
+        or re.search(_si_kw + r'[^。；\n]{0,60}' + _person_kw, blob)
+    )
+    si_months = grab(r'(?:近|最近)\s*([一二三四五六七八九十\d]{1,3})\s*个月'
+                     r'[^。；\n]{0,12}' + _si_kw)
+
     return {
         "source": str(path),
         "project_name": project_name,
@@ -401,6 +415,8 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "qual_files": qual_files,
         "sme_industry": _sme_industry,
         "credit_pledge": credit_pledge,
+        "personnel_social_insurance": personnel_si,
+        "social_insurance_months": si_months,
         "text_chars": len(text),
     }
 
@@ -428,11 +444,16 @@ def _major_ok(major: str, fields=("土地", "测绘", "规划", "国土", "地�
 
 
 def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int = 3,
-                         seed: Optional[int] = None) -> List[Dict[str, Any]]:
+                         seed: Optional[int] = None,
+                         require_insured: bool = False) -> List[Dict[str, Any]]:
     """按招标最低配置从公司人员库**随机**抽人。
 
     负责人：土地类/测绘类高级及以上优先，其次任意高级；
     组员：土地/测绘/规划/国土相关专业，职称不限（优先中级及以上）。
+
+    🔴 `require_insured`：招标文件要求拟派人员提供社保时，只从**最近一个月社保
+       参保名单**里的人里抽（外部人员/未参保的人就不能上）；招标文件没要求时
+       外部人员偶尔可用。
     """
     import json
     import sqlite3
@@ -460,6 +481,22 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
             "where category in ('注册测绘师','职称证书','执业资格证书')")}
     except Exception:
         _img_ids = set()
+    # 最近一个月的参保名单（招标要求人员社保时用来筛人）
+    _insured: set = set()
+    _latest_period = ""
+    if require_insured:
+        try:
+            _r = conn.execute(
+                "select max(period) from company_social_insurance "
+                "where company_id=?", (company_id,)).fetchone()
+            _latest_period = str((_r[0] if _r else "") or "")
+            if _latest_period:
+                _insured = {str(x[0]) for x in conn.execute(
+                    "select distinct person_name from company_social_insurance "
+                    "where company_id=? and period=? and person_name<>''",
+                    (company_id, _latest_period))}
+        except Exception:
+            pass
     conn.close()
     people = [{"id": r[0], "name": r[1], "gender": r[2], "age": r[3], "education": r[4],
                "major": r[5], "title": r[6],
@@ -475,6 +512,8 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
         if k not in _best or score > _best[k][0]:
             _best[k] = (score, p)
     people = [v for _sc, v in _best.values()]
+    if require_insured and _insured:
+        people = [p for p in people if p["name"] in _insured]
     rng = random.Random(seed)
 
     # 负责人评分只认「土地类或测绘类」高级职称（规划类只算组员分）
@@ -498,9 +537,12 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
     pool = [p for p in people if p not in chosen]
     mid = [p for p in pool if _title_rank(p["title"]) >= 1 and _major_ok(p["major"])]
     # 组员优先「本专业 + 有证书图片/身份证号」的（投标文件要贴证书、社保材料）；
-    # 这类人够数就只在其中抽，否则退回中级职称池
-    _rich = [p for p in pool if _major_ok(p["major"])
-             and (p.get("has_img") or p.get("id_no"))]
+    # 🔴 先只要**有证书图片**的人：只补了身份证号的人（法人、行政）不能被抽成组员
+    #    去顶替持证人员（实测 2026-11-11：陈春补了身份证号后把刘倩挤掉了）。
+    _rich = [p for p in pool if _major_ok(p["major"]) and p.get("has_img")]
+    if len(_rich) < members:
+        _rich = [p for p in pool if _major_ok(p["major"])
+                 and (p.get("has_img") or p.get("id_no"))]
     pool = (_rich if len(_rich) >= members
             else mid or [p for p in pool if _major_ok(p["major"])] or pool)
     pool = sorted(pool, key=lambda x: (not x.get("has_img"),

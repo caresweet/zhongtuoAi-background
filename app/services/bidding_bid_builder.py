@@ -866,6 +866,35 @@ def _asset_images(*keywords: str, limit: int = 12) -> List[Tuple[str, bytes]]:
     return out
 
 
+def _social_insurance_images(company_id: int, limit: int = 8
+                             ) -> List[Tuple[str, bytes]]:
+    """最近月份的公司社保材料扫描件（业主每月导入 → company_social_insurance）。"""
+    out: List[Tuple[str, bytes]] = []
+    try:
+        c = sqlite3.connect(str(KB))
+        rows = c.execute(
+            "select period, image_path from company_social_insurance "
+            "where company_id=? and image_path<>'' "
+            "order by period desc, id", (company_id,)).fetchall()
+        c.close()
+    except Exception:
+        return out
+    _period = ""
+    for period, path in rows:
+        # 只取最近一个月的材料，避免把历史月份全塞进投标文件
+        if _period and period != _period:
+            break
+        _period = period or _period
+        p = Path(str(path or ""))
+        if not p.is_absolute():
+            p = BACKEND / p
+        if p.exists():
+            out.append((p.name, p.read_bytes()))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _person_images(personnel_id: int) -> List[Tuple[str, bytes]]:
     """某人**招标要求的那类证书**（职称/注册测绘师/执业资格），不要培训证书。
 
@@ -1524,7 +1553,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
          if str(v).isdigit()] + [3])
     _members_n = max(_staff_min, 5)
     people = personnel or select_bid_personnel(
-        company_id=company_id, seed=seed, members=_members_n)
+        company_id=company_id, seed=seed, members=_members_n,
+        require_insured=bool(tender.get("personnel_social_insurance")))
     texts = _asset_texts(co_name)
     small, big = _price_text(price_wan)
     _total_yuan = int(round(float(price_wan) * 10000))
@@ -2005,9 +2035,12 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
 
     tender = parse_tender(tender_path)
     co_name = company_name(company_id) or "投标人"
+    # 招标文件是否要求拟派人员提供社保（决定选人范围和是否附参保证明）
+    person_si = bool(tender.get("personnel_social_insurance"))
     people = personnel or select_bid_personnel(
         company_id=company_id, seed=seed,
-        members=max(int((tender.get("staff_min") or {}).get("项目组成员") or 3), 3))
+        members=max(int((tender.get("staff_min") or {}).get("项目组成员") or 3), 3),
+        require_insured=person_si)
     texts = _asset_texts(co_name)
     af = _auth_fields(texts, company=company,
                       agent_name=agent_name or str(
@@ -2267,11 +2300,19 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                                  break_after=False, break_before_first=True)
             return
         if "税收" in t or "社会保障" in t or "社保" in t:
-            # 人工稿顺序：先社保证明，再税收证明。按**材料名关键词**取最新一套，
-            # 不写死某年某月（不同项目/不同时间的证明月份会变）。
-            _asset_block(doc, "社保", [("依法社会保障资金证明",)],
-                         caption="依法缴纳社会保障资金证明",
-                         width_cm=_imgw["screenshot_cm"], break_after=False)
+            # 人工稿顺序：先社保证明，再税收证明。社保优先用**每月导入的最新材料**
+            # （单位权益记录单=人员参保信息），没有再退回公司档案里的证明。
+            _si_imgs = _social_insurance_images(company_id)
+            if _si_imgs:
+                _cp = _p(doc, "依法缴纳社会保障资金证明", bold=False,
+                         indent=False)
+                for _i2, (_nm2, _data2) in enumerate(_si_imgs):
+                    _img(doc, _data2, _imgw["screenshot_cm"],
+                         page_break_before=(_i2 > 0))
+            else:
+                _asset_block(doc, "社保", [("依法社会保障资金证明",)],
+                             caption="依法缴纳社会保障资金证明",
+                             width_cm=_imgw["screenshot_cm"], break_after=False)
             _asset_block(doc, "税收", [("依法缴纳税收证明",)],
                          caption="依法缴纳税收证明",
                          width_cm=_imgw["screenshot_cm"], break_after=False,
@@ -2506,10 +2547,20 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                    indent=False, name="仿宋")
                 for nm, data in imgs[:6]:
                     _img(doc, data, style["images"]["cert_cm"], nm)
-    # 人员证书后附社保权益记录单（人工稿第七章也有这套参保材料）
-    _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
-                 caption="江苏省社会保险权益记录单",
-                 width_cm=style["images"]["financial_cm"])
+    # 人员社保：**只有招标文件要求拟派人员社保时**才附（业主 2026-11-11：
+    # 「根据招标文件中的人员要求……交社保」）。优先用每月导入的社保材料，
+    # 没有月度材料时退回公司档案里的社保权益记录单。
+    if person_si:
+        _si_imgs = _social_insurance_images(company_id)
+        if _si_imgs:
+            _p(doc, "拟派人员社会保险缴纳证明", size=12, bold=True,
+               align="center", indent=False, name="仿宋")
+            for _nm, _data in _si_imgs:
+                _img(doc, _data, style["images"]["screenshot_cm"])
+        else:
+            _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                         caption="拟派人员社会保险缴纳证明",
+                         width_cm=style["images"]["financial_cm"])
 
     # ── 八、盐都区政府采购事前信用承诺书 ──
     _new_section(doc, False)

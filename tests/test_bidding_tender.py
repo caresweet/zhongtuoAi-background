@@ -403,3 +403,25 @@ async def test_compact_bid_follows_tender_format(tmp_path):
                  if "资格性和符合性检查响应内容" in " ".join(c.text for c in t.rows[0].cells))
     page_cell = check.rows[1].cells[-1].text.strip()
     assert page_cell.isdigit()
+
+
+def test_personnel_social_insurance_detection(tmp_path):
+    """招标要求「项目负责人/技术人员」社保时才识别；只要求公司税收社保材料不算。"""
+    from docx import Document
+    from app.services.bidding_tender import parse_tender
+
+    d = Document()
+    d.add_paragraph("项目名称：测试社保要求项目")
+    d.add_paragraph("项目负责人须提供近3个月社保缴纳证明，技术人员应为本单位参保人员。")
+    p = tmp_path / "si.docx"
+    d.save(str(p))
+    t = parse_tender(p)
+    assert t["personnel_social_insurance"] is True
+    assert t["social_insurance_months"] == "3"
+
+    d2 = Document()
+    d2.add_paragraph("项目名称：测试公司社保材料项目")
+    d2.add_paragraph("文件3 依法缴纳税收和社会保障资金的相关材料（复印件加盖公章）。")
+    p2 = tmp_path / "si2.docx"
+    d2.save(str(p2))
+    assert parse_tender(p2)["personnel_social_insurance"] is False

@@ -93,6 +93,21 @@ def ensure_tables() -> None:
             UNIQUE(personnel_id, image_name)
         );
         CREATE INDEX IF NOT EXISTS idx_cpi_pid ON company_personnel_images(personnel_id);
+        -- 每月社保参保信息（业主每月提供）：人员名单 + 社保证明扫描件
+        CREATE TABLE IF NOT EXISTS company_social_insurance (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id    INTEGER NOT NULL DEFAULT 1,
+            period        TEXT NOT NULL,
+            person_name   TEXT DEFAULT '',
+            id_no         TEXT DEFAULT '',
+            image_path    TEXT DEFAULT '',
+            mime_type     TEXT DEFAULT '',
+            source        TEXT DEFAULT '',
+            created_at    TEXT DEFAULT '',
+            UNIQUE(company_id, period, person_name, image_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_csi_company_period
+            ON company_social_insurance(company_id, period);
         """)
         c.commit()
     except Exception as e:

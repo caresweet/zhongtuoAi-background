@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sqlite3
 import sys
@@ -101,8 +103,43 @@ def main() -> int:
     if ids.get("刘倩"):
         con.execute("update company_personnel set title='助理工程师', certs=? where id=?",
                     ('["助理工程师"]', ids["刘倩"]))
+
+    # ── 人工稿里出现、库中还没有的人：张红艳（授权委托书受托人）、钟亚峰（授权代表）
+    #    业主 2026-11-11：「我提供给你的资料和人员都要放入数据库中」。
+    for name, id_no, phone in (("张红艳", "320829198709070629", "15949194424"),
+                               ("钟亚峰", "3208821991111205636", "")):
+        con.execute(
+            "insert into company_personnel "
+            "(name, role, id_no, phone, company_id, updated_at) "
+            "values (?,?,?,?,?,datetime('now')) "
+            "on conflict(name, company_id) do update set "
+            "id_no=excluded.id_no, "
+            "phone=coalesce(nullif(excluded.phone,''), company_personnel.phone), "
+            "updated_at=excluded.updated_at",
+            (name, "项目组成员", id_no, phone, COMPANY_ID))
+    # 法人陈春的身份证号（取自身份证扫描件）
+    con.execute("update company_personnel set id_no='320828197512040011' "
+                "where company_id=? and name='陈春'", (COMPANY_ID,))
+
+    # ── 身份证正反面 → asset_images（投标授权书要用；已有同名图就跳过）
+    for rid, iname in (("rId26", "陈春 身份证正面（人像面）"),
+                       ("rId27", "陈春 身份证反面（国徽面）"),
+                       ("rId28", "钟亚峰 身份证正面（人像面）"),
+                       ("rId29", "钟亚峰 身份证反面（国徽面）")):
+        if con.execute("select 1 from asset_images where image_name=?",
+                       (iname,)).fetchone():
+            continue
+        part = rels[rid].target_part
+        con.execute(
+            "insert into asset_images "
+            "(image_name, category, image_data, mime_type, source_file, is_active) "
+            "values (?,?,?,?,?,1)",
+            (iname, "证件", base64.b64encode(part.blob).decode(),
+             "image/png", "expert_bid"))
+        print("新增身份证图", iname)
+
     con.commit()
-    print("完成：证书图片与证书编号已入库")
+    print("完成：证书图片、身份证图与人员已入库")
     return 0
 
 

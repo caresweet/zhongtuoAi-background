@@ -50,6 +50,17 @@ class Company(Base):
     leader_name = Column(String(100), nullable=True, default="")
     leader_title = Column(String(100), nullable=True, default="")
 
+    # 投标文件用：开户行/账号、办公电话、中小企业声明数据（2026-11-11 从人工投标
+    # 文件《投标文件-众拓测绘-佳富村》导入。招标文件要求这些栏目必须填写，
+    # 以前系统没有落点，投标函和中小企业声明函只能印「/」「______」）。
+    bank_name = Column(String(120), nullable=True, default="")
+    bank_account = Column(String(60), nullable=True, default="")
+    office_phone = Column(String(40), nullable=True, default="")
+    employee_count = Column(String(20), nullable=True, default="")
+    annual_revenue_wan = Column(String(30), nullable=True, default="")
+    total_assets_wan = Column(String(30), nullable=True, default="")
+    enterprise_type = Column(String(20), nullable=True, default="")
+
     status = Column(String(20), nullable=False, default="active")  # active, disabled
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)

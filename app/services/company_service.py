@@ -33,6 +33,9 @@ _COMPANY_FIELDS = (
     "qualification_no", "phone", "address", "contact",
     # 🔴 评审表「稳评实施单位·负责人 / 职务」—— 按公司走（每家负责人不同）
     "leader_name", "leader_title",
+    # 投标文件用（银行账户 / 办公电话 / 中小企业声明数据），2026-11-11 新增
+    "bank_name", "bank_account", "office_phone",
+    "employee_count", "annual_revenue_wan", "total_assets_wan", "enterprise_type",
 )
 
 

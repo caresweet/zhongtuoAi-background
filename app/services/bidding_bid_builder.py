@@ -71,8 +71,10 @@ def _h(doc, text: str, level=1, *, toc=True, size=None, font=None):
     """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Pt
-    # 一级标题挂 Heading 1，供目录域抓取；服务方案里的分章不挂（目录只列 8 个部分）
-    style = "Heading 1" if (level == 1 and toc) else None
+    # 一级标题挂 Heading 1（目录域抓取）；二/三级挂 Heading 2/3（版式统一用）
+    style = ("Heading 1" if (level == 1 and toc)
+             else "Heading 2" if level == 2 else
+             "Heading 3" if level == 3 else None)
     p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.space_before = Pt(10 if level == 1 else 6)
@@ -179,10 +181,11 @@ def _fill_scoring_pages(d, pages: Dict[str, int], anchors=None) -> None:
         _set_font(r, name="仿宋", size=14)
 
 
-def _stamp_toc(path, titles=None, anchors=None) -> bool:
+def _stamp_toc(path, titles=None, anchors=None, style=None) -> bool:
     """把目录域换成**带真实页码的静态条目**（用 LibreOffice 分页）。
 
     titles 默认丁蜀镇八件套；简式投标文件传入自己的目录。
+    目录条目的字体/行距/是否带页码取公司体例（`style["toc"]`）。
     只在机器上有 soffice 时执行；失败就保留目录域，不影响出报告。
     """
     titles = list(titles or _BID_TOP_TITLES)
@@ -191,6 +194,9 @@ def _stamp_toc(path, titles=None, anchors=None) -> bool:
     import subprocess
     import tempfile
     from pathlib import Path as _P
+    _ts = ((style or {}).get("toc") or {}) if style else {
+        "entry_font": "黑体", "entry_size": 14, "line_pt": 31.2,
+        "show_page_numbers": True}
     soffice = _sh.which("soffice")
     if not soffice:
         return False
@@ -215,11 +221,20 @@ def _stamp_toc(path, titles=None, anchors=None) -> bool:
             raw_lines = [ln.strip() for ln in src[i].get_text().splitlines()]
             lines = set(raw_lines) | {ln.replace(" ", "").replace("　", "")
                                       for ln in raw_lines}
+            _anchor_set = set(anchors)
+            _norm_page = "".join(raw_lines).replace(" ", "").replace("　", "")
             for title in _wanted:
-                if title in _found:
-                    continue
-                if title in lines or title.replace(" ", "") in lines:
-                    _found[title] = i          # 页码从 0 起，封面隐藏
+                if title not in _anchor_set and title in _found:
+                    continue          # 目录标题取**首次**出现
+                hit = (title in lines or title.replace(" ", "") in lines)
+                if not hit:
+                    # 长标题在 PDF 里会折行（「文件5」与正文可能落在两行）：
+                    # 去空格后取前 12 字，在**整页拼起来的文本**里找
+                    _key = title.replace(" ", "").replace("　", "")[:12]
+                    hit = bool(_key) and _key in _norm_page
+                if hit:
+                    # 文件锚点取**最后一次**出现（前面的目录/检查表也印着同样的文字）
+                    _found[title] = i
         src.close()
         pages = {t: _found[t] for t in titles if t in _found}
         anchor_pages = {t: _found[t] for t in anchors if t in _found}
@@ -242,12 +257,15 @@ def _stamp_toc(path, titles=None, anchors=None) -> bool:
             for q, title in zip(_existing, titles):
                 for r in list(q.runs):
                     r._element.getparent().remove(r._element)
-                r = q.add_run(f"{title}\t{pages[title]}")
-                _set_font(r, name="黑体", size=14, bold=False)
+                _num = (f"\t{pages[title]}"
+                        if _ts.get("show_page_numbers") else "")
+                r = q.add_run(f"{title}{_num}")
+                _set_font(r, name=_ts.get("entry_font") or "宋体",
+                          size=_ts.get("entry_size") or 14, bold=False)
                 q.paragraph_format.space_after = Pt(0)
-                q.paragraph_format.line_spacing = Pt(31.2)
+                q.paragraph_format.line_spacing = Pt(_ts.get("line_pt") or 33)
             _fill_scoring_pages(d, anchor_pages, anchors)
-            _fill_page_tokens(d, pages)
+            _fill_page_tokens(d, {**pages, **anchor_pages})
             d.save(str(path))
             return True
         nxt = ph._p.getnext()
@@ -257,15 +275,20 @@ def _stamp_toc(path, titles=None, anchors=None) -> bool:
             q = (anchor.insert_paragraph_before() if anchor is not None
                  else ph.insert_paragraph_before())
             # 人工稿目录：黑体 14 磅、点线引导、页码右对齐到版心右边界（3cm 页边距 → 15cm）、段后 2 磅
+            _pg = (style or {}).get("page") or {}
+            _right = 21.0 - float(_pg.get("margin_left_cm", 2.4)) - float(_pg.get("margin_right_cm", 2.8))
             q.paragraph_format.tab_stops.add_tab_stop(
-                Cm(15.0), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+                Cm(_right), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
             q.paragraph_format.space_after = Pt(0)
-            q.paragraph_format.line_spacing = Pt(31.2)   # 人工稿行距实测 31.2 磅
-            r = q.add_run(f"{title}\t{pages[title]}")
-            _set_font(r, name="黑体", size=14, bold=False)
+            q.paragraph_format.line_spacing = Pt(_ts.get("line_pt") or 33)
+            _num = (f"\t{pages[title]}"
+                    if _ts.get("show_page_numbers") else "")
+            r = q.add_run(f"{title}{_num}")
+            _set_font(r, name=_ts.get("entry_font") or "宋体",
+                      size=_ts.get("entry_size") or 14, bold=False)
         ph._p.getparent().remove(ph._p)
         _fill_scoring_pages(d, anchor_pages, anchors)
-        _fill_page_tokens(d, pages)
+        _fill_page_tokens(d, {**pages, **anchor_pages})
         d.save(str(path))
         return True
     finally:
@@ -288,17 +311,22 @@ def _fill_page_tokens(d, pages: Dict[str, int]) -> None:
                 _set_font(r, name="仿宋", size=12)
 
 
-def _add_toc(doc) -> None:
-    """第二页目录：标题 + TOC 域（打开文档时自动更新页码）。"""
+def _add_toc(doc, style=None) -> None:
+    """第二页目录：标题 + TOC 域（打开文档时自动更新页码）。版式取公司体例。"""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn as _q
     from docx.shared import Pt
+    toc = (style or {}).get("toc") or {}
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("目　录")          # 全角空格，与人工稿「目　录」同宽
-    # 人工稿 PDF：目录标题黑体 20 磅、不加粗，标题与条目之间空约 30 磅
-    _set_font(r, name="黑体", size=20, bold=False)
+    r = p.add_run(toc.get("title") or "目　录")
+    if not style:      # 老路径（丁蜀镇全量版）保持黑体 20、不加粗
+        _set_font(r, name="黑体", size=20, bold=False)
+    else:
+        _set_font(r, name=toc.get("title_font") or "宋体",
+                  size=toc.get("title_size") or 20,
+                  bold=bool(toc.get("title_bold", True)))
     p.paragraph_format.space_before = Pt(7)    # 人工稿标题距上边距约 7 磅
     p.paragraph_format.space_after = Pt(30)
 
@@ -381,13 +409,108 @@ def _page_number_footer(doc) -> None:
     p._p.append(fld)
 
 
-def _apply_body_format(doc) -> None:
-    """正文 12pt 段落统一 1.5 倍行距（对齐人工稿；标题/封面不动）。"""
+def _apply_body_format(doc, style=None) -> None:
+    """按公司体例统一正文/标题/表格/页边距（参数全部来自 bidding_style 配置）。
+
+    业主 2026-11-11：「所有的修改规格方面都不要写死，都是会变动的」——
+    这里不写死字号边距，只把配置值套到全文；配置见 `storage/bidding_style.json`。
+    """
+    if not style:
+        # 未提供公司体例时保持旧行为（正文 ≤12 磅统一 1.5 倍行距）
+        for p in doc.paragraphs:
+            sizes = [r.font.size.pt for r in p.runs if r.font.size]
+            if p.text.strip() and sizes and max(sizes) <= 12:
+                p.paragraph_format.line_spacing = 1.5
+                p.paragraph_format.space_after = 0
+        return
+    import re as _re
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm, Pt
+    st = style or {}
+    body = st.get("body") or {}
+    h1 = st.get("heading1") or {}
+    tbl = st.get("table") or {}
+    pg = st.get("page") or {}
+    # 页边距（所有节，横排只改上下左右，不动纸张方向）
+    for sec in doc.sections:
+        if pg:
+            sec.top_margin = Cm(pg.get("margin_top_cm", 2.5))
+            sec.bottom_margin = Cm(pg.get("margin_bottom_cm", 2.5))
+            sec.left_margin = Cm(pg.get("margin_left_cm", 2.4))
+            sec.right_margin = Cm(pg.get("margin_right_cm", 2.8))
+    _LABEL = _re.compile(
+        r'^(投标人|致：|地址|邮编|电话|传真|开户|账\s*户|代理人|单位名称|授权单位|'
+        r'地\s*址|日\s*期|法定代表人|企业名称|供应商|项目名称|项目投标报价|'
+        r'服务期限|项目负责人|是否为小微企业|文件\d|（\d）|[一二三四五六七八九十]+、)')
+    _toc_title = (st.get("toc") or {}).get("title") or ""
+    _in_toc = False
     for p in doc.paragraphs:
-        sizes = [r.font.size.pt for r in p.runs if r.font.size]
-        if p.text.strip() and sizes and max(sizes) <= 12:
+        text = p.text.strip()
+        if not text:
+            continue
+        if _toc_title and text == _toc_title:
+            _in_toc = True
+            continue
+        if _in_toc:
+            if p.style.name == "Heading 1":
+                _in_toc = False
+            else:
+                continue          # 目录条目：字体/行距由 _stamp_toc 按 toc 配置写入
+        # 一级标题：黑体 16 加粗居中（配置）
+        if p.style.name == "Heading 1":
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for r in p.runs:
+                if r.text.strip():
+                    _set_font(r, name=h1.get("font", "黑体"),
+                              size=h1.get("size", 16), bold=h1.get("bold", True))
             p.paragraph_format.line_spacing = 1.5
-            p.paragraph_format.space_after = 0
+            continue
+        if p.style.name in ("Heading 2", "Heading 3"):
+            _hs = st.get("heading2" if p.style.name == "Heading 2" else "heading3") or {}
+            for r in p.runs:
+                if r.text.strip():
+                    _set_font(r, name=_hs.get("font", "宋体"),
+                              size=_hs.get("size", 15), bold=_hs.get("bold", True))
+            p.alignment = (WD_ALIGN_PARAGRAPH.CENTER
+                           if _hs.get("align") == "center"
+                           else WD_ALIGN_PARAGRAPH.LEFT)
+            p.paragraph_format.line_spacing = 1.5
+            continue
+        # 文件N 标题：按人工稿用二级标题体例（宋体 15 加粗居中）
+        if _re.match(r'^文件\d+\s', text) and not text.endswith(("；", ";")):
+            for r in p.runs:
+                if r.text.strip():
+                    _set_font(r, name=(st.get("heading2") or {}).get("font", "宋体"),
+                              size=(st.get("heading2") or {}).get("size", 15),
+                              bold=True)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.line_spacing = 1.5
+            continue
+        # 封面/大标题（>16 磅）不动
+        sizes = [r.font.size.pt for r in p.runs if r.font.size]
+        if sizes and max(sizes) > 16:
+            continue
+        for r in p.runs:
+            if r.text.strip():
+                _set_font(r, name=body.get("font", "宋体"),
+                          size=body.get("size", 14), bold=False)
+        centered = p.alignment == WD_ALIGN_PARAGRAPH.CENTER
+        if not centered and not _LABEL.match(text):
+            p.paragraph_format.first_line_indent = Cm(body.get("first_line_cm", 0.87))
+        else:
+            p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.line_spacing = Pt(body.get("line_pt", 25))
+        p.paragraph_format.space_after = Pt(0)
+    # 表格：宋体、表头加粗（配置）
+    for t in doc.tables:
+        for ri, row in enumerate(t.rows):
+            for cell in row.cells:
+                for cp in cell.paragraphs:
+                    for r in cp.runs:
+                        if r.text.strip():
+                            _set_font(r, name=tbl.get("font", "宋体"),
+                                      size=tbl.get("size", 12),
+                                      bold=(ri == 0 and tbl.get("header_bold", True)))
 
 
 def _quote_detail_table(doc, items, total_yuan: int, big: str):
@@ -629,14 +752,17 @@ def _person_images(personnel_id: int) -> List[Tuple[str, bytes]]:
         c = sqlite3.connect(str(KB))
         rows = c.execute(
             "select image_name,image_path from company_personnel_images "
-            "where personnel_id=? order by id", (personnel_id,)).fetchall()
+            "where personnel_id=? "
+            "order by case when category in ('注册测绘师','职称证书') then 0 else 1 end, id",
+            (personnel_id,)).fetchall()
         if not rows:
             # 同一人可能以另一家公司入库（历史数据重复导入），按姓名兜底取证书图
             rows = c.execute(
                 "select i.image_name, i.image_path from company_personnel_images i "
                 "join company_personnel p on p.id = i.personnel_id "
                 "where p.name = (select name from company_personnel where id=?) "
-                "order by i.id", (personnel_id,)).fetchall()
+                "order by case when i.category in ('注册测绘师','职称证书') then 0 else 1 end, i.id",
+                (personnel_id,)).fetchall()
         c.close()
     except Exception:
         return out
@@ -1725,6 +1851,13 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     from docx.shared import Cm, Pt
     from datetime import date as _date
     from app.services.bidding_tender import parse_tender, select_bid_personnel
+    from app.services.bidding_style import load_bidding_style
+    from app.services.company_service import load_company
+    from app.config import settings as _settings
+
+    # 版式取公司体例（storage/bidding_style.json 可整份替换）；不写死在代码里
+    style = load_bidding_style(_settings.STORAGE_DIR)
+    company = await load_company(company_id) or {}
 
     tender = parse_tender(tender_path)
     co_name = company_name(company_id) or "投标人"
@@ -1733,8 +1866,14 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         members=max(int((tender.get("staff_min") or {}).get("项目组成员") or 3), 3))
     texts = _asset_texts(co_name)
     af = _auth_fields(texts)
-    # 公司档案里的中小企业声明数据（从业人员/营业收入/资产总额/企业类型）
+    # 中小企业声明数据：优先公司档案字段（companies），其次档案文本
     _se = _small_enterprise_facts(texts)
+    _se.update({k: v for k, v in {
+        "employees": company.get("employee_count"),
+        "revenue": company.get("annual_revenue_wan"),
+        "assets": company.get("total_assets_wan"),
+        "type": company.get("enterprise_type"),
+    }.items() if str(v or "").strip()})
     small, big = _price_text(price_wan)
     total_yuan = int(round(float(price_wan) * 10000))
     project = tender.get("project_name") or ""
@@ -1759,61 +1898,73 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     doc = Document()
     sec = doc.sections[0]
     sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
-    sec.left_margin = sec.right_margin = Cm(3.0)
-    sec.top_margin = sec.bottom_margin = Cm(3.0)
+    pg = style["page"]
+    sec.left_margin, sec.right_margin = Cm(pg["margin_left_cm"]), Cm(pg["margin_right_cm"])
+    sec.top_margin, sec.bottom_margin = Cm(pg["margin_top_cm"]), Cm(pg["margin_bottom_cm"])
 
     def _blank():
         _p(doc, "", size=12, indent=False, space_after=0)
 
-    # ── 封面 ──
+    # ── 封面（按公司体例：字号/字体/是否印「正本」「盖公章」都由 bidding_style 决定）──
+    cv = style["cover"]
     for _ in range(3):
         _blank()
-    _t = _p(doc, "投 标 文 件", size=60, bold=False, align="center",
-            indent=False, name="仿宋", space_after=0)
+    _t = _p(doc, cv.get("title") or "投 标 文 件", size=cv["title_size"],
+            bold=cv["title_bold"], align="center", indent=False,
+            name=cv["title_font"], space_after=0)
     _t.paragraph_format.space_before = Pt(40)
-    _p(doc, "（正本）", size=16, align="center", indent=False, name="仿宋",
-       space_after=0)
+    if cv.get("show_zhengben"):
+        _p(doc, "（正本）", size=cv["line_size"], align="center", indent=False,
+           name=cv["line_font"], space_after=0)
     for _ in range(3):
         _blank()
-    _p(doc, f"项目名称：{project}", size=16, indent=False, name="仿宋",
-       space_after=0)
+    _date_txt = _d.strftime(cv.get("date_format") or "%Y.%m.%d")
+    _p(doc, f"项目名称：{project}", size=cv["line_size"], bold=cv["line_bold"],
+       indent=False, name=cv["line_font"], space_after=0)
     for _ in range(3):
         _blank()
-    _p(doc, f"投标人名称：{co_name}", size=16, indent=False, name="仿宋",
-       space_after=0)
-    _p(doc, "（盖公章）", size=16, indent=False, name="仿宋", space_after=0)
+    _p(doc, f"投标人名称：{co_name}", size=cv["line_size"], bold=cv["line_bold"],
+       indent=False, name=cv["line_font"], space_after=0)
+    if cv.get("show_seal_note"):
+        _p(doc, "（盖公章）", size=cv["line_size"], indent=False,
+           name=cv["line_font"], space_after=0)
     for _ in range(5):
         _blank()
-    _dp = _p(doc, f"日  期：{today}", size=16, align="center", indent=False,
-             name="仿宋", space_after=0)
+    _dp = _p(doc, f"日  期：{_date_txt}", size=cv["line_size"], bold=cv["line_bold"],
+             align="left", indent=False, name=cv["line_font"], space_after=0)
     _dp.paragraph_format.space_before = Pt(24)
     doc.add_page_break()
 
     # ── 目录 ──
-    _add_toc(doc)
+    _add_toc(doc, style)
     doc.add_page_break()
 
     # ── 一、资格性和符合性检查响应对照表（横排）──
     _new_section(doc, True)
     _h(doc, t_check, 1)
-    _p(doc, "资格性和符合性检查响应对照表", size=14, align="center",
-       indent=False, name="仿宋")
     _p(doc, f"投标人全称：{co_name}                    （加盖公章）",
        size=12, indent=False, name="仿宋")
+    # 资格证明文件清单：从**招标文件正文**解析（文件1..N）；解析不到才用通用八件套。
+    _file_items = [(str(f.get("no")), str(f.get("text") or "").strip())
+                   for f in (tender.get("qual_files") or [])
+                   if str(f.get("text") or "").strip()]
+    if len(_file_items) < 3:
+        _file_items = [
+            ("1", "法人或者其他组织的营业执照等证明文件，自然人的身份证明"),
+            ("2", "上一年度的财务报表"),
+            ("3", "依法缴纳税收和社会保障资金的相关材料"),
+            ("4", "具备履行合同所必需的设备和专业技术能力的书面声明"),
+            ("5", "参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明"),
+            ("6", "法人授权书"),
+            ("7", "投标人资质证书"),
+            ("8", "招标文件中规定要求提供的证明材料和投标人认为需要提供的其他材料"),
+        ]
+    # 资格性和符合性检查表：**逐件对应文件1~N**（人工稿即 N 行 + 其他实质性要求），
+    # 页码用 {{文件N …}} 占位，装配后按真实分页填（原来所有行都指章节首页，全部印成 3/37）。
     _rows = []
-    _quals = [q for q in (tender.get("qualifications") or [])][:8]
-    for i, q in enumerate(_quals, 1):
-        _rows.append([str(i), q, "是", "{{" + t_qual + "}}"])
-    _fixed = [
-        "投标文件按招标文件规定的格式编制，签字、盖章齐全",
-        (f"投标报价唯一，且不超过最高限价"
-         + (f"（{max_yuan} 元）" if max_yuan else "")),
-        f"服务期限满足招标文件要求（{duration} 日历天）",
-        "项目负责人具有测绘中级及以上职称或注册测绘师证书",
-        "招标文件中的其他实质性要求",
-    ]
-    for q in _fixed:
-        _rows.append([str(len(_rows) + 1), q, "是", "{{" + t_letter + "}}"])
+    for _i, (_no, _txt) in enumerate(_file_items, 1):
+        _rows.append([str(_i), _txt, "是", "{{文件" + _no + "  " + _txt + "}}"])
+    _rows.append([str(len(_rows) + 1), "招标文件中的其他实质性要求", "是", "全文"])
     _table(doc, ["序号", "资格性和符合性检查响应内容",
                  "是否响应\n（填是或者否）", "投标文件中的\n页码位置"],
            _rows, widths=[1.5, 15.7, 3.5, 4.0], font_size=12,
@@ -1822,132 +1973,139 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     # ── 二、资格信誉等证明文件 ──
     _new_section(doc, False)
     _h(doc, t_qual, 1)
-    _p(doc, "资格信誉等证明文件", size=14, align="center", indent=False,
-       name="仿宋")
     _p(doc, "1、实质性资格证明文件目录", size=12, indent=False, name="仿宋")
-    for _line in (
-        "文件1  法人或者其他组织的营业执照等证明文件，自然人的身份证明；",
-        "文件2  上一年度的财务报表；",
-        "文件3  依法缴纳税收和社会保障资金的相关材料；",
-        "文件4  具备履行合同所必需的设备和专业技术能力证明材料；",
-        "文件5  参加政府采购活动前3年内在经营活动中没有重大违法记录的"
-        "书面声明；",
-        "文件6  法人授权书；",
-        "文件7  投标人资质证书复印件；",
-        "文件8  招标文件规定要求提供的其他材料。",
-    ):
-        _p(doc, _line, size=12, indent=False, name="仿宋")
+    for _no, _txt in _file_items:
+        _p(doc, f"文件{_no}  {_txt}；", size=12, indent=False, name="仿宋")
 
-    # 文件1～8 按招标目录**逐件、按序**附扫描件（人工稿顺序：1营业执照→2财务→
-    # 3税收社保→4设备声明→5无违法声明→6授权书→7资质→8其他材料）。
-    # 🔴 旧实现把 4/5/6 三份声明写在文件1前面，与招标目录的 1..8 顺序对不上，
-    #    评审逐件核对时会以为缺件（2026-11-11 业主：「跟之前模板缺少那么多内容」）。
-    _p(doc, "文件1  法人或者其他组织的营业执照等证明文件，自然人的身份证明",
-       size=12, bold=False, indent=False, name="仿宋")
-    _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
-    _asset_block(doc, f"{af['legal']} 身份证", [(f"{af['legal']} 身份证",)],
-                 caption="法定代表人身份证复印件")
-    if af.get("agent") and af["agent"] != af["legal"]:
-        _asset_block(doc, f"{af['agent']} 身份证", [(f"{af['agent']} 身份证",)],
-                     caption="被授权代表身份证复印件")
-    _p(doc, "文件2  上一年度的财务报表", size=12, bold=False, indent=False,
-       name="仿宋")
-    _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",)],
-                 caption="上一年度财务报表")
-    _p(doc, "文件3  依法缴纳税收和社会保障资金的相关材料", size=12,
-       bold=False, indent=False, name="仿宋")
-    _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)],
-                 caption="依法缴纳税收证明")
-    _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)],
-                 caption="社会保障资金证明")
-    _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
-                 caption="社会保险权益记录单")
+    # 文件1~N 按**招标目录的编号与名称**逐件附材料；材料类型按文件名的关键词判断，
+    # 不按固定编号写死（不同招标的件数/顺序会变）。
+    _imgw = style["images"]
 
-    # ── 文件4：设备与专业技术能力声明 ──
-    _p(doc, "文件4  具备履行合同所必需的设备和专业技术能力的书面声明",
-       size=12, bold=False, indent=False, name="仿宋")
-    _p(doc, "具备履行合同所必需的设备和专业技术能力的书面声明",
-       size=12, bold=False, align="center", indent=False, name="仿宋")
-    _p(doc, f"我公司郑重声明：我公司具备履行本项采购合同所必需的设备和专业技术能力，"
-            f"为履行本项采购合同我公司具备如下主要设备和主要专业技术能力：",
-       size=12, align="justify", name="仿宋")
-    _p(doc, "主要设备有：全站仪、GNSS 接收机（RTK）、无人机、绘图仪、测高仪、"
-            "水位仪、CASS 成图软件及图形工作站等。", size=12, align="justify",
-       name="仿宋")
-    _p(doc, "主要专业技术能力有：工程测量、不动产测绘（地籍测绘、房产测绘）、"
-            "权籍调查与数据库建设、测绘成果质量检查与验收。", size=12,
-       align="justify", name="仿宋")
-    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
+    def _decl_equipment():
+        _p(doc, "具备履行合同所必需的设备和专业技术能力的书面声明",
+           size=12, bold=False, align="center", indent=False, name="仿宋")
+        _p(doc, "我公司郑重声明：我公司具备履行本项采购合同所必需的设备和专业技术能力，"
+                "为履行本项采购合同我公司具备如下主要设备和主要专业技术能力：",
+           size=12, align="justify", name="仿宋")
+        _p(doc, "主要设备有：全站仪、GNSS 接收机（RTK）、无人机、绘图仪、测高仪、"
+                "水位仪、CASS 成图软件及图形工作站等。", size=12, align="justify",
+           name="仿宋")
+        _p(doc, "主要专业技术能力有：工程测量、不动产测绘（地籍测绘、房产测绘）、"
+                "权籍调查与数据库建设、测绘成果质量检查与验收。", size=12,
+           align="justify", name="仿宋")
+        _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
+        _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
-    # ── 文件5：无重大违法记录声明 ──
-    _p(doc, "文件5  参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
-       size=12, bold=False, indent=False, name="仿宋")
-    _p(doc, "参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
-       size=12, bold=False, align="center", indent=False, name="仿宋")
-    _p(doc, "我公司郑重声明：参加本次政府采购活动前3年内，我公司在经营活动中"
-            "没有因违法经营受到刑事处罚或者责令停产停业、吊销许可证或者执照、"
-            "较大数额罚款等行政处罚。", size=12, align="justify", name="仿宋")
-    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
+    def _decl_no_violation():
+        _p(doc, "参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
+           size=12, bold=False, align="center", indent=False, name="仿宋")
+        _p(doc, "我公司郑重声明：参加本次政府采购活动前3年内，我公司在经营活动中"
+                "没有因违法经营受到刑事处罚或者责令停产停业、吊销许可证或者执照、"
+                "较大数额罚款等行政处罚。", size=12, align="justify", name="仿宋")
+        _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
+        _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
-    # ── 文件6：法人授权书 ──
-    _p(doc, "文件6  法人授权书", size=12, bold=False, indent=False, name="仿宋")
-    _p(doc, "法人授权书", size=14, bold=False, align="center", indent=False,
-       name="仿宋")
-    _p(doc, f"本授权书声明：{co_name}授权{af['agent']}为我方就{project}"
-            f"项目采购活动的合法代理人，以本公司名义全权处理一切与该项目采购"
-            f"有关的事务。", size=12, align="justify", name="仿宋")
-    _p(doc, f"本授权书于{today}起生效，特此声明。", size=12, align="justify",
-       name="仿宋")
-    _p(doc, f"代理人（被授权人）：{af['agent']}", size=12, indent=False,
-       name="仿宋")
-    _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, "授权单位盖章：", size=12, indent=False, name="仿宋")
-    _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
+    def _auth_letter():
+        _p(doc, "法人授权书", size=14, bold=False, align="center", indent=False,
+           name="仿宋")
+        _p(doc, f"本授权书声明：{co_name}授权{af['agent']}为我方就{project}"
+                f"项目采购活动的合法代理人，以本公司名义全权处理一切与该项目采购"
+                f"有关的事务。", size=12, align="justify", name="仿宋")
+        _p(doc, f"本授权书于{today}起生效，特此声明。", size=12, align="justify",
+           name="仿宋")
+        _p(doc, f"代理人（被授权人）：{af['agent']}", size=12, indent=False,
+           name="仿宋")
+        _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
+        _p(doc, "授权单位盖章：", size=12, indent=False, name="仿宋")
+        _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
+        _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
 
-    _p(doc, "文件7  投标人资质证书", size=12, bold=False, indent=False,
-       name="仿宋")
-    _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
-                 caption="测绘资质证书")
-    _p(doc, "文件8  招标文件中规定要求提供的证明材料和投标人认为需要提供的其他材料",
-       size=12, bold=False, indent=False, name="仿宋")
-    # （1）承诺书：公司档案里的信用记录/独立性承诺，逐字落进正文
-    #     （人工稿文件8 第（1）项就是这份承诺书；旧实现只有截图，没有承诺文字）
-    _credit = (texts.get("信用记录承诺书") or "").strip()
-    _indep = (texts.get("供应商独立性承诺书") or "").strip()
-    if _credit or _indep:
+    def _credit_block():
+        _credit = (texts.get("信用记录承诺书") or "").strip()
+        _indep = (texts.get("供应商独立性承诺书") or "").strip()
+        if not (_credit or _indep):
+            return
         _p(doc, "（1）承诺书", size=12, bold=True, indent=False, name="仿宋")
         _p(doc, f"{purchaser}：", size=12, indent=False, name="仿宋")
         _p(doc, f"我方在{project}的响应过程中，做如下承诺：", size=12,
            align="justify", name="仿宋")
         _body = "\n".join(x for x in (_credit, _indep) if x)
-        # 去掉档案里重复的标题/落款（含档案里的旧日期），只留承诺条目；
-        # 落款统一用本次投标日期写在最后。
         _skip_pref = ("承诺书", "特此承诺", "磋商供应商", "供应商：", "供应商:",
                       "法定代表人", "单位名称", "日期")
-        _lines = [x.strip() for x in _body.splitlines()
-                  if x.strip() and not x.strip().startswith(_skip_pref)]
-        for _ln in _lines:
+        for _ln in [x.strip() for x in _body.splitlines()
+                    if x.strip() and not x.strip().startswith(_skip_pref)]:
             _p(doc, _ln, size=12, align="justify", name="仿宋")
         _p(doc, f"供应商：{co_name}（盖单位章）", size=12, indent=False,
            name="仿宋")
         _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
-    _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
-                              ("未被列入重大税收违法失信主体",),
-                              ("未被列入政府采购严重违法失信行为记录名单",)],
-                 caption="信用记录查询截图")
-    # 项目负责人职称证书 + 注册测绘师（对应招标「项目负责人具有测绘中级职称
-    # 或注册测绘师」的资格要求）
-    _lead_major = str((people[0] if people else {}).get("major") or "")
-    _cert_kw = "高级工程师——测绘" if "测绘" in _lead_major else "高级工程师——土地"
-    _asset_block(doc, _cert_kw, [(_cert_kw,)], caption="项目负责人职称证书")
-    _asset_block(doc, "注册测绘师", [("注册测绘师",)], caption="注册测绘师证书")
+
+    def _file_assets(text: str):
+        t = str(text)
+        if any(k in t for k in ("营业执照", "身份证明")):
+            _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照",
+                         width_cm=_imgw["financial_cm"])
+            _asset_block(doc, f"{af['legal']} 身份证", [(f"{af['legal']} 身份证",)],
+                         caption="法定代表人身份证复印件",
+                         width_cm=_imgw["id_card_cm"], break_after=False)
+            if af.get("agent") and af["agent"] != af["legal"]:
+                _asset_block(doc, f"{af['agent']} 身份证",
+                             [(f"{af['agent']} 身份证",)],
+                             caption="被授权代表身份证复印件",
+                             width_cm=_imgw["id_card_cm"])
+            else:
+                doc.add_page_break()
+            return
+        if "财务" in t:
+            _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",)],
+                         caption="上一年度财务报表",
+                         width_cm=_imgw["financial_cm"])
+            return
+        if "税收" in t or "社会保障" in t or "社保" in t:
+            _asset_block(doc, "税收", [("依法缴纳税收证明（2025年10月）",)],
+                         caption="依法缴纳税收证明",
+                         width_cm=_imgw["screenshot_cm"])
+            _asset_block(doc, "社保", [("依法社会保障资金证明（2025年11月）",)],
+                         caption="社会保障资金证明",
+                         width_cm=_imgw["screenshot_cm"])
+            _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                         caption="社会保险权益记录单",
+                         width_cm=_imgw["screenshot_cm"])
+            return
+        if "设备" in t and "专业技术能力" in t:
+            _decl_equipment()
+            return
+        if "重大违法" in t:
+            _decl_no_violation()
+            return
+        if "授权书" in t:
+            _auth_letter()
+            return
+        if "资质证书" in t:
+            _asset_block(doc, "测绘资质",
+                         [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
+                         caption="测绘资质证书", width_cm=_imgw["cert_cm"])
+            return
+        if any(k in t for k in ("其他材料", "其他证明材料", "认为需要提供")):
+            _credit_block()
+            _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
+                                      ("未被列入重大税收违法失信主体",),
+                                      ("未被列入政府采购严重违法失信行为记录名单",)],
+                         caption="信用记录查询截图",
+                         width_cm=_imgw["screenshot_cm"])
+            _lead_major = str((people[0] if people else {}).get("major") or "")
+            _cert_kw = "高级工程师——测绘" if "测绘" in _lead_major else "高级工程师——土地"
+            _asset_block(doc, _cert_kw, [(_cert_kw,)], caption="项目负责人职称证书",
+                         width_cm=_imgw["cert_cm"])
+            _asset_block(doc, "注册测绘师", [("注册测绘师",)],
+                         caption="注册测绘师证书", width_cm=_imgw["cert_cm"])
+            return
+
+    for _no, _txt in _file_items:
+        _p(doc, f"文件{_no}  {_txt}", size=12, bold=False, indent=False, name="仿宋")
+        _file_assets(_txt)
 
     # ── 三、投标函 ──
     _h(doc, t_letter, 1)
-    _p(doc, "投标函", size=14, align="center", indent=False, name="仿宋")
     _p(doc, f"致：{purchaser}", indent=False)
     _p(doc, f"根据贵方的{project}（项目名称）招标文件，正式授权下述签字人"
             f"{af['agent']}代表我方{co_name}，全权处理本次项目投标的有关事宜。",
@@ -1971,18 +2129,17 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, _ln, align="justify")
     _p(doc, "8. 与本投标有关的正式通讯地址为：", align="justify")
     _p(doc, f"地址：{af['address']}", indent=False)
-    _p(doc, "邮编：223005", indent=False)
-    _p(doc, f"电话：{af['mobile']}", indent=False)
+    _p(doc, f"邮编：{company.get('postcode') or '223005'}", indent=False)
+    _p(doc, f"电话：{company.get('office_phone') or af['mobile']}", indent=False)
     _p(doc, "传真：无", indent=False)
-    _p(doc, "投标人开户行：/", indent=False)
-    _p(doc, "账    户：/", indent=False)
+    _p(doc, f"投标人开户行：{company.get('bank_name') or '/'}", indent=False)
+    _p(doc, f"账    户：{company.get('bank_account') or '/'}", indent=False)
     _p(doc, f"投标人授权代表姓名（签字）：{af['agent']}", indent=False)
     _p(doc, f"投标人名称（公章）：{co_name}", indent=False)
     _p(doc, f"日期：{today}", indent=False)
 
     # ── 四、开标一览表 ──
     _h(doc, t_open, 1)
-    _p(doc, "开标一览表", size=14, align="center", indent=False, name="仿宋")
     _table(doc, ["项目", "内容"], [
         ["项目名称", project],
         ["项目投标报价", f"人民币（大写）{big}（￥{total_yuan}.00 元）"],
@@ -2019,7 +2176,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _scope = (f"{project}约{households}户的乡村建设规划许可证、土地测绘落宗、"
                   f"资料建档及不动产权证办理工作" if households
                   else f"{project}服务范围内的全部工作内容")
-    _table(doc, ["序号", "项目名称", "工作范围", "单位", "数量",
+    _tquote = _table(doc, ["序号", "项目名称", "工作范围", "单位", "数量",
                  "全费用综合单价（元）", "合价（元）", "备注"],
            [["1", project, _scope[:160],
              "户" if households else "项", _qty, _unit_txt, str(total_yuan),
@@ -2029,6 +2186,13 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
            widths=[1.2, 3.4, 7.6, 1.4, 1.2, 3.2, 2.8, 3.9], font_size=10.5,
            aligns=["center", "left", "left", "center", "center", "center",
                    "center", "left"])
+    # 表内备注行（人工稿的说明在报价表最后一行，不是表外一句话）
+    _nr = _tquote.add_row()
+    _mcell = _nr.cells[0].merge(_nr.cells[len(_nr.cells) - 1])
+    _mcell.text = ""
+    _pp = _mcell.paragraphs[0]
+    _pp.alignment = 0
+    _set_font(_pp.add_run("备注：" + _note), name="宋体", size=10.5)
     _p(doc, f"合    计：人民币（大写）{big}（￥{total_yuan}.00 元）",
        size=12, align="right", indent=False)
     _p(doc, "注：该报价为全费用固定单价，包括（但不限于）完成上述内容所必须的"
@@ -2038,8 +2202,6 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     # ── 六、商务条款响应及偏离表 ──
     _new_section(doc, False)
     _h(doc, t_dev, 1)
-    _p(doc, "商务条款响应及偏离表", size=14, align="center", indent=False,
-       name="仿宋")
     _p(doc, f"投标人全称：{co_name}          （加盖公章）", size=12,
        indent=False, name="仿宋")
     # 商务条款逐条响应：条款文字一律取招标文件原文（`parse_tender.commerce`），
@@ -2073,17 +2235,16 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _p(doc, f"法定代表人或授权代表签字：{af['agent']}", size=12, indent=False,
        name="仿宋")
 
-    # ── 附件：中小企业声明函（工程、服务）──
+    # ── 中小企业声明函：按人工稿作为**第六章的二级小节**（不单列「附件」一级章）
     doc.add_page_break()
-    _h(doc, "附件", 1)
-    _p(doc, "中小企业声明函（工程、服务）", size=14, align="center",
-       indent=False, name="仿宋")
+    _h(doc, "中小企业声明函（工程、服务）", 2)
     _p(doc, "本公司郑重声明，根据《政府采购促进中小企业发展管理办法》"
             "（财库﹝2020﹞46号）的规定，本公司参加" + purchaser +
             "的" + project + "采购活动，服务全部由符合政策要求的中小企业承接。",
        size=12, align="justify", name="仿宋")
     _p(doc, "相关企业的具体情况如下：", size=12, align="justify", name="仿宋")
-    _p(doc, f"1. {project}，属于测绘服务行业；承接企业为{co_name}，"
+    _p(doc, f"1. {project}，属于{tender.get('sme_industry') or '其他未列明行业'}行业；"
+            f"承接企业为{co_name}，"
             f"从业人员{_se.get('employees') or '______'}人，"
             f"营业收入为{_se.get('revenue') or '______'}万元，"
             f"资产总额为{_se.get('assets') or '______'}万元，"
@@ -2100,18 +2261,16 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     # ── 七、项目组成员一览表（横排）──
     _new_section(doc, True)
     _h(doc, t_team, 1)
-    _p(doc, "项目组成员一览表", size=14, align="center", indent=False,
-       name="仿宋")
     _p(doc, f"投标人名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
+    # 人员表列按人工稿：姓名 / 拟任职务 / 学历 / 身份证号 / 办公电话 / 备注
+    # （身份证号、办公电话取自人员库；缺的留空，不编造）
     _rows = []
-    for i, p in enumerate(people, 1):
-        _rows.append([str(i), p.get("name") or "", p.get("gender") or "",
-                      str(p.get("age") or ""), p.get("role") or "",
-                      p.get("education") or "", p.get("title") or "",
-                      str(p.get("cert_no") or "") or "—"])
-    _table(doc, ["序号", "姓名", "性别", "年龄", "岗位名称", "学历", "职称",
-                 "资格证书编号"],
-           _rows, widths=[1.5, 3.0, 2.0, 2.0, 3.5, 2.2, 2.8, 7.7], font_size=12)
+    for p in people:
+        _rows.append([p.get("name") or "", p.get("role") or "",
+                      p.get("education") or "", str(p.get("id_no") or ""),
+                      str(p.get("phone") or ""), ""])
+    _table(doc, ["姓名", "本项目拟任职务", "学历", "身份证号", "办公电话", "备注"],
+           _rows, font_size=style["table"]["size"])
     for p in people:
         pid = p.get("id")
         if pid:
@@ -2119,14 +2278,12 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
             if imgs:
                 _p(doc, f"{p.get('name')}（{p.get('role')}）", size=12,
                    indent=False, name="仿宋")
-                for nm, data in imgs[:4]:
-                    _img(doc, data, 14.0, nm)
+                for nm, data in imgs[:6]:
+                    _img(doc, data, style["images"]["cert_cm"], nm)
 
     # ── 八、盐都区政府采购事前信用承诺书 ──
     _new_section(doc, False)
     _h(doc, t_credit, 1)
-    _p(doc, "盐都区政府采购事前信用承诺书", size=14, align="center",
-       indent=False, name="仿宋")
     _pledge = (
         "为营造我区公开、公平、公正、诚实守信的政府采购交易环境，树立诚信守法的"
         "投标人形象，本人代表本单位作出以下承诺：",
@@ -2148,13 +2305,17 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         "依法承担相应责任；",
         "（七）本人已认真阅读了上述承诺，并向本单位员工作了宣传教育。",
     )
+    # 招标文件里有自己的承诺书正文时，逐字使用招标文件的（不写死某一地区版本）
+    _tp = tender.get("credit_pledge") or []
+    if len(_tp) >= 3:
+        _pledge = tuple(_tp)
     for _ln in _pledge:
         _p(doc, _ln, size=12, align="justify", name="仿宋")
     _p(doc, f"法定代表人签名：{af['legal']}", size=12, indent=False, name="仿宋")
     _p(doc, f"单位名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
     _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
-    _apply_body_format(doc)
+    _apply_body_format(doc, style)
     _center_all_cells(doc)
     _page_number_footer(doc)
 
@@ -2162,7 +2323,9 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
     try:
-        if _stamp_toc(out, titles=titles, anchors=()):
+        if _stamp_toc(out, titles=titles,
+                  anchors=tuple(f"文件{_no}  {_txt}" for _no, _txt in _file_items),
+                  style=style):
             logger.info("[投标文件] 目录已写入真实页码")
     except Exception as e:
         logger.warning(f"[投标文件] 目录页码写入失败，保留目录域: {e}")
@@ -2193,15 +2356,15 @@ def _performance_rows() -> List[Tuple[str, str, str]]:
 
 
 def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], caption="",
-                 *, break_after=True):
-    """按图片名插入公司档案图片（不一定全有，有几张插几张）。"""
+                 *, break_after=True, width_cm=15.0):
+    """按图片名插入公司档案图片（不一定全有，有几张插几张），宽度由版式配置给定。"""
     count = 0
     for name_tuple in names:
         kw = name_tuple[0]
         for nm, data in _asset_images(kw, limit=20):
             if count == 0 and caption:
                 _p(doc, caption, bold=False, indent=False)
-            _img(doc, data, 15.0)
+            _img(doc, data, width_cm)
             if break_after:
                 doc.add_page_break()
             count += 1

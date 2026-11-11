@@ -321,11 +321,57 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     _clause("投标文件份数",
             r'投标文件要求正本\s*[一二三四五六七八九十\d]+\s*份[，,]\s*副本\s*[一二三四五六七八九十\d]+\s*份')
     _clause("付款方式", r'付款方式[\s\S]{0,200}?7\.\d[^\n]{0,120}',
-            lambda m: re.sub(r'^付款方式[^\n]*\n?', '', m.group(0)).strip())
+            lambda m: re.sub(r'^\s*\d+(?:\.\d+)*\s*', '',
+                             re.sub(r'^付款方式[^\n]*\n?', '', m.group(0)).strip()))
     _clause("质量要求", r'符合甲方质量要求[^。]{0,20}',
             lambda m: "成果" + m.group(0))
     _clause("其他实质性要求", r'其他实质性要求[^\n。]{0,50}',
             lambda m: "满足招标文件列明的其他实质性要求")
+
+    # ── 资格证明文件清单（文件1..N）——从招标文件正文取，不写死 8 件 ──
+    #    各家招标的件数/名称不同（有的 7 件、有的 9 件），按文件号去重取最长文本。
+    qual_files: List[Dict[str, str]] = []
+    _seen_file = {}
+    for m in re.finditer(r'^文件\s*(\d{1,2})\s*([^\n]{4,120})', blob, re.M):
+        try:
+            no = int(m.group(1))
+        except ValueError:
+            continue
+        txt = _clean(m.group(2)).strip("。；; ")
+        _prev = None
+        while _prev != txt:
+            _prev = txt
+            txt = re.sub(r'\s*[（(][^）)]*[）)]\s*$', '', txt).strip("。；; ")
+        if not txt or no > 15:
+            continue
+        old = _seen_file.get(no)
+        if old is None or len(txt) > len(old):
+            _seen_file[no] = txt
+    for no in sorted(_seen_file):
+        qual_files.append({"no": str(no), "text": _seen_file[no]})
+
+    # 中小企业声明函「所属行业」：取招标文件原话，取不到用「其他未列明行业」
+    _sme_industry = ""
+    _m = re.search(r'属于([^，。；\n（(]{2,12}?)行业', blob)
+    if _m:
+        _sme_industry = _m.group(1).strip()
+
+    # 信用承诺书正文（从招标文件最后一处「信用承诺书」起，到落款前）
+    credit_pledge: List[str] = []
+    _ci = [m.start() for m in re.finditer("信用承诺书", blob)]
+    if _ci:
+        _seg = blob[_ci[-1]: _ci[-1] + 2000]
+        for _ln in _seg.splitlines()[1:]:
+            _t = _clean(_ln)
+            if not _t:
+                continue
+            if _t.startswith(("法定代表人签名", "单位名称", "序号", "年    月")):
+                break
+            if _t == "信用承诺书":
+                continue
+            credit_pledge.append(_t)
+            if len(credit_pledge) >= 15:
+                break
 
     return {
         "source": str(path),
@@ -352,6 +398,9 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "households": households,
         "unit_price": unit_price,
         "commerce": commerce,
+        "qual_files": qual_files,
+        "sme_industry": _sme_industry,
+        "credit_pledge": credit_pledge,
         "text_chars": len(text),
     }
 
@@ -394,8 +443,11 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
     # 老库可能还没跑人员库迁移（没有 cert_no 列）：按列存在与否取，别让投标停在这
     _cols = {r[1] for r in conn.execute("PRAGMA table_info(company_personnel)")}
     _cert_col = "cert_no" if "cert_no" in _cols else "''"
+    _id_col = "id_no" if "id_no" in _cols else "''"
+    _tel_col = "phone" if "phone" in _cols else "''"
     rows = conn.execute(
-        f"select id,name,gender,age,education,major,title,certs,{_cert_col} "
+        f"select id,name,gender,age,education,major,title,certs,{_cert_col},"
+        f"{_id_col},{_tel_col} "
         "from company_personnel "
         "where company_id=? order by sort_order,id", (company_id,)).fetchall()
     try:
@@ -407,7 +459,8 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
     people = [{"id": r[0], "name": r[1], "gender": r[2], "age": r[3], "education": r[4],
                "major": r[5], "title": r[6],
                "certs": json.loads(r[7] or "[]") if r[7] else [],
-               "cert_no": r[8] or "", "has_img": r[0] in _img_ids}
+               "cert_no": r[8] or "", "id_no": r[9] or "", "phone": r[10] or "",
+               "has_img": r[0] in _img_ids}
               for r in rows if r[1]]
     # 人员库有同名重复（导入过两次）：保留有证书编号/证书图片的那条
     _best = {}
@@ -436,10 +489,17 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
 
     pool = [p for p in people if p not in chosen]
     mid = [p for p in pool if _title_rank(p["title"]) >= 1 and _major_ok(p["major"])]
-    pool = mid or [p for p in pool if _major_ok(p["major"])] or pool
-    # 组员优先有证书图片的（同一个名字重复入库时已在上面去重）
-    pool = sorted(pool, key=lambda x: (not x.get("has_img"),))
-    for p in rng.sample(pool, min(members, len(pool))):
+    # 组员优先「本专业 + 有证书图片/身份证号」的（投标文件要贴证书、社保材料）；
+    # 这类人够数就只在其中抽，否则退回中级职称池
+    _rich = [p for p in pool if _major_ok(p["major"])
+             and (p.get("has_img") or p.get("id_no"))]
+    pool = (_rich if len(_rich) >= members
+            else mid or [p for p in pool if _major_ok(p["major"])] or pool)
+    pool = sorted(pool, key=lambda x: (not x.get("has_img"),
+                                       not bool(x.get("id_no")),
+                                       -_title_rank(x["title"])))
+    _top = pool[:members + 1]
+    for p in rng.sample(_top, min(members, len(_top))):
         p = dict(p)
         p["role"] = "项目组成员"
         chosen.append(p)

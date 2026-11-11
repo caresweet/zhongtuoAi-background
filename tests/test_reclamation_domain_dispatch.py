@@ -852,12 +852,20 @@ def test_reclamation_has_no_word_audit_comments(tmp_path):
     气球）；而且锚点用的还是稳评的 `^第X章`，复垦一条都匹配不上，
     9 条批注全落到封面标题（首页挂满气球）。
 
-    稳评不变（仍注入，逐字等于改动前）。
+    稳评默认也不注入（业主 2026-11-11 口径：交付稿里不该有批注气球），
+    需要内部审阅稿时用 `REPORT_AUDIT_COMMENTS=1` 打开。
     """
+    import os
     import zipfile
     assert cat.injects_audit_comments("reclamation") is False
-    assert cat.injects_audit_comments("stability") is True
-    assert cat.injects_audit_comments(None) is True
+    assert cat.injects_audit_comments("stability") is False
+    assert cat.injects_audit_comments(None) is False
+    os.environ["REPORT_AUDIT_COMMENTS"] = "1"
+    try:
+        assert cat.injects_audit_comments("reclamation") is True
+        assert cat.injects_audit_comments("stability") is True
+    finally:
+        del os.environ["REPORT_AUDIT_COMMENTS"]
     _gaps = {1: [{"detail": "第1章缺 X", "severity": "warn", "sentence": "第一句"}],
              3: [{"detail": "第3章缺 Y", "severity": "info", "sentence": "第三句"}]}
     out, text = _render(tmp_path, "reclamation",

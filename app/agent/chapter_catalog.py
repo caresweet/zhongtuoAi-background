@@ -20,6 +20,7 @@ master_orchestrator）按域取章集合/章标题/章类型/章结构文本的�
 """
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -215,13 +216,15 @@ def has_questionnaire_tables(domain: str | None) -> bool:
 def injects_audit_comments(domain: str | None) -> bool:
     """该域的产物里是否注入 **Word 批注**（缺口清单/审核项/人工意见）。
 
-    稳评：注入 —— 它的口径是「正文不许出现【待补充】，但缺口必须显性」，
-          批注是当时唯一能同时满足两条的落点（逐字不变）。
-    复垦：**不注入**。业主 2026-10-10 口径：「不需要你写这个，这些内容你可以在
-          项目生成报告结束后跟用户提示」—— 交付稿里一个批注气球都不该有，
-          缺口改走前端（`GET /generate/{sid}/gaps` → `AssistantView` 的缺口面板）。
+    🔴 默认**不注入**（业主 2026-11-11：「标注为什么还留着？」）——
+       交付稿打开右侧就是批注气球，评审分不清是专家意见还是系统提示。
+       缺口改走前端缺口面板（`GET /generate/{sid}/gaps`），与复垦口径一致
+       （业主 2026-10-10：「这些内容你在生成报告结束后跟用户提示」）。
+       需要生成带批注的内部审阅稿时，设 `REPORT_AUDIT_COMMENTS=1`。
     """
-    return domain != _RECLAMATION
+    if str(domain or "").strip() == "":
+        return False
+    return os.environ.get("REPORT_AUDIT_COMMENTS", "0") == "1"
 
 
 def has_analysis_tables_in_body(domain: str | None) -> bool:

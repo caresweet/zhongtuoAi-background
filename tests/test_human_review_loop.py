@@ -284,7 +284,12 @@ def test_docx_audit_comments_injected():
         "_quality_audit": {"total_issues": 3, "critical_issues": 1,
                            "auto_fixed": 1, "timestamp": "2026-08-19T00:00:00"},
     }
-    asm._inject_audit_comments(doc, state)
+    # 批注默认关闭（交付稿干净），这里显式打开验证注入逻辑
+    os.environ["REPORT_AUDIT_COMMENTS"] = "1"
+    try:
+        asm._inject_audit_comments(doc, state)
+    finally:
+        del os.environ["REPORT_AUDIT_COMMENTS"]
 
     import tempfile
     tmp = tempfile.mktemp(suffix=".docx")

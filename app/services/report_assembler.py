@@ -1765,8 +1765,10 @@ class ReportAssembler:
         for p in doc.paragraphs:
             t = p.text
             nt = t
-            if care and "管护" in nt and "共计" in nt:
+            if care and "管护" in nt:
                 nt = _re.sub(r'共计\s*[\d.]+\s*万元', f"共计 {care:.2f} 万元", nt)
+                nt = _re.sub(r'(管护[^。；\n]{0,12}?费用\s*)[\d.]+\s*万元',
+                             rf'\g<1>{care:.2f} 万元', nt)
             if monitor and "动态投资" in nt:
                 nt = _re.sub(r'动态投资\s*[\d.]+\s*万元',
                              f"动态投资 {monitor:.2f} 万元", nt)

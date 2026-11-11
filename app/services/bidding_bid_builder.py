@@ -231,39 +231,60 @@ def _stamp_toc(path, titles=None, anchors=None, style=None) -> bool:
     path = _P(path)
     tmp = _P(tempfile.mkdtemp(prefix="bidtoc_"))
     try:
+        # 🔴 量页码用一份**去掉 updateFields 的副本**：否则 LibreOffice 转 PDF 时
+        #    会先把 TOC 域自动展开（条目更多），目录多占一页，导致后面所有锚点
+        #    页码整体 +1（实测 2026-11-11：检查表页码比实际大 1）。
+        try:
+            from docx import Document as _MeasureDoc
+            from docx.oxml.ns import qn as _qn
+            _m = _MeasureDoc(str(path))
+            _st_el = _m.settings.element
+            _uf = _st_el.find(_qn('w:updateFields'))
+            if _uf is not None:
+                _st_el.remove(_uf)
+            _measure = tmp / "measure.docx"
+            _m.save(str(_measure))
+        except Exception:
+            _measure = path
         subprocess.run(
             [soffice, "--headless", "--norestore", "--convert-to", "pdf",
-             "--outdir", str(tmp), str(path)],
+             "--outdir", str(tmp), str(_measure)],
             check=True, capture_output=True, timeout=240)
-        pdf = tmp / f"{path.stem}.pdf"
+        pdf = tmp / f"{_measure.stem}.pdf"
         if not pdf.exists():
             return False
         import fitz
-        src = fitz.open(str(pdf))
-        _wanted = list(titles) + list(anchors)
-        _found: Dict[str, int] = {}
-        for i in range(2, src.page_count):
-            # 跳过封面/目录页，按**整行等于标题**匹配，避免命中目录条目。
-            # ⚠️ LibreOffice 会把「第一章 对项目的理解」中间的空格吃掉，
-            #    所以同时比对去空格后的行（实测导致方案章节页码一直填不上）。
-            raw_lines = [ln.strip() for ln in src[i].get_text().splitlines()]
-            lines = set(raw_lines) | {ln.replace(" ", "").replace("　", "")
-                                      for ln in raw_lines}
-            _anchor_set = set(anchors)
-            _norm_page = "".join(raw_lines).replace(" ", "").replace("　", "")
-            for title in _wanted:
-                if title not in _anchor_set and title in _found:
-                    continue          # 目录标题取**首次**出现
-                hit = (title in lines or title.replace(" ", "") in lines)
-                if not hit:
-                    # 长标题在 PDF 里会折行（「文件5」与正文可能落在两行）：
-                    # 去空格后取前 12 字，在**整页拼起来的文本**里找
-                    _key = title.replace(" ", "").replace("　", "")[:12]
-                    hit = bool(_key) and _key in _norm_page
-                if hit:
-                    # 文件锚点取**最后一次**出现（前面的目录/检查表也印着同样的文字）
-                    _found[title] = i
-        src.close()
+
+        def _detect(_pdf) -> Dict[str, int]:
+            """按整行标题找页码（0 起的 PDF 页序 = 版心打印页码）。"""
+            _src = fitz.open(str(_pdf))
+            _wanted = list(titles) + list(anchors)
+            _found: Dict[str, int] = {}
+            for i in range(2, _src.page_count):
+                # 跳过封面/目录页，按**整行等于标题**匹配，避免命中目录条目。
+                # ⚠️ LibreOffice 会把「第一章 对项目的理解」中间的空格吃掉，
+                #    所以同时比对去空格后的行（实测导致方案章节页码一直填不上）。
+                raw_lines = [ln.strip() for ln in _src[i].get_text().splitlines()]
+                lines = set(raw_lines) | {ln.replace(" ", "").replace("　", "")
+                                          for ln in raw_lines}
+                _anchor_set = set(anchors)
+                _norm_page = "".join(raw_lines).replace(" ", "").replace("　", "")
+                for title in _wanted:
+                    if title not in _anchor_set and title in _found:
+                        continue          # 目录标题取**首次**出现
+                    hit = (title in lines or title.replace(" ", "") in lines)
+                    if not hit:
+                        # 长标题在 PDF 里会折行（「文件5」与正文可能落在两行）：
+                        # 去空格后取前 12 字，在**整页拼起来的文本**里找
+                        _key = title.replace(" ", "").replace("　", "")[:12]
+                        hit = bool(_key) and _key in _norm_page
+                    if hit:
+                        # 文件锚点取**最后一次**出现（前面的目录/检查表也印着同样的文字）
+                        _found[title] = i
+            _src.close()
+            return _found
+
+        _found = _detect(pdf)
         pages = {t: _found[t] for t in titles if t in _found}
         anchor_pages = {t: _found[t] for t in anchors if t in _found}
         if len(pages) < len(titles):
@@ -318,6 +339,57 @@ def _stamp_toc(path, titles=None, anchors=None, style=None) -> bool:
         _fill_scoring_pages(d, anchor_pages, anchors)
         _fill_page_tokens(d, {**pages, **anchor_pages})
         d.save(str(path))
+        # 🔴 第二遍：把目录域换成静态条目后，目录占的页数可能变了（域展开时目录
+        #    多占一页 → 后面整体后移一页，检查表页码会比实际大 1，实测 2026-11-11）。
+        #    用最终 docx 再量一次分页，只校正页码，不再改版式。
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", str(tmp), str(path)],
+                check=True, capture_output=True, timeout=240)
+            _fin = tmp / f"{path.stem}.pdf"
+            if _fin.exists():
+                _f2 = _detect(_fin)
+                _p2 = {t: _f2[t] for t in titles if t in _f2}
+                _a2 = {t: _f2[t] for t in anchors if t in _f2}
+                if _p2 != pages or _a2 != anchor_pages:
+                    logger.info(f"[投标文件] 目录页码二次校正：一={_p2.get(titles[0])} "
+                                f"文件1={_a2.get(anchors[0]) if anchors else '-'}")
+                    _d2 = Document(str(path))
+                    for _q in _d2.paragraphs:
+                        for _t in titles:
+                            if _q.text.startswith(_t + "\t"):
+                                for _r in list(_q.runs):
+                                    _r._element.getparent().remove(_r._element)
+                                _num = (f"\t{_p2[_t]}"
+                                        if _ts.get("show_page_numbers") else "")
+                                _r = _q.add_run(f"{_t}{_num}")
+                                _set_font(_r, name=_ts.get("entry_font") or "宋体",
+                                          size=_ts.get("entry_size") or 14,
+                                          bold=False)
+                                break
+                    _fill_scoring_pages(_d2, _a2, anchors)
+                    _fill_page_tokens(_d2, {**_p2, **_a2})
+                    # 第一遍已把检查表的 {{…}} 换成数字，第二遍按行内容回填新页码
+                    for _t2 in _d2.tables:
+                        _hdr = [c.text for c in _t2.rows[0].cells]
+                        _pi = next((i for i, h in enumerate(_hdr) if "页码" in h),
+                                   None)
+                        if _pi is None:
+                            continue
+                        for _row in _t2.rows[1:]:
+                            _cells = _row.cells
+                            if len(_cells) < 2:
+                                continue
+                            _ct = _cells[1].text.strip()
+                            for _a in anchors:
+                                _name = _a.partition(".")[2]
+                                if _a in _a2 and _ct[:10] == _name[:10]:
+                                    _cells[_pi].text = str(_a2[_a])
+                                    break
+                    _d2.save(str(path))
+        except Exception as e:
+            logger.warning(f"[投标文件] 目录页码二次校正失败: {e}")
         return True
     finally:
         import shutil as _sh2
@@ -363,7 +435,6 @@ def _add_toc(doc, style=None) -> None:
     _set_font(run, size=12)
     begin = OxmlElement('w:fldChar')
     begin.set(_q('w:fldCharType'), 'begin')
-    begin.set(_q('w:dirty'), 'true')      # 强制打开时更新
     instr = OxmlElement('w:instrText')
     instr.set(_q('xml:space'), 'preserve')
     instr.text = 'TOC \\o "1-1" \\h \\z \\u'
@@ -2424,7 +2495,8 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                       p.get("education") or "", str(p.get("id_no") or ""),
                       str(p.get("phone") or ""), ""])
     _table(doc, ["姓名", "本项目拟任职务", "学历", "身份证号", "办公电话", "备注"],
-           _rows, font_size=style["table"]["size"])
+           _rows, font_size=style["table"]["size"],
+           widths=(style.get("team") or {}).get("widths"))
     for p in people:
         pid = p.get("id")
         if pid:

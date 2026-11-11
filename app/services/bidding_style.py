@@ -37,12 +37,14 @@ DEFAULT_STYLE: Dict[str, Any] = {
     "heading3": {"font": "宋体", "size": 15, "bold": True, "align": "left"},
     "body": {"font": "宋体", "size": 14, "first_line_cm": 0.87, "line_pt": 25},
     "table": {"font": "宋体", "size": 12, "header_bold": True},
-    # 资格性和符合性检查响应对照表（列宽取招标模板，行高保证不挤）
-    "checklist": {"widths": [1.14, 9.3, 3.27, 3.15],
+    # 资格性和符合性检查响应对照表（列宽取招标模板并缩放至版心 15.8cm，行高保证不挤）
+    "checklist": {"widths": [1.1, 8.75, 3.05, 2.9],
                   "header_row_cm": 1.55, "row_cm": 1.75},
-    # 商务条款响应及偏离表（列宽取人工稿，行高把版面撑满但留出签字位）
-    "commerce": {"widths": [2.71, 5.87, 2.43, 5.16],
+    # 商务条款响应及偏离表（列宽取人工稿并缩放至版心，行高把版面撑满）
+    "commerce": {"widths": [2.65, 5.75, 2.35, 5.05],
                  "header_row_cm": 1.1, "row_cm": 1.75},
+    # 七、项目组成员一览表（身份证号/电话要放得下，别折行）
+    "team": {"widths": [1.9, 3.75, 1.45, 4.4, 2.85, 1.45]},
     "toc": {"title": "投标主要文件目录", "title_font": "宋体", "title_size": 20,
             "title_bold": True,
             "entry_font": "宋体", "entry_size": 14, "line_pt": 33,

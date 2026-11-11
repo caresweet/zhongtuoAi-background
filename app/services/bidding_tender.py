@@ -453,8 +453,11 @@ def select_bid_personnel(*, company_id: int = 1, leader: int = 1, members: int =
         "from company_personnel "
         f"where company_id=?{_active_sql} order by sort_order,id", (company_id,)).fetchall()
     try:
+        # 只有「职称/注册测绘师/执业资格」证书图片才算投标可用材料；
+        # 培训证书不能拿来凑投标人员（业主/专家 2026-11-11）。
         _img_ids = {r[0] for r in conn.execute(
-            "select distinct personnel_id from company_personnel_images")}
+            "select distinct personnel_id from company_personnel_images "
+            "where category in ('注册测绘师','职称证书','执业资格证书')")}
     except Exception:
         _img_ids = set()
     conn.close()

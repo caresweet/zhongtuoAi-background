@@ -72,6 +72,14 @@ def main() -> int:
         n = k.execute("update asset_images set company_id=? where company_id is null",
                       (SURVEY_COMPANY_ID,)).rowcount
         k.execute("CREATE INDEX IF NOT EXISTS idx_ai_company ON asset_images(company_id)")
+        # 扫描件方向逐图记录：测绘的营业执照是横放扫描，展示时旋转 270°；
+        # 评估/代理的营业执照是正向扫描，不旋转（业主 2026-11-11 反馈方向反了）。
+        if "rotate_deg" not in cols:
+            k.execute("ALTER TABLE asset_images ADD COLUMN rotate_deg INTEGER DEFAULT 0")
+            print("asset_images 加 rotate_deg 列")
+        k.execute("update asset_images set rotate_deg=270 "
+                  "where company_id=? and image_name like '%营业执照%' "
+                  "and coalesce(rotate_deg,0)=0", (SURVEY_COMPANY_ID,))
         k.commit()
         print(f"档案图片归属测绘公司：{n} 张")
     finally:

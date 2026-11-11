@@ -856,6 +856,23 @@ def _asset_names() -> List[str]:
         return []
 
 
+def _asset_rotate_deg(name: str) -> int:
+    """某张档案图需要旋转多少度（扫描件方向不一致，逐图记在 rotate_deg）。"""
+    try:
+        c = sqlite3.connect(str(KB))
+        _cid = _ASSET_COMPANY.get()
+        sql = "select rotate_deg from asset_images where image_name=?"
+        args: list = [name]
+        if _cid is not None:
+            sql += " and company_id=?"
+            args.append(int(_cid))
+        row = c.execute(sql + " order by id limit 1", args).fetchone()
+        c.close()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
+
+
 def _asset_images(*keywords: str, limit: int = 12) -> List[Tuple[str, bytes]]:
     out = []
     try:
@@ -2678,10 +2695,23 @@ def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], captio
                 _cp = _p(doc, caption, bold=False, indent=False)
                 if break_before_first:
                     _cp.paragraph_format.page_break_before = True
-            _img(doc, data, width_cm,
+            _rot = bool(rotate90 and _asset_rotate_deg(nm) != 0)
+            _w = width_cm
+            if not _rot:
+                # 竖版扫描件按 20.98cm 放会超出纸张高度（图直接消失）：
+                # 按版心宽 15.8cm 与最大高度 20.5cm 双约束缩放
+                try:
+                    from PIL import Image as _PILImage
+                    _im = _PILImage.open(io.BytesIO(data))
+                    _iw, _ih = _im.size
+                    if _iw and _ih:
+                        _w = min(_w, 15.8, 20.5 * _iw / _ih)
+                except Exception:
+                    _w = min(_w, 15.8)
+            _img(doc, data, _w,
                  page_break_before=(count > 0 or
                                     (count == 0 and break_before_first and not caption)),
-                 rotate90=rotate90)
+                 rotate90=_rot)
             count += 1
     if count and break_after:
         doc.add_page_break()

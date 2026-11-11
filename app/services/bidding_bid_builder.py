@@ -1939,8 +1939,8 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _add_toc(doc, style)
     doc.add_page_break()
 
-    # ── 一、资格性和符合性检查响应对照表（横排）──
-    _new_section(doc, True)
+    # ── 一、资格性和符合性检查响应对照表（纵向，人工稿同此）──
+    _new_section(doc, False)
     _h(doc, t_check, 1)
     _p(doc, f"投标人全称：{co_name}                    （加盖公章）",
        size=12, indent=False, name="仿宋")
@@ -1967,7 +1967,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _rows.append([str(len(_rows) + 1), "招标文件中的其他实质性要求", "是", "全文"])
     _table(doc, ["序号", "资格性和符合性检查响应内容",
                  "是否响应\n（填是或者否）", "投标文件中的\n页码位置"],
-           _rows, widths=[1.5, 15.7, 3.5, 4.0], font_size=12,
+           _rows, widths=[1.2, 8.8, 2.9, 2.9], font_size=12,
            aligns=["center", "left", "center", "center"])
 
     # ── 二、资格信誉等证明文件 ──
@@ -2201,9 +2201,9 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                  "全费用综合单价（元）", "合价（元）", "备注"],
            [["1", project, _scope[:160],
              "户" if households else "项", _qty, _unit_txt, str(total_yuan),
-             _note],
+             "全费用综合单价"],
             # 人工稿的报价表里「合计」是表内一行，不是表外一句话
-            ["", "合    计", "", "", "", "", str(total_yuan), ""]],
+            ["", f"合    计（{big}）", "", "", "", "", str(total_yuan), ""]],
            widths=[1.2, 3.4, 7.6, 1.4, 1.2, 3.2, 2.8, 3.9], font_size=10.5,
            aligns=["center", "left", "left", "center", "center", "center",
                    "center", "left"])
@@ -2213,12 +2213,10 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _mcell.text = ""
     _pp = _mcell.paragraphs[0]
     _pp.alignment = 0
-    _set_font(_pp.add_run("备注：" + _note), name="宋体", size=10.5)
-    _p(doc, f"合    计：人民币（大写）{big}（￥{total_yuan}.00 元）",
-       size=12, align="right", indent=False)
-    _p(doc, "注：该报价为全费用固定单价，包括（但不限于）完成上述内容所必须的"
-            "其他费用及管理费、利润、规费、税金、招标代理费等全部费用。",
-       size=10.5, indent=False)
+    _pp.paragraph_format.line_spacing = 1.0
+    _set_font(_pp.add_run("备注：1、该报价为全费用固定单价，包括完成上述内容所必须的"
+                          "其他费用及管理费、利润、规费、税金、招标代理费等全部费用。"),
+              name="宋体", size=9)
 
     # ── 六、商务条款响应及偏离表 ──
     _new_section(doc, False)
@@ -2280,7 +2278,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
     # ── 七、项目组成员一览表（横排）──
-    _new_section(doc, True)
+    _new_section(doc, False)
     _h(doc, t_team, 1)
     _p(doc, f"投标人名称（盖章）：{co_name}", size=12, indent=False, name="仿宋")
     # 人员表列按人工稿：姓名 / 拟任职务 / 学历 / 身份证号 / 办公电话 / 备注

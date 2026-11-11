@@ -387,7 +387,9 @@ async def test_compact_bid_follows_tender_format(tmp_path):
     await build_bid_document(tender_path=DAGANG, company_id=4, price_wan=5.7,
                              out_path=out, seed=2026, use_llm=False)
     d = Document(str(out))
-    text = "\n".join(p.text for p in d.paragraphs)
+    # 表格里的文字也算（报价大写金额在报价表「合计」行内）
+    text = "\n".join([p.text for p in d.paragraphs]
+                     + [c.text for t in d.tables for r in t.rows for c in r.cells])
     for kw in ("资格性和符合性检查响应对照表", "资格信誉等证明文件", "投标函",
                "开标一览表", "报价清单", "商务条款响应及偏离表",
                "项目组成员一览表", "信用承诺书"):

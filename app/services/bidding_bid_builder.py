@@ -645,9 +645,12 @@ def _table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
             for r in t.rows:
                 r.cells[ci].width = Cm(w)
     if row_heights:
+        from docx.enum.table import WD_ROW_HEIGHT_RULE
         for i, h in enumerate(row_heights):
             if i < len(t.rows):
                 t.rows[i].height = Cm(h)
+                # 必须写 hRule=atLeast：只给 height 时 Word 按 auto 处理，行高不生效
+                t.rows[i].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
     return t
 
 

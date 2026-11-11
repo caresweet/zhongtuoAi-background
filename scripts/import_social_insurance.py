@@ -46,33 +46,68 @@ def _rows_from_csv(path: Path):
     return [row for row in csv.reader(io.StringIO(text))]
 
 
-def _roster_from_pdf(path: Path):
-    """从**电子版**单位权益记录单 PDF 里直接解析参保人（姓名+身份证号）。
-
-    权益记录单就是人员社保信息：表格行是「序号 姓名 身份证号 缴费起止年月 月数」。
-    扫描件（没有文字层）解析不到时，退回 `--roster` 名单。
-    """
-    import re
+def _pdf_text(path: Path) -> str:
     try:
         import fitz
         doc = fitz.open(str(path))
     except Exception:
-        return []
-    out = []
+        return ""
     try:
-        text = "\n".join(p.get_text() for p in doc)
+        return "\n".join(p.get_text() for p in doc)
     finally:
         try:
             doc.close()
         except Exception:
             pass
-    # 表格行：1 甘文锋 429006197804105139 202608 - 202608 1
-    pat = re.compile(
-        r'\d{1,3}\s+([一-龥][一-龥·]{1,5})\s+'
-        r'([0-9Xx]{18,19})\s+\d{6}')
-    for name, id_no in pat.findall(text):
-        out.append((name, id_no.upper()))
-    return out
+
+
+def _period_from_pdf(path: Path) -> str:
+    """从权益单「查询时间：202601-202604」取最近月份 → 2026-04。"""
+    import re
+    text = _pdf_text(path).replace(" ", "")
+    m = re.search(r'查询时间[：:](\d{6})-(\d{6})', text)
+    if m:
+        end = m.group(2)
+    else:
+        m2 = re.search(r'(\d{6})-(\d{6})', text)
+        end = m2.group(2) if m2 else ""
+    return f"{end[:4]}-{end[4:6]}" if len(end) == 6 else ""
+
+
+def _roster_from_pdf(path: Path):
+    """从**电子版**单位权益记录单 PDF 里解析参保人（姓名+身份证号）。
+
+    权益记录单就是人员社保信息，表行是「序号 姓名 身份证号 缴费起止年月 月数」。
+    青岛/江苏这类导出的 PDF，有的把每列排成独立行，所以同时支持
+    「整行表格」和「一格一行」两种排版。扫描件没有文字层 → 退回 `--roster`。
+    """
+    import re
+    text = _pdf_text(path)
+    if not text.strip():
+        return []
+    out = []
+    # ① 整行：1 甘文锋 429006197804105139 202608 - 202608 1
+    pat_line = re.compile(
+        r'\d{1,3}\s+([一-龥][一-龥·]{1,5})\s+([0-9Xx]{18,19})\s+\d{6}')
+    out += [(n, i.upper()) for n, i in pat_line.findall(text)]
+
+    # ② 一格一行：序号 / 姓名 / 身份证号 / 起 / - / 止 / 月数
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if not re.fullmatch(r'\d{1,3}', ln):
+            continue
+        seg = lines[i + 1:i + 5]
+        name = next((x for x in seg[:2] if re.fullmatch(r'[一-龥·]{2,6}', x)), None)
+        id_no = next((x for x in seg if re.fullmatch(r'[0-9Xx]{18,19}', x)), None)
+        if name and id_no:
+            out.append((name, id_no.upper()))
+
+    seen, dedup = set(), []
+    for n, i in out:
+        if (n, i) not in seen:
+            seen.add((n, i))
+            dedup.append((n, i))
+    return dedup
 
 
 def parse_roster(path: Path):
@@ -120,7 +155,7 @@ def _store_images(period: str, files):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--company-id", type=int, default=4)
-    ap.add_argument("--period", required=True, help="YYYY-MM，例如 2026-11")
+    ap.add_argument("--period", help="YYYY-MM，例如 2026-11（不填则从权益单里取）")
     ap.add_argument("--roster", help="姓名/身份证号 名单（xlsx/csv）")
     ap.add_argument("--images", nargs="*", default=[],
                     help="社保证明 pdf/jpg/png（可多个）")
@@ -130,6 +165,7 @@ def main() -> int:
     ensure_tables()
 
     people = parse_roster(Path(a.roster).expanduser()) if a.roster else []
+    period = (a.period or "").strip()
     if not people:
         # 只给单位权益记录单（电子版 PDF）也能用：直接从表里解析参保人
         for _f in a.images or []:
@@ -137,7 +173,18 @@ def main() -> int:
                 people = _roster_from_pdf(Path(_f).expanduser())
                 if people:
                     print(f"从单位权益记录单解析到 {len(people)} 名参保人员")
+                    if not period:
+                        period = _period_from_pdf(Path(_f).expanduser())
                     break
+    if not period and a.images:
+        for _f in a.images:
+            if str(_f).lower().endswith(".pdf"):
+                period = _period_from_pdf(Path(_f).expanduser())
+                if period:
+                    break
+    if not period:
+        raise SystemExit("请用 --period 指定月份（YYYY-MM），或在权益单 PDF 里能读到查询时间")
+    a.period = period
     imgs = _store_images(a.period, a.images) if a.images else []
 
     con = sqlite3.connect(str(DB))

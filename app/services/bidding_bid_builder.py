@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import io
 import logging
 import re
@@ -29,6 +30,10 @@ logger = logging.getLogger(__name__)
 BACKEND = Path(__file__).resolve().parents[2]
 KB = BACKEND / "data" / "knowledge_base.db"
 AUTH = BACKEND / "data" / "auth.db"
+
+# 当前投标公司（三家公司共用一套档案库，取图/取证必须按公司隔离）
+_ASSET_COMPANY: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "bid_asset_company", default=None)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -832,11 +837,19 @@ def _asset_texts(company: str) -> Dict[str, str]:
 
 
 def _asset_names() -> List[str]:
-    """公司档案图片名（只取名，不读图，用于按年份/关键词挑材料）。"""
+    """公司档案图片名（只取名，不读图，用于按年份/关键词挑材料）。
+
+    按当前投标公司过滤：三家公司各有自己的营业执照/审计报告/证书，不能串。
+    """
     try:
         c = sqlite3.connect(str(KB))
-        rows = [str(r[0] or "") for r in c.execute(
-            "select image_name from asset_images where is_active=1 order by id")]
+        _cid = _ASSET_COMPANY.get()
+        sql = "select image_name from asset_images where is_active=1"
+        args: tuple = ()
+        if _cid is not None:
+            sql += " and company_id=?"
+            args = (int(_cid),)
+        rows = [str(r[0] or "") for r in c.execute(sql + " order by id", args)]
         c.close()
         return rows
     except Exception:
@@ -847,9 +860,13 @@ def _asset_images(*keywords: str, limit: int = 12) -> List[Tuple[str, bytes]]:
     out = []
     try:
         c = sqlite3.connect(str(KB))
-        rows = c.execute(
-            "select image_name,image_data from asset_images where is_active=1 "
-            "order by id").fetchall()
+        _cid = _ASSET_COMPANY.get()
+        sql = ("select image_name,image_data from asset_images where is_active=1")
+        args: tuple = ()
+        if _cid is not None:
+            sql += " and company_id=?"
+            args = (int(_cid),)
+        rows = c.execute(sql + " order by id", args).fetchall()
         c.close()
     except Exception:
         return out
@@ -903,24 +920,28 @@ def _person_images(personnel_id: int) -> List[Tuple[str, bytes]]:
     """
     out = []
     _KEEP = "('注册测绘师','职称证书','执业资格证书')"
+    _cid = _ASSET_COMPANY.get()
+    _csql = " and company_id=?" if _cid is not None else ""
+    _cargs: tuple = (int(_cid),) if _cid is not None else ()
     try:
         c = sqlite3.connect(str(KB))
         rows = c.execute(
             "select image_name,image_path from company_personnel_images "
-            f"where personnel_id=? and category in {_KEEP} "
+            f"where personnel_id=? and category in {_KEEP}{_csql} "
             "order by case when category='注册测绘师' then 0 "
             "when category='职称证书' then 1 else 2 end, id",
-            (personnel_id,)).fetchall()
+            (personnel_id,) + _cargs).fetchall()
         if not rows:
-            # 同一人可能以另一家公司入库（历史数据重复导入），按姓名兜底取证书图
+            # 同一人可能以另一家公司入库（历史数据重复导入），按姓名兜底取证书图；
+            # 仍限定在**当前投标公司**，不跨公司借证书。
             rows = c.execute(
                 "select i.image_name, i.image_path from company_personnel_images i "
                 "join company_personnel p on p.id = i.personnel_id "
                 f"where p.name = (select name from company_personnel where id=?) "
-                f"and i.category in {_KEEP} "
+                f"and i.category in {_KEEP}{_csql.replace('company_id', 'i.company_id')} "
                 "order by case when i.category='注册测绘师' then 0 "
                 "when i.category='职称证书' then 1 else 2 end, i.id",
-                (personnel_id,)).fetchall()
+                (personnel_id,) + _cargs).fetchall()
         c.close()
     except Exception:
         return out
@@ -1538,6 +1559,8 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
     from docx.shared import Cm, Pt
     from app.services.bidding_tender import parse_tender, select_bid_personnel
 
+    # 三家公司共用档案库：本次投标只取这家公司的营业执照/证书/人员图片
+    _ASSET_COMPANY.set(int(company_id))
     tender = parse_tender(tender_path)
     # 最低评标价法的招标文件（如大冈镇佳富村）格式完全不同：走简式八件套
     if tender.get("bid_format") == "compact":
@@ -2032,6 +2055,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     # 版式取公司体例（storage/bidding_style.json 可整份替换）；不写死在代码里
     style = load_bidding_style(_settings.STORAGE_DIR)
     company = await load_company(company_id) or {}
+    _ASSET_COMPANY.set(int(company_id))
 
     tender = parse_tender(tender_path)
     co_name = company_name(company_id) or "投标人"

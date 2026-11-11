@@ -61,6 +61,24 @@ async def analyze_tender(
     af = _auth_fields(_asset_texts(str(company.get("name") or "")),
                       company=company)
 
+    # 三家公司共用档案库，按公司隔离：这家公司有没有自己的资料/人员，
+    # 前端据此提示（不能拿别家公司的证书去投标）。
+    _p_count = _a_count = 0
+    try:
+        import sqlite3
+        _c = sqlite3.connect(str(Path(settings.DATA_DIR) / "knowledge_base.db"))
+        _p_count = _c.execute(
+            "select count(*) from company_personnel where company_id=?",
+            (company_id,)).fetchone()[0]
+        _cols = {r[1] for r in _c.execute("PRAGMA table_info(asset_images)")}
+        if "company_id" in _cols:
+            _a_count = _c.execute(
+                "select count(*) from asset_images where company_id=? and is_active=1",
+                (company_id,)).fetchone()[0]
+        _c.close()
+    except Exception:
+        pass
+
     max_price = req.get("max_price_wan") or req.get("budget_wan") or ""
     return ApiResponse(
         message="招标文件解析完成",
@@ -73,6 +91,9 @@ async def analyze_tender(
             # 授权代表：前端弹窗询问（可改）
             "agent_name": af.get("agent") or "",
             "legal_name": af.get("legal") or "",
+            "company_personnel_count": _p_count,
+            "company_asset_count": _a_count,
+            "company_ready": bool(_p_count and _a_count),
             # 报价交互：前端据此弹窗询问
             "need_price": True,
             "max_price_wan": max_price,

@@ -10,6 +10,7 @@ Includes:
 """
 
 import os
+import re
 import json
 import asyncio
 import time
@@ -25,6 +26,29 @@ _RETRY_BASE_DELAY = 1.0       # seconds — doubles each retry
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _CIRCUIT_BREAKER_THRESHOLD = 5   # consecutive failures before opening
 _CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds before half-open attempt
+
+
+def trim_incomplete_text(text: str) -> str:
+    """把「说到一半就断」的模型输出收口到最后一个完整句子。
+
+    业主 2026-11-11：成稿里出现半句话（「…对因失职、渎职等原因造成严重后果的
+    单位和人员，」后面没了）。这是 max_tokens 截断/续写拼接的残留。
+    这里只做**确定性收口**：去掉控制字符，回退到最后一个 。！？；
+    若整段没有句末标点（表格、公式、短标签）则原样返回。
+    """
+    t = re.sub(r'[\ue000-\uf8ff]', '', str(text or '')).rstrip()
+    if not t:
+        return t
+    if t[-1] in '。！？…”’）)】':
+        return t
+    for i in range(len(t) - 1, -1, -1):
+        if t[i] in '。！？':
+            tail = t[i + 1:].strip()
+            # 尾巴太长说明不是「断句」，可能是表格/清单，不动
+            if len(tail) <= 60:
+                return t[:i + 1]
+            break
+    return t
 
 
 class LLMService:
@@ -413,12 +437,20 @@ class LLMService:
                 logger.warning(
                     f"LLM 输出被截断（finish_reason=length，max_tokens={max_tokens}，"
                     f"content={len(_content)} 字）→ 放大预算至 {_new_budget} 重试")
-                return await self.chat_with_reasoning(
+                _ret = await self.chat_with_reasoning(
                     messages=messages, system=system,
                     max_tokens=_new_budget,
                     temperature=temperature, response_format=response_format,
                     enable_search=enable_search, tools=tools,
                 )
+                if isinstance(_ret, dict) and _ret.get("content"):
+                    _fixed = trim_incomplete_text(_ret["content"])
+                    if _fixed != _ret["content"]:
+                        logger.warning(
+                            f"输出仍在句中断开（content={len(_ret['content'])} 字）"
+                            f"→ 收口到 {len(_fixed)} 字")
+                        _ret["content"] = _fixed
+                return _ret
             # 关过思考还是空 → 不再递归（避免死循环），交调用方重试
 
         # 🔴 解析 tool_calls（OpenAI 兼容 function calling）
@@ -434,8 +466,14 @@ class LLMService:
                 args = {}
             tool_calls.append({"name": name, "arguments": args})
 
+        _final = message.get("content", "")
+        if _finish == "length" and _final:
+            _fixed = trim_incomplete_text(_final)
+            if _fixed != _final:
+                logger.warning(f"输出在句中断开 → 收口到最后一个完整句子")
+                _final = _fixed
         return {
-            "content": message.get("content", ""),
+            "content": _final,
             "reasoning": message.get("reasoning_content", ""),
             "tool_calls": tool_calls,
         }

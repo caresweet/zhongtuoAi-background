@@ -344,6 +344,46 @@ def fix_attachment_ref(md: str) -> Tuple[str, int]:
     return out, n
 
 
+def fix_truncated_paragraphs(md: str) -> Tuple[str, int]:
+    """去掉「话说到一半」的残段（2026-11-11 业主：话术不连贯）。
+
+    判据：正文段落结尾既没有句末标点，也不是表格/标题/短标签/公式，就回退到
+    该段最后一个 。！？；；回退后不足 20 字的整段删除。
+    """
+    import re as _re
+    out, n = [], 0
+    for para in str(md or "").split("\n\n"):
+        s = para.strip()
+        if not s:
+            out.append(para)
+            continue
+        s = _re.sub(r'[\ue000-\uf8ff]', '', s).rstrip()
+        if (s.startswith(("|", "#", "[[", "表", "图", "注", "——", "- ", "* "))
+                or len(s) < 12
+                or "：" in s[:12]
+                or "＝" in s or "=" in s
+                or s[-1] in "。！？…”’）)】"):
+            out.append(s)
+            continue
+        cut = max((s.rfind(ch) for ch in "。！？；"), default=-1)
+        if s[-1] in "，、":
+            # 以逗号/顿号收尾 = 话没说完
+            if cut >= 0 and len(s[:cut + 1].strip()) >= 12:
+                out.append(s[:cut + 1])
+            n += 1
+            continue
+        if cut >= 0 and len(s[:cut + 1].strip()) >= 20:
+            out.append(s[:cut + 1])
+            n += 1
+        elif len(s) >= 40:
+            n += 1                 # 长段且没有完整句 → 整段丢弃
+        else:
+            out.append(s)          # 短句/标签，可能是表格前后的说明，保留
+    if n == 0:
+        return md, 0
+    return "\n\n".join(out), n
+
+
 # ── 入口 ────────────────────────────────────────────────────
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
     logs: List[str] = []
@@ -354,6 +394,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
         if not md:
             continue
         orig = md
+        md, n_tr = fix_truncated_paragraphs(md)
         md, n_area = fix_area_sum(md)
         md, n_law = fix_fake_laws(md)
         md, n_garble = fix_garble(md)
@@ -365,6 +406,8 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
                 logs.append(f"第7章 评审日期调整 {n_date} 处")
         if md != orig:
             ch["markdown"] = md
+            if n_tr:
+                logs.append(f"第{key}章 截断残句 {n_tr} 处")
             if n_area:
                 logs.append(f"第{key}章 总面积改为地类分项之和（{n_area} 处）")
             if n_law:

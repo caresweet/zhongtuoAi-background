@@ -170,3 +170,22 @@ def test_review_table_labels_not_bold():
                         for run in p.runs:
                             assert not run.bold, (txt, run.text)
     assert hit > 0
+
+
+def test_truncated_paragraph_is_closed_or_dropped():
+    """「话说到一半」的残段：回退到最后一个完整句子，不留下半句话。"""
+    from app.services.report_content_repairs import fix_truncated_paragraphs
+    md = ("这是一段完整的正文。\n\n"
+          "另一段写了很长但是最后用逗号收尾，后面没了，\n\n"
+          "| 表格 | 不动 |")
+    out, n = fix_truncated_paragraphs(md)
+    assert n >= 1
+    assert "后面没了" not in out
+    assert "| 表格 | 不动 |" in out
+
+
+def test_llm_trim_incomplete_text():
+    from app.services.llm_service import trim_incomplete_text
+    t = "前一句完整。后一句说到一半，"
+    assert trim_incomplete_text(t) == "前一句完整。"
+    assert trim_incomplete_text("公式：Si＝ai+Wi") == "公式：Si＝ai+Wi"

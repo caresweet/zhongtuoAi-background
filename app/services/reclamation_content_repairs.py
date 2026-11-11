@@ -88,6 +88,8 @@ def dedupe_sections(md: str) -> Tuple[str, int]:
         kept.append(p)
         if len(s) >= 200:
             kept_long.append(s)
+    if removed == 0:
+        return md, 0
     return "\n\n".join(kept), removed
 
 
@@ -326,6 +328,8 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         if not md:
             continue
         orig = md
+        from app.services.report_content_repairs import fix_truncated_paragraphs
+        md, n_tr = fix_truncated_paragraphs(md)
         md, n_u = fix_units(md)
         md, n_d = dedupe_sections(md)
         md, n_s = fix_service_period(md, filled or {})
@@ -338,7 +342,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         if md != orig:
             ch["markdown"] = md
             bits = []
-            for label, k in (("单位hm²", n_u), ("重复段", n_d),
+            for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
                              ("服务年限", n_s), ("复垦方向/面积", n_r),
                              ("剥离厚度", n_t), ("费用数字", n_c),
                              ("表3-1指向", n_a), ("删无效表号", n_dr),

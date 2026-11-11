@@ -1206,10 +1206,13 @@ class ReportAssembler:
         self._post_generation_fix(doc, filled)
         self._drop_duplicate_sections(doc)
         self._dedup_headings(doc)
+        self._drop_duplicate_system_tables(doc)
         self._dedup_table_titles(doc)
         self._dedup_duplicate_tables(doc)
+        # 表/图/附件编号：所有域按正文出现顺序重排（业主 2026-11-11）
+        self._normalize_caption_order(doc)
+        self._fix_truncated_paragraphs(doc)
         if self._domain == "reclamation":
-            self._normalize_caption_order(doc)
             self._normalize_section_numbers(doc)
             self._fix_reclamation_cost_sentences(doc)
         if self._domain == "stability":
@@ -1528,6 +1531,52 @@ class ReportAssembler:
             else:
                 last = None
 
+    def _drop_duplicate_system_tables(self, doc):
+        """同题表：系统表与模型手写表同时存在时，删模型那张。
+
+        2026-11-11 实测：第6章「项目复垦工程量汇总表」系统表（12 行）与模型
+        手写表（999.9）同题并存，`_dedup_table_titles` 只清表题不删表体，
+        结果稿里先出现模型那张、后出现系统表，看起来表号/数据都不对。
+        """
+        import re as _re
+        from docx.oxml.ns import qn as _qn
+        sys_titles = {
+            _re.sub(r'^[表图]\s*\d+\s*[-—－]\s*\d+\s*', '', t).strip()
+            for t in (getattr(self, "_system_caption_exact", set()) or set())
+        }
+        if not sys_titles:
+            return
+        body = doc.element.body
+        kids = list(body.iterchildren())
+        pairs = {}          # title -> [(cap_el, tbl_el, tbl_id, rows)]
+        for i, el in enumerate(kids):
+            if el.tag != _qn("w:p"):
+                continue
+            txt = "".join(n.text or "" for n in el.iter(_qn("w:t"))).strip()
+            if not _re.match(r'^[表图]\s*\d+\s*[-—－]\s*\d+', txt):
+                continue
+            title = _re.sub(r'^[表图]\s*\d+\s*[-—－]\s*\d+\s*', '', txt).strip()
+            # 向后找 1～3 个元素内的表格
+            for j in range(i + 1, min(i + 4, len(kids))):
+                if kids[j].tag == _qn("w:tbl"):
+                    trs = kids[j].findall(_qn("w:tr"))
+                    pairs.setdefault(title, []).append((el, kids[j], id(kids[j]), len(trs)))
+                    break
+        for title, items in pairs.items():
+            if title not in sys_titles or len(items) < 2:
+                continue
+            sys_items = [x for x in items if x[2] in (getattr(self, "_system_rendered_tables", set()) or set())]
+            keep = sys_items[0] if sys_items else max(items, key=lambda x: x[3])
+            for cap, tbl, _tid, _n in items:
+                if tbl is keep[1]:
+                    continue
+                try:
+                    body.remove(tbl)
+                    body.remove(cap)
+                    logger.info(f"[表去重] 同题表保留系统表，删除模型手写：{title}")
+                except Exception:
+                    pass
+
     def _dedup_table_titles(self, doc):
         """Remove duplicate table titles, fix numbering, remove strays, and clean tables."""
         import re
@@ -1703,6 +1752,30 @@ class ReportAssembler:
             for (kind, ch, old), new in mapping.items():
                 nt = re.sub(rf'{kind}{ch}\s*[-—－]\s*{old}(?!\d)',
                             f"{kind}{ch}-{new}", nt)
+            if nt != t:
+                _rewrite(p, nt)
+
+        # 附件号：同样按出现顺序重排（附件1、附件2…）
+        att = re.compile(r'^(\s*附件\s*)(\d+)(.*)$')
+        att_map = {}
+        cnt = 0
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            m = att.match(t)
+            if not m:
+                continue
+            cnt += 1
+            att_map.setdefault(m.group(2), str(cnt))
+            newt = f"附件{cnt}{m.group(3)}"
+            if newt != t:
+                _rewrite(p, newt)
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if not t or att.match(t):
+                continue
+            nt = t
+            for old, new in att_map.items():
+                nt = re.sub(rf'附件\s*{old}(?!\d)', f"附件{new}", nt)
             if nt != t:
                 _rewrite(p, nt)
 
@@ -1889,6 +1962,26 @@ class ReportAssembler:
                     p.add_run(nt)
                 else:
                     p.runs[0].text = nt
+                    for r in p.runs[1:]:
+                        r.text = ""
+
+    def _fix_truncated_paragraphs(self, doc):
+        """正文里「话说到一半」的残句：回退到最后一个完整句子。"""
+        from app.services.report_content_repairs import fix_truncated_paragraphs
+        for p in doc.paragraphs:
+            t = p.text
+            if not t.strip() or len(t.strip()) < 12:
+                continue
+            if t.strip().startswith(("表", "图", "附件", "注：", "注:")):
+                continue
+            if p.style.name.startswith("Heading"):
+                continue
+            fixed, n = fix_truncated_paragraphs(t.strip())
+            if n and fixed != t:
+                if not p.runs:
+                    p.add_run(fixed)
+                else:
+                    p.runs[0].text = fixed
                     for r in p.runs[1:]:
                         r.text = ""
 

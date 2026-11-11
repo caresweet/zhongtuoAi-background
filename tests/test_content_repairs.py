@@ -189,3 +189,100 @@ def test_llm_trim_incomplete_text():
     t = "前一句完整。后一句说到一半，"
     assert trim_incomplete_text(t) == "前一句完整。"
     assert trim_incomplete_text("公式：Si＝ai+Wi") == "公式：Si＝ai+Wi"
+
+
+def test_math_symbols_survive_chapter_clean():
+    """× ≥ ≤ ㎡ ① 不能被「乱码清洗」删掉（2026-11-11：第12章公式印成 a  b  35）。"""
+    from app.agent.agents.chapters.chapter_base import _KEEP_PRINTABLE_RE
+    s = "每行得分 = a×b×35；W≥70 为高风险；面积 2.68hm²；①"
+    assert _KEEP_PRINTABLE_RE.sub("", s) == s
+
+
+def test_scrub_does_not_touch_law_inside_book_title():
+    """范文地名替换不能把《中华人民共和国村民委员会组织法》换成项目地址。"""
+    from app.validation.content_guardrails import scrub_sample_facts
+    md = ("4.《中华人民共和国村民委员会组织法》（2018年12月29日修正）；\n"
+          "项目位于明远路，面积 1.2000 公顷。")
+    sample = "项目位于明远路，面积 1.2000 公顷。《中华人民共和国村民委员会组织法》"
+    filled = {"location": "朱坝街道办事处、三圩社区", "area_m2": "326342"}
+    out, _n = scrub_sample_facts(md, filled, sample, "")
+    assert "中华人民共和国村民委员会组织法" in out
+    assert "朱坝街道办事处、三圩社区民委员会" not in out
+
+
+def test_work_schedule_date_not_inserted_mid_sentence():
+    """第7章日期落位不能在「编制社|会稳定」中间插日期。"""
+    from app.services.work_schedule import apply_to_chapter7
+    md = ("6.编制评估报告。在上述工作基础上，2026年9月28日至2026年9月30日"
+          "编制社会稳定风险评估报告，内容包含评估过程。")
+    out, _ = apply_to_chapter7(md, {"report_draft_date": "2026-09-28",
+                                    "report_draft_end_date": "2026-09-30"})
+    assert "编制社会稳定风险评估报告" in out
+    assert "编制社　2026年" not in out
+
+
+def test_use_period_end_date_recomputed():
+    """使用期 18 个月的结束月不能抄服务年限的 2029 年 6 月。"""
+    from app.services.reclamation_content_repairs import fix_use_period_end
+    s = "项目临时用地使用时间为18个月，从2027年1月到2029年6月。"
+    out, n = fix_use_period_end(s, {"land_use_months": "18"})
+    assert n == 1
+    assert "2028年6月" in out and "2029年6月" not in out
+
+
+def test_review_date_moved_after_report_finished():
+    """「报告编制完成」写法下，专家评审日期也要排到编制完成之后。"""
+    from app.services.report_content_repairs import fix_date_order
+    md = ("本次评估自2026年9月22日接受委托起，至2026年9月30日报告编制完成止。"
+          "2026年9月22日至2026年9月30日组织专家评审。")
+    out, n = fix_date_order(md)
+    assert n == 1
+    assert "2026年10月1日至10月9日组织专家评审" in out
+
+
+def test_risk_overview_follows_ch11_items():
+    """表4-1 按第11章的风险清单重建（模板写死六类、第11章实际五类）。"""
+    from app.validation.content_guardrails import rebuild_risk_overview_table
+    ch11 = ("### （一）决策风险因素分析预测\n\n"
+            "**1. 补偿方案风险**\n\n补偿标准存在争议，可能引发不满。\n\n"
+            "根据风险因素识别和风险等级判断，该事项风险程度为一般。\n\n"
+            "**2. 决策实施风险**\n\n信息公开不及时，可能引发质疑。\n\n"
+            "根据风险因素识别和风险等级判断，该事项风险程度为较小。\n\n"
+            "**3. 社保名额风险**\n\n名额分配不透明，可能引发争议。\n\n"
+            "根据风险因素识别和风险等级判断，该事项风险程度为一般。\n")
+    ch4 = ("| 序号 | 风险类型 | 风险因素描述 | 发生阶段 |\n"
+           "| --- | --- | --- | --- |\n"
+           "| 1 | 征收程序方面的风险 | 程序不规范 | 准备 |\n"
+           "| 2 | 补偿方案风险 | 期望值过高 | 准备、实施 |\n"
+           "| 3 | 决策实施风险 | 信息不透明 | 准备、实施 |\n"
+           "| 4 | 社保名额风险 | 分配未明确 | 准备、实施 |\n"
+           "| 5 | 资金风险 | 资金不足 | 准备、实施 |\n"
+           "| 6 | 水系影响风险 | 影响防洪 | 准备、实施 |\n\n"
+           "从上表可见，本决策主要风险集中在程序、补偿、实施、社保、资金和水系六个方面。\n")
+    chapters = {4: {"markdown": ch4}, 11: {"markdown": ch11}}
+    assert rebuild_risk_overview_table(chapters) == 1
+    out = chapters[4]["markdown"]
+    assert "征收程序方面的风险" not in out
+    assert "| 1 | 补偿方案风险 | 期望值过高 | 准备、实施 |" in out
+    assert "五个方面" not in out and "三个方面" in out
+
+
+def test_risk_measures_table_follows_ch11():
+    """表13-1 的风险类型列与行序按第11章重排：多余的删除、缺的补上。"""
+    from app.validation.content_guardrails import rebuild_risk_measures_table
+    ch11 = ("### （一）分析\n\n"
+            "**1. 补偿方案风险**\n\n正文。风险程度为一般。\n\n"
+            "**2. 资金风险**\n\n正文。风险程度为一般。\n\n"
+            "**3. 舆情风险**\n\n正文。风险程度为较小。\n")
+    ch13 = ("### （一）资金保障\n\n落实专户存储、专款专用。\n\n"
+            "### （二）舆情应对\n\n及时核实并公开回应涉项目舆情。\n\n"
+            "| 序号 | 风险类型 | 防范化解措施 | 责任主体 | 完成时限 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 1 | 征收程序方面的风险 | 依法履行程序 | 区政府 | 批准前 |\n"
+            "| 2 | 补偿方案风险 | 按区片价测算 | 区政府 | 公告前 |\n"
+            "| 3 | 资金风险 | 专户存储 | 区政府 | 批准前 |\n")
+    chapters = {11: {"markdown": ch11}, 13: {"markdown": ch13}}
+    assert rebuild_risk_measures_table(chapters) == 1
+    out = chapters[13]["markdown"]
+    assert "征收程序方面的风险" not in out
+    assert "| 3 | 舆情风险 |" in out and "| 2 | 资金风险 | 专户存储" in out

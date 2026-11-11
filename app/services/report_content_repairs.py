@@ -153,11 +153,29 @@ def _risk_table_stats(md: str) -> Tuple[int, Dict[str, int]]:
 
 def fix_risk_count(chapters: Dict[Any, Dict[str, Any]]) -> int:
     count, dist = 0, {}
-    for ch in chapters.values():
-        if isinstance(ch, dict):
-            c, d = _risk_table_stats(str(ch.get("markdown") or ""))
-            if c > count:
-                count, dist = c, d
+    # 🔴 第11章的风险条目是**唯一口径**（与报告提示词一致）：表4-1/表12-4 都要跟它走。
+    #    拿「章内最大的风险表行数」当口径会取到第4章模板表（写死六类，含征收程序风险），
+    #    与第11章实际分析的五类对不上（2026-11-11 实测）。
+    md11 = str(((chapters.get(11) or chapters.get("11") or {})
+                if isinstance(chapters.get(11) or chapters.get("11"), dict)
+                else {}).get("markdown") or "")
+    if md11:
+        try:
+            from app.validation.content_guardrails import _ch11_items
+            items = _ch11_items(md11)
+            if len(items) >= 3:
+                count = len(items)
+                for _name, lv in items:
+                    if lv:
+                        dist[lv] = dist.get(lv, 0) + 1
+        except Exception:
+            pass
+    if count <= 0:
+        for ch in chapters.values():
+            if isinstance(ch, dict):
+                c, d = _risk_table_stats(str(ch.get("markdown") or ""))
+                if c > count:
+                    count, dist = c, d
     if count <= 0:
         return 0
     n = 0
@@ -167,17 +185,27 @@ def fix_risk_count(chapters: Dict[Any, Dict[str, Any]]) -> int:
         md = str(ch.get("markdown") or "")
         if not md:
             continue
-        out, k1 = re.subn(r'共\s*\d+\s*(个方面主要风险因素|个主要风险因素|项风险因素|项风险)',
+        out, k1 = re.subn(r'共\s*(?:识别)?\s*\d+\s*(个方面主要风险因素|个主要风险因素|项主要风险因素|项风险因素|项风险)',
                           lambda m: f"共{count}{m.group(1)}", md)
         out, k2 = re.subn(r'识别出\s*\d+\s*项', f"识别出{count}项", out)
-        if dist.get("一般") is not None and dist.get("较小") is not None:
+        # 「其中4项为一般风险，2项为较小风险」——量词可能是「个」也可能是「项」
+        _lv_pairs = [(k, v) for k, v in dist.items() if v]
+        if len(_lv_pairs) >= 2:
+            _a, _b = _lv_pairs[0], _lv_pairs[1]
             out, k3 = re.subn(
-                r'(\d+)\s*个为一般风险[，,]\s*(\d+)\s*个为较小风险',
-                f"{dist['一般']}个为一般风险，{dist['较小']}个为较小风险", out)
+                r'(\d+)\s*([个项])为' + re.escape(_a[0]) + r'风险[，,]\s*(\d+)\s*[个项]为'
+                + re.escape(_b[0]) + r'风险',
+                lambda m: (f"{_a[1]}{m.group(2)}为{_a[0]}风险，"
+                           f"{_b[1]}{m.group(2)}为{_b[0]}风险"), out)
         else:
             k3 = 0
-        if k1 or k2 or k3:
-            n += k1 + k2 + k3
+        # 「…共梳理出征收程序、补偿方案…六项主要风险因素」——把列错的清单整句收口
+        out, k4 = re.subn(
+            r'共(?:梳理出|识别出|识别|列出|确定|包括|包含)'
+            r'[^。]{0,80}?(?:[一二三四五六七八九十]+|\d+)\s*项主要风险因素',
+            f"共识别{count}项主要风险因素", out)
+        if k1 or k2 or k3 or k4:
+            n += k1 + k2 + k3 + k4
             ch["markdown"] = out
     return n
 
@@ -197,26 +225,32 @@ _END = r'(?:(?P<ey>\d{4})年)?(?P<em>\d{1,2})月(?P<ed>\d{1,2})日'
 
 
 def fix_date_order(md: str) -> Tuple[str, int]:
+    # 编制完成时点的写法各家不同：「…至X编制评估报告」「…至X报告编制完成止」
+    # 「…至X编制社会稳定风险评估报告」。旧写法只认第一种，实测 2026-11-11
+    # 这版写成「至2026年9月30日报告编制完成止」，评审日期（9/22–9/30）没被纠正。
     make = re.search(
-        _DATE + r'\s*至\s*' + _END + r'[^。]{0,20}?编制评估报告', md)
+        _DATE + r'[^。；]{0,20}?至\s*' + _END +
+        r'[\s\S]{0,30}?(?:编制评估报告|编制社会稳定风险评估报告|报告编制完成|编制完成)', md)
     rev = re.search(
         _DATE + r'\s*至\s*' + _END + r'[^。]{0,20}?组织专家评审', md)
     if not (make and rev):
         return md, 0
     make_end = date(int(make.group(4) or make.group(1)),
                     int(make.group(5)), int(make.group(6)))
-    rev_start = date(int(rev.group(1)), int(rev.group(2)), int(rev.group(3)))
-    rev_end = date(int(rev.group(4) or rev.group(1)),
-                   int(rev.group(5)), int(rev.group(6)))
-    if rev_start > make_end:
-        return md, 0
-    span = max((rev_end - rev_start).days, 0)
-    new_start = make_end + timedelta(days=1)
-    new_end = new_start + timedelta(days=span)
-    old = rev.group(0)
-    new = (f"{new_start.year}年{new_start.month}月{new_start.day}日"
-           f"至{new_end.month}月{new_end.day}日组织专家评审")
-    return md.replace(old, new, 1), 1
+
+    def _move(m):
+        rs = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        re_ = date(int(m.group(4) or m.group(1)), int(m.group(5)), int(m.group(6)))
+        if rs > make_end:
+            return m.group(0)
+        span = max((re_ - rs).days, 0)
+        ns = make_end + timedelta(days=1)
+        ne = ns + timedelta(days=span)
+        return (f"{ns.year}年{ns.month}月{ns.day}日"
+                f"至{ne.month}月{ne.day}日组织专家评审")
+
+    out, n = re.subn(_DATE + r'\s*至\s*' + _END + r'[^。]{0,20}?组织专家评审', _move, md)
+    return out, n
 
 
 # ── ④ 编造的法规名 ───────────────────────────────────────────

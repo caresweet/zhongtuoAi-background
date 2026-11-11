@@ -1165,7 +1165,44 @@ _RISK_LEVEL_PAT = re.compile(r'风险程度为\s*(重大|较大|一般|较小|�
 
 
 def _ch11_items(md: str) -> List[Tuple[str, str]]:
-    """第11章的小节 → [(风险名, 风险程度)]，程度取该小节内最后一次判定。"""
+    """第11章的风险条目 → [(风险名, 风险程度)]，程度取该小节内最后一次判定。
+
+    🔴 第11章的写法有两种：
+      ① 结构小节 `### （一）决策风险因素分析预测`，风险源写在节内 `**1. ××风险**`；
+      ② 直接以风险为小节 `### 11.1 ××方面的风险`。
+    旧实现只认 ①，结果把「（一）（二）（三）」三个**结构小节**当成了三项风险，
+    表12-4 于是印成「决策风险因素分析预测 / 风险估计方法 / 主要风险因素初始风险等级」
+    （2026-11-11 实测）。现在优先取节内编号风险条目，没有再退回小节标题。
+    """
+    lines = str(md or "").split("\n")
+    # ── ① 节内编号风险条目：`**1. 土地征收补偿方案风险**` / `1.征收程序方面的风险`
+    _ITEM = re.compile(r'^(?:\*\*)?\s*(\d{1,2})\s*[.、]\s*([^\n*]{2,40}?风险)\s*(?:\*\*)?\s*$')
+    idxs = [(i, m.group(2).strip()) for i, ln in enumerate(lines)
+            for m in [_ITEM.match(ln.strip())] if m]
+    if len(idxs) >= 3:
+        items = []
+        for k, (i, name) in enumerate(idxs):
+            end = idxs[k + 1][0] if k + 1 < len(idxs) else len(lines)
+            seg = "\n".join(lines[i + 1:end])
+            lv = _RISK_LEVEL_PAT.findall(seg)
+            items.append((name, lv[-1] if lv else ""))
+        return items
+
+    # ── ② 以风险为小节：`### 11.1 ××方面的风险`
+    _SUB = re.compile(r'^#{2,4}\s*(?:\d+(?:\.\d+)*)?\s*[.、]?\s*([^\n]{2,40}风险)\s*$')
+    subs = [(i, m.group(1).strip()) for i, ln in enumerate(lines)
+            for m in [_SUB.match(ln.strip())] if m]
+    if len(subs) >= 3:
+        items = []
+        for k, (i, name) in enumerate(subs):
+            # `### （一）甲风险`：去掉中文序号，只留风险名
+            name = re.sub(r'^[（(][一二三四五六七八九十]+[）)]\s*', '', name).strip()
+            end = subs[k + 1][0] if k + 1 < len(subs) else len(lines)
+            lv = _RISK_LEVEL_PAT.findall("\n".join(lines[i + 1:end]))
+            items.append((name, lv[-1] if lv else ""))
+        return items
+
+    # ── ③ 兜底：（一）（二）（三）小节
     items, cur, buf = [], None, []
 
     def _flush():
@@ -1174,7 +1211,7 @@ def _ch11_items(md: str) -> List[Tuple[str, str]]:
         lv = _RISK_LEVEL_PAT.findall("\n".join(buf))
         items.append((cur, lv[-1] if lv else ""))
 
-    for line in str(md or "").split("\n"):
+    for line in lines:
         s = line.strip()
         m = re.match(r'^#{2,4}\s*（[一二三四五六七八九十]+）\s*(.+)$', s)
         if m:
@@ -1214,13 +1251,257 @@ def rebuild_risk_level_table(chapters: Dict[Any, Dict[str, Any]]):
     while end < len(lines) and lines[end].strip().startswith("|"):
         end += 1
     data_rows = max(0, end - hdr_i - 2)          # 去表头与分隔线
-    if data_rows == len(items):
-        return 0
+    header = [c.strip() for c in lines[hdr_i].strip().strip("|").split("|")]
+    name_ci = next((k for k, c in enumerate(header) if "风险因素" in c), None)
+    # 行数相同还不够 —— 名字必须一一对应（实测 6 行 6 名全不一样也会被放过）
+    if data_rows == len(items) and name_ci is not None:
+        same = True
+        for k, r in enumerate(lines[hdr_i + 2:end]):
+            cs = [c.strip() for c in r.strip().strip("|").split("|")]
+            if name_ci >= len(cs) or cs[name_ci] != items[k][0]:
+                same = False
+                break
+        if same:
+            return 0
 
     new_tbl = ["| 序号 | 风险因素 | 初始风险等级 |", "| --- | --- | --- |"]
     for i, (name, level) in enumerate(items, 1):
         new_tbl.append(f"| {i} | {name} | {level or '低风险'} |")
     ch12["markdown"] = "\n".join(lines[:hdr_i] + new_tbl + lines[end:])
+    return 1
+
+
+def rebuild_risk_overview_table(chapters: Dict[Any, Dict[str, Any]]):
+    """第4章表4-1 按**第11章的风险清单**重建（第11章是唯一口径）。
+
+    🔴 第4章的模板表是写死的六类风险（含「征收程序方面的风险」），而第11章按
+    项目实际只能列五类（本项目前期程序已依法履行，禁止列征收程序风险）——
+    成稿里第4章「六个方面」、第11章五节、评审一眼看出对不上
+    （专家批注「4项风险，第11章为6风险」，2026-11-11）。
+    这里用第11章的条目重排表4-1：同名/近义的行沿用原描述与发生阶段，
+    新出现的风险取该节第一句话作描述。
+    """
+    import difflib
+
+    ch11 = chapters.get(11) or chapters.get("11")
+    ch4 = chapters.get(4) or chapters.get("4")
+    if not isinstance(ch11, dict) or not isinstance(ch4, dict):
+        return 0
+    items = _ch11_items(str(ch11.get("markdown") or ""))
+    if len(items) < 3:
+        return 0
+    md11 = str(ch11.get("markdown") or "")
+    md = str(ch4.get("markdown") or "")
+    if not md:
+        return 0
+    lines = md.split("\n")
+    hdr_i = next((i for i, ln in enumerate(lines)
+                  if ln.strip().startswith("|") and "风险类型" in ln
+                  and "风险因素描述" in ln), None)
+    if hdr_i is None:
+        return 0
+    end = hdr_i
+    while end < len(lines) and lines[end].strip().startswith("|"):
+        end += 1
+    header = [c.strip() for c in lines[hdr_i].strip().strip("|").split("|")]
+    try:
+        name_ci = header.index("风险类型")
+        desc_ci = header.index("风险因素描述")
+    except ValueError:
+        return 0
+    stage_ci = header.index("发生阶段") if "发生阶段" in header else None
+
+    old_rows = []
+    for r in lines[hdr_i + 2:end]:
+        cs = [c.strip() for c in r.strip().strip("|").split("|")]
+        if len(cs) > max(name_ci, desc_ci):
+            old_rows.append(cs)
+    if len(old_rows) == len(items) and all(
+            old_rows[i][name_ci] == items[i][0] for i in range(len(items))):
+        return 0
+
+    def _norm(s: str) -> str:
+        return re.sub(r'(方面的风险|引发的风险|的风险|风险|的)', '', s)
+
+    # 每个风险小节的第一句话，作为新风险行的描述
+    def _first_sentence(name: str) -> str:
+        pat = re.escape(name)
+        m = re.search(pat + r'[\s\S]{0,400}?\n\s*\n([^|\n][^\n]{8,80})', md11)
+        if not m:
+            return ""
+        s = re.split(r'[。；]', m.group(1).strip())[0]
+        return s[:60]
+
+    new_rows = []
+    for i, (name, _lv) in enumerate(items, 1):
+        matched = None
+        b = _norm(name)
+        # ① 先找**规范化后完全相同**的行（「征收决策资金风险」不能被
+        #    「征收决策实施风险」的高相似度抢走描述）
+        for cs in old_rows:
+            if _norm(cs[name_ci]) == b:
+                matched = cs
+                break
+        if matched is None:
+            for cs in old_rows:
+                a = _norm(cs[name_ci])
+                if (a in b or b in a) and \
+                        difflib.SequenceMatcher(None, a, b).ratio() >= 0.8:
+                    matched = cs
+                    break
+        if matched is None:
+            for cs in old_rows:
+                a = _norm(cs[name_ci])
+                if difflib.SequenceMatcher(None, a, b).ratio() >= 0.9:
+                    matched = cs
+                    break
+        desc = matched[desc_ci] if matched else _first_sentence(name)
+        stage = (matched[stage_ci] if matched and stage_ci is not None
+                 and stage_ci < len(matched) else "准备、实施")
+        row = [""] * len(header)
+        row[0] = str(i)
+        row[name_ci] = name
+        row[desc_ci] = desc
+        if stage_ci is not None and stage_ci < len(row):
+            row[stage_ci] = stage
+        new_rows.append("| " + " | ".join(row) + " |")
+
+    tbl = ["| " + " | ".join(header) + " |",
+           "| " + " | ".join("---" for _ in header) + " |"] + new_rows
+    out = "\n".join(lines[:hdr_i] + tbl + lines[end:])
+
+    # 表格下方「…六个方面」的概述句同步改成实际条数
+    _cn = {3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八"}
+    n = len(items)
+    out = re.sub(r'主要风险集中在[^。]{0,80}?([三四五六七八九]+)个方面',
+                 lambda m: f"主要风险集中在" + "、".join(
+                     _norm(x[0]) or x[0] for x in items) + f"{_cn.get(n, str(n))}个方面",
+                 out)
+    out = re.sub(r'共识别\s*\d+\s*(个方面主要风险因素|项主要风险因素)',
+                 f"共识别{n}" + r"\1", out)
+    ch4["markdown"] = out
+    return 1
+
+
+def rebuild_risk_measures_table(chapters: Dict[Any, Dict[str, Any]]):
+    """第13章表13-1「风险类型」列按第11章风险清单重排。
+
+    只换**风险类型**这一列与行序：同名/近义的措施、责任主体、时限原样沿用；
+    第11章有、表里没有的风险，从本章对应小节取第一句作措施（责任主体取表内
+    出现最多的一个，时限写「全过程」）；表里多出来的风险行删除。
+    """
+    import difflib
+
+    ch11 = chapters.get(11) or chapters.get("11")
+    ch13 = chapters.get(13) or chapters.get("13")
+    if not isinstance(ch11, dict) or not isinstance(ch13, dict):
+        return 0
+    items = _ch11_items(str(ch11.get("markdown") or ""))
+    if len(items) < 3:
+        return 0
+    md = str(ch13.get("markdown") or "")
+    lines = md.split("\n")
+    hdr_i = next((i for i, ln in enumerate(lines)
+                  if ln.strip().startswith("|") and "风险类型" in ln
+                  and "防范化解措施" in ln), None)
+
+    def _norm(s: str) -> str:
+        return re.sub(r'(方面的风险|引发的风险|环境影响|的风险|风险|方面|的)', '', s)
+
+    # 本章小节：标题 → 正文（新增风险的措施来源）
+    _secs = []
+    for i, ln in enumerate(lines):
+        m = re.match(r'^#{2,4}\s*(?:[（(][一二三四五六七八九十]+[）)]|\d+(?:\.\d+)*)\s*(.+)$',
+                     ln.strip())
+        if m:
+            body = []
+            for nxt in lines[i + 1:]:
+                s = nxt.strip()
+                if re.match(r'^#{1,4}\s', s) or s.startswith("|"):
+                    break
+                if s:
+                    body.append(s)
+            _secs.append((m.group(1).strip(), " ".join(body)))
+
+    def _measure_for(name: str) -> str:
+        core = set(_norm(name))
+        best, score = "", 0
+        for title, body in _secs:
+            ov = len(core & set(title + body))
+            if ov > score:
+                best, score = body, ov
+        if not best:
+            return ""
+        return re.split(r'[。；]', best.strip())[0][:80]
+
+    # 🔴 模型这一版**没写**「风险防范与化解措施汇总表」时，不硬造一张：
+    #    本章没有对应措施小节的风险（如舆论媒体）就没有措施可引，
+    #    硬拼出来的表格等于编造。缺表由审核清单提示，交人工补。
+    if hdr_i is None:
+        return 0
+
+    end = hdr_i
+    while end < len(lines) and lines[end].strip().startswith("|"):
+        end += 1
+    header = [c.strip() for c in lines[hdr_i].strip().strip("|").split("|")]
+    try:
+        name_ci = header.index("风险类型")
+        measure_ci = header.index("防范化解措施")
+    except ValueError:
+        return 0
+    org_ci = header.index("责任主体") if "责任主体" in header else None
+    time_ci = header.index("完成时限") if "完成时限" in header else None
+    rows = []
+    for r in lines[hdr_i + 2:end]:
+        cs = [c.strip() for c in r.strip().strip("|").split("|")]
+        if len(cs) > name_ci:
+            rows.append(cs)
+    if all(i < len(rows) and rows[i][name_ci] == items[i][0]
+           for i in range(len(items))) and len(rows) == len(items):
+        return 0
+
+    # 表内最常见的责任主体（给新增风险兜底用）
+    _orgs = [cs[org_ci] for cs in rows if org_ci is not None and org_ci < len(cs)
+             and cs[org_ci]]
+    common_org = max(set(_orgs), key=_orgs.count) if _orgs else ""
+
+    new_rows, used = [], set()
+    for i, (name, _lv) in enumerate(items, 1):
+        b = _norm(name)
+        matched = None
+        for k, cs in enumerate(rows):
+            if k in used:
+                continue
+            a = _norm(cs[name_ci])
+            if a == b or (a in b or b in a) or \
+                    difflib.SequenceMatcher(None, a, b).ratio() >= 0.8:
+                matched, used_k = cs, k
+                break
+        row = [""] * len(header)
+        if matched:
+            used.add(used_k)
+            row = list(matched)
+        else:
+            row[name_ci] = name
+            row[measure_ci] = _measure_for(name)
+            if org_ci is not None and org_ci < len(row):
+                row[org_ci] = common_org
+            if time_ci is not None and time_ci < len(row):
+                row[time_ci] = "全过程"
+        row[0] = str(i)
+        row[name_ci] = name       # 名称以第11章为准
+        new_rows.append("| " + " | ".join(row) + " |")
+
+    tbl = ["| " + " | ".join(header) + " |",
+           "| " + " | ".join("---" for _ in header) + " |"] + new_rows
+    out = "\n".join(lines[:hdr_i] + tbl + lines[end:])
+    # 表下「六项风险均明确了…」按条数改；列错的环节清单收口
+    _cn = {3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八"}
+    out = re.sub(r'[一二三四五六七八九十\d]+项风险均明确了',
+                 f"{_cn.get(len(items), len(items))}项风险均明确了", out)
+    out = re.sub(r'上述措施落实后，[^。]{0,80}?等环节',
+                 "上述措施落实后，各风险环节", out)
+    ch13["markdown"] = out
     return 1
 
 
@@ -1539,6 +1820,11 @@ _PLACE_BAD_PARTS = (
     "当地", "原有", "周边", "其他", "相关", "各级", "各个", "乡镇", "城镇",
     "城市", "农村", "农田", "田间", "道路", "公路", "交通", "水利", "电力",
     "施工", "生产", "行政", "开发", "农业", "乡村", "主要", "部分",
+    # 🔴 法规名不是地名：「中华人民共和国村民委员会组织法」会被
+    #    `_PLACE_NAME_RE` 截成「中华人民共和国村」，再被当成范文地名换成项目地址，
+    #    成稿印成「《朱坝街道办事处、三圩社区、二组、三组、六组民委员会组织法》」
+    #    （2026-11-11 实测，专家批注「没有这个说法」）。
+    "中华人民共和国", "人民共和国",
 )
 _VILLAGE_PAIR_RE = re.compile(
     r'[一-龥]{2,8}(?:镇|村|街道|社区)到[一-龥]{2,8}(?:镇|村|街道|社区)之间')
@@ -1676,6 +1962,10 @@ def scrub_sample_facts(md: str, filled: dict, sample_text: str,
     def _place_repl(m):
         nonlocal n
         tok = m.group(0)
+        # 🔴 书名号内是法规/标准名，不是地名 —— 一律不动
+        #    （否则「《中华人民共和国村民委员会组织法》」会被换成项目地址）。
+        if md.rfind("《", 0, m.start()) > md.rfind("》", 0, m.start()):
+            return tok
         base = _trim_place(tok)
         if (base in _PLACE_STOP or tok in user_corpus or base in user_corpus
                 or base not in _sample_places):

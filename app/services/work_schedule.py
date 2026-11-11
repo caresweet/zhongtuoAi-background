@@ -59,7 +59,14 @@ _HEAD_SCHEDULE: Tuple[Tuple[str, str], ...] = (
 )
 
 # 分项标题行：`（2）现场走访调查` / `2.制定评估方案` / `**（3）风险因素预测…**`
-_ITEM_RE = re.compile(r'^[\*\s]*(?:[（(]\s*\d+\s*[）)]|\d+\s*[.、])\s*(?P<name>[^\n*：:]{2,40})')
+# 🔴 标题名必须在**句读处**截断：旧写法 `[^\n*：:]{2,40}` 会一路吞到正文里，
+#    把「6.编制评估报告。在上述工作基础上，2026年9月28日至2026年9月30日编制社」
+#    整串当成标题名 —— 日期于是被插在「社」和「会」之间，成稿印成
+#    「编制社　2026年9月28日—2026年9月30日，会稳定风险评估报告」
+#    （2026-11-11 实测，专家批注「话说不完整」）。
+_ITEM_RE = re.compile(
+    r'^[\*\s]*(?:[（(]\s*\d+\s*[）)]|\d+\s*[.、])\s*'
+    r'(?P<name>[^\n*：:。；，、]{2,40})')
 
 # 落款日期占位（第7章「3.方案审核」末尾）
 _BLANK_DATE_RE = re.compile(r'^[_\s]*年[_\s]*月[_\s]*日[_\s]*$')
@@ -101,6 +108,11 @@ def _insert_after_title(line: str, m, prefix: str) -> str:
     mm = re.match(r'^(\s*[：:]\s*)', rest)
     if mm:
         return f"{head}{mm.group(1)}{prefix}{rest[mm.end():]}"
+    # 「6.编制评估报告。正文…」——标题后紧跟句号时，日期插在句号之后，
+    # 不能塞到「编制评估报告」和句号之间
+    mp = re.match(r'^(\s*[。；，、]\s*)', rest)
+    if mp:
+        return f"{head}{mp.group(1)}{prefix}{rest[mp.end():]}"
     return f"{head}　{prefix}{rest.strip()}"
 
 

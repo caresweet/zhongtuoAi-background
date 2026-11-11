@@ -296,7 +296,10 @@ def front_matter_labels(domain: str | None) -> Dict[str, str]:
         "roster_heading": "稳评工作组人员及分工情况",
         "roster_lead_role": "稳评负责人",
         "cert_section_heading": "社会稳定风险评估业务培训证书",
-        "material_note": "本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件1。",
+        # 🔴 附件1 是「专家评审材料」，不是营业执照/职称证书 —— 原句「详见附件1」
+        #    被专家批注「和附件1不匹配」（2026-11-11）。材料就在本节，
+        #    改为指向本节，不指附件号。
+        "material_note": "本报告相关机构营业执照、项目人员职称及稳评培训证书等材料详见公司资质证书。",
         "map_caption": "拟征收土地位置示意图",
         "audit_comment_author": "稳评审核Agent",
     }

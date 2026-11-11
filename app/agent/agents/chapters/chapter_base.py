@@ -20,6 +20,18 @@ from app.agent.chapter_definitions import FANWEN_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
 
+# 🔴 清洗「二进制乱码」时**必须保留的字符集**。
+#    旧写法只放行：ASCII、CJK、中文标点（U+3000-303F）、全角（U+FF00-FFEF）——
+#    结果把正文里的 **× ≥ ≤ ㎡ ① ℃ ² ± → —** 一并删掉：
+#    实测 2026-11-11 第12章「每行得分 = a×b×35」印成「a  b  35」，
+#    「W≥70 为高风险」印成「W70 为高风险」，公式直接成了病句。
+#    这里把数学符号/BMP 常用符号区整段放行。
+_KEEP_PRINTABLE_RE = re.compile(
+    r'[^\x20-\x7E -ÿ -⁯⁰-₟₠-⃏'
+    r'℀-⅏←-⇿∀-⋿①-⓿─-╿'
+    r'■-◿　-〿㈀-㏿一-鿿︐-﹏'
+    r'＀-￯\n\r\t]')
+
 
 def _safe_int(v, default: int = 0) -> int:
     """字段值 → int；`【待补充】` / 空 / 非数字一律回落默认值。
@@ -1684,7 +1696,7 @@ class ChapterAgentBase(BaseAgent):
         """Remove garbled/binary characters from extracted document text."""
         import re
         # Remove non-printable characters except common whitespace
-        text = re.sub(r'[^\x20-\x7E一-鿿　-〿＀-￯\n\r\t]', '', text)
+        text = _KEEP_PRINTABLE_RE.sub('', text)
         # Remove lines that are mostly garbled (>50% non-CJK non-ASCII)
         lines = text.split('\n')
         cleaned_lines = []
@@ -1728,7 +1740,7 @@ class ChapterAgentBase(BaseAgent):
         content = content.replace('满分44分', '').replace('总分44分', '')
 
         # Strip garbled/binary characters first
-        content = re.sub(r'[^\x20-\x7E一-鿿　-〿＀-￯\n\r\t]', '', content)
+        content = _KEEP_PRINTABLE_RE.sub('', content)
         # Strip source annotations like 【数据来源：XXX】
         content = re.sub(r'【数据来源[：:][^】]*】', '', content)
         content = re.sub(r'\[数据来源[：:][^\]]*\]', '', content)

@@ -132,6 +132,33 @@ def fix_service_period(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     return out, n
 
 
+def fix_use_period_end(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """「临时用地使用时间 18 个月，从 2027 年 1 月到 2029 年 6 月」—— 结束月算错。
+
+    18 个月的用地区间应是 2027-01～2028-06；模型常把**服务年限总数（30 个月）**
+    的结束月（2029-06）抄到使用期上。按「月份 + 起点」重算结束月。
+    """
+    months = _num(filled.get("land_use_months") or filled.get("land_use_period_months"))
+    if not months:
+        return md, 0
+
+    def _repl(m):
+        head, mo_txt, sep = m.group(1), m.group(2), m.group(3)
+        mo = int(float(mo_txt))
+        y, mm, conn = int(m.group(4)), int(m.group(5)), m.group(6)
+        if mo != int(months):
+            return m.group(0)
+        idx = y * 12 + (mm - 1) + mo - 1
+        ey, em = divmod(idx, 12)
+        return f"{head}{mo_txt}个月{sep}{y}年{mm}月{conn}{ey}年{em + 1}月"
+
+    pat = (r'((?:临时用地)?(?:使用时间为|批准使用|批准期限|使用期)[^。；\n]{0,4}?)'
+           r'(\d+(?:\.\d+)?)\s*个月([，,]?\s*(?:从|自)?\s*)'
+           r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*([到至])\s*(\d{4})\s*年\s*(\d{1,2})\s*月')
+    out, n = re.subn(pat, _repl, md)
+    return out, n
+
+
 # ── 复垦方向 / 面积 ─────────────────────────────────────────
 def _land_targets(filled: Dict[str, Any]) -> Tuple[str, float, Dict[str, float]]:
     rows = []
@@ -265,12 +292,21 @@ def drop_missing_table_refs(md: str) -> Tuple[str, int]:
 
 # ── 硬化面积来源 ─────────────────────────────────────────────
 def explain_hard_area(md: str) -> Tuple[str, int]:
-    if "硬化面积" not in md or "施工组织设计" in md:
+    """硬化面积首次出现时注明出处（批注：1.1000 从哪里来的、计算过程）。
+
+    出处是施工组织设计「场地硬化与拆除」章节；本方案只做引用与工程量换算，
+    不另造拆分。已经带出处说明的不重复加。
+    """
+    if "施工组织设计" in md:
         return md, 0
-    out, k = re.subn(
-        r'(硬化面积\s*\d+(?:\.\d+)?\s*公顷)',
-        r'\1（依据施工组织设计，为施工场站与施工便道硬化部分）', md, count=1)
-    return out, k
+    _note = "（依据施工组织设计场地硬化与拆除章节）"
+    for pat in (r'(硬化面积合计\s*\d+(?:\.\d+)?\s*(?:公顷|hm²))',
+                r'(需清除地面垫层的面积为\s*\d+(?:\.\d+)?\s*(?:公顷|hm²))',
+                r'(硬化面积\s*\d+(?:\.\d+)?\s*(?:公顷|hm²))'):
+        out, k = re.subn(pat, rf'\1{_note}', md, count=1)
+        if k:
+            return out, k
+    return md, 0
 
 
 # ── 表/图编号 ───────────────────────────────────────────────
@@ -333,6 +369,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_u = fix_units(md)
         md, n_d = dedupe_sections(md)
         md, n_s = fix_service_period(md, filled or {})
+        md, n_ue = fix_use_period_end(md, filled or {})
         md, n_r = fix_restoration(md, filled or {})
         md, n_t = fix_strip_depth(md, filled or {})
         md, n_c = fix_cost_numbers(md, filled or {})
@@ -343,7 +380,8 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
             ch["markdown"] = md
             bits = []
             for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
-                             ("服务年限", n_s), ("复垦方向/面积", n_r),
+                             ("服务年限", n_s), ("使用期起止", n_ue),
+                             ("复垦方向/面积", n_r),
                              ("剥离厚度", n_t), ("费用数字", n_c),
                              ("表3-1指向", n_a), ("删无效表号", n_dr),
                              ("硬化面积来源", n_e)):

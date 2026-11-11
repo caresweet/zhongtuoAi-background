@@ -214,7 +214,8 @@ def test_front_matter_labels_per_domain():
     assert stab["roster_heading"] == "稳评工作组人员及分工情况"
     assert stab["roster_lead_role"] == "稳评负责人"
     assert stab["cert_section_heading"] == "社会稳定风险评估业务培训证书"
-    assert stab["material_note"] == "本报告相关机构营业执照、项目人员职称及稳评培训证书详见附件1。"
+    # 附件1 是专家评审材料，营业执照/职称证书就在资质证书节 —— 不能再写「详见附件1」
+    assert stab["material_note"] == "本报告相关机构营业执照、项目人员职称及稳评培训证书等材料详见公司资质证书。"
     assert stab["map_caption"] == "拟征收土地位置示意图"
     assert stab["audit_comment_author"] == "稳评审核Agent"
     # 不传域 == 显式 stability

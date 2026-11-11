@@ -818,6 +818,14 @@ class ReportAssembler:
                 from app.validation.content_guardrails import rebuild_risk_level_table
                 if rebuild_risk_level_table(chapters):
                     logger.info("[表12-4] 与第11章风险条目不一致，已按小节重排")
+                # 表4-1 同样以第11章风险清单为准（模板表写死六类，常与第11章对不上）
+                from app.validation.content_guardrails import rebuild_risk_overview_table
+                if rebuild_risk_overview_table(chapters):
+                    logger.info("[表4-1] 已按第11章风险清单重建")
+                # 表13-1 的「风险类型」列同理，措施/责任主体沿用原行
+                from app.validation.content_guardrails import rebuild_risk_measures_table
+                if rebuild_risk_measures_table(chapters):
+                    logger.info("[表13-1] 已按第11章风险清单重排")
             except Exception as _se:
                 logger.warning(f"[风险指数] 一致性修正跳过: {_se}")
 
@@ -1211,6 +1219,8 @@ class ReportAssembler:
         self._dedup_duplicate_tables(doc)
         # 表/图/附件编号：所有域按正文出现顺序重排（业主 2026-11-11）
         self._normalize_caption_order(doc)
+        # 断面图/大样图/做法图下面不放「图中红线范围…」解读（图上没有红线）
+        self._drop_schematic_redline_text(doc)
         self._fix_truncated_paragraphs(doc)
         if self._domain == "reclamation":
             self._normalize_section_numbers(doc)
@@ -1892,13 +1902,26 @@ class ReportAssembler:
             return f"{x:.1f}" if abs(x - round(x)) > 1e-9 else f"{round(x)}"
 
         lst = "、".join(f"{n}{_fmt(v)}平方米" for n, v in pairs)
+        # 「地类构成包括…」是旧写法；模型也会写「勘测定界成果显示，地类面积分别为：…」
+        # 「地类面积按…分类确认」—— 都要认，否则正文合计仍比表6-1 少分项。
+        _list_pat = re.compile(
+            r'(地类构成包括|地类面积分别为[：:]?|地类构成为|地类面积按)([^。]+)(。)')
+
+        def _rebuild_list(m):
+            body = m.group(2)
+            k = body.rfind("平方米")
+            tail = body[k + 3:] if k >= 0 else ""
+            return f"{m.group(1)}{lst}{tail}{m.group(3)}"
+
         for para in doc.paragraphs:
             txt = para.text
-            if "拟征收土地总面积" not in txt or "地类构成包括" not in txt:
+            if "拟征收土地总面积" not in txt:
+                continue
+            if not _list_pat.search(txt):
                 continue
             new = _re.sub(r'(拟征收土地总面积)\s*[\d.]+\s*平方米',
                           rf'\g<1>{_fmt(total)}平方米', txt)
-            new = _re.sub(r'(地类构成包括)[^。]+(。)', rf'\g<1>{lst}\g<2>', new)
+            new = _list_pat.sub(_rebuild_list, new, count=1)
             if new != txt:
                 if not para.runs:
                     para.add_run(new)
@@ -1954,9 +1977,11 @@ class ReportAssembler:
             return
         for p in doc.paragraphs:
             t = p.text
-            if "得分为" not in t:
+            if "得分" not in t:
                 continue
-            nt = re.sub(r'(得分为)\s*[\d.]+(\s*分)', rf'\g<1>{total:.1f}\g<2>', t)
+            # 正文的写法有两种：「三项合计得分为0.0分」「以定量分析法计算，得分12.0分」
+            # —— 两种都要跟着表里的合计走，否则同一页里 0 分和 12 分并存。
+            nt = re.sub(r'(得分)(为)?\s*[\d.]+\s*分', rf'\g<1>\g<2>{total:.1f}分', t)
             if nt != t:
                 if not p.runs:
                     p.add_run(nt)
@@ -1964,6 +1989,37 @@ class ReportAssembler:
                     p.runs[0].text = nt
                     for r in p.runs[1:]:
                         r.text = ""
+
+    def _drop_schematic_redline_text(self, doc):
+        """断面/大样/做法/详图/设计图/结构图下面不写「图中红线范围…」。
+
+        批注（2026-11-11）：「图6-1 临时拦挡措施断面示意图」下面被塞了一段
+        「图中红线范围为本次复垦责任范围…面积 26,800 平方米…」，图上根本没有红线。
+        `_add_figure_reading` 已按图名跳过，但模型自己写的解读段落还在正文里 ——
+        这里按「示意图图注后紧跟红线解读」的形态统一删掉。
+        """
+        import re as _re
+        _SCHEMA = ("断面", "大样", "做法", "详图", "设计图", "结构图")
+        _CAP = _re.compile(r'^\s*图\s*\d+\s*[-—－]\s*\d+\s*(.*)$')
+        _REDLINE = ("红线范围为本次复垦责任范围", "图中红线范围",
+                    "上述边界即复垦工程、监测与管护的实际作业范围")
+        _last_schema = False
+        for p in list(doc.paragraphs):
+            t = p.text.strip()
+            m = _CAP.match(t)
+            if m:
+                _last_schema = any(k in m.group(1) for k in _SCHEMA)
+                continue
+            if not t:
+                continue
+            # 标题/新小节：示意图区间结束
+            if p.style.name.startswith("Heading") or _re.match(
+                    r'^(第[一二三四五六七八九十]+[章节]|[（(][一二三四五六七八九十]+[）)]|\d+(\.\d+)*\s)',
+                    t):
+                _last_schema = False
+                continue
+            if _last_schema and any(k in t for k in _REDLINE):
+                p._element.getparent().remove(p._element)
 
     def _fix_truncated_paragraphs(self, doc):
         """正文里「话说到一半」的残句：回退到最后一个完整句子。"""

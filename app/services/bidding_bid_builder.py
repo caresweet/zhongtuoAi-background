@@ -685,15 +685,19 @@ def _center_all_cells(doc) -> None:
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
 
-def _img(doc, data: bytes, width_cm=15.0, caption=""):
+def _img(doc, data: bytes, width_cm=15.0, caption="", page_break_before=False):
     from docx.shared import Cm
     try:
         doc.add_picture(io.BytesIO(data), width=Cm(width_cm))
     except Exception as e:
         logger.warning(f"[投标文件] 图片插入失败: {e}")
-        return
+        return None
+    para = doc.paragraphs[-1]
+    if page_break_before:
+        para.paragraph_format.page_break_before = True
     if caption:
         _p(doc, caption, size=10.5, align="center", indent=False)
+    return para
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2380,16 +2384,21 @@ def _performance_rows() -> List[Tuple[str, str, str]]:
 
 def _asset_block(doc, category_kw: str, names: Sequence[Tuple[str, ...]], caption="",
                  *, break_after=True, width_cm=15.0):
-    """按图片名插入公司档案图片（不一定全有，有几张插几张），宽度由版式配置给定。"""
+    """按图片名插入公司档案图片（不一定全有，有几张插几张），宽度由版式配置给定。
+
+    🔴 图片之间用**段前分页**，不用「图片 + 分页符段落」：整页高的扫描件正好顶到
+       下边距时，分页符段落放不下会单独占一页，导致每张图后面夹一张空白页
+       （实测 2026-11-11：文件2 的审计报告全套变成「一页图、一页白」）。
+    """
     count = 0
     for name_tuple in names:
         kw = name_tuple[0]
         for nm, data in _asset_images(kw, limit=20):
             if count == 0 and caption:
                 _p(doc, caption, bold=False, indent=False)
-            _img(doc, data, width_cm)
-            if break_after:
-                doc.add_page_break()
+            _img(doc, data, width_cm, page_break_before=(count > 0))
             count += 1
+    if count and break_after:
+        doc.add_page_break()
     if count == 0 and caption:
         _p(doc, f"（{caption}：见公司档案原件）", indent=False)

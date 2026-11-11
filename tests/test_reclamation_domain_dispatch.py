@@ -1061,8 +1061,9 @@ def test_ch4_analysis_tables_render(tmp_path):
     """第4章补渲四张分析表（样本 13 张表里可确定性推导的那四张）。"""
     doc = _render_doc_full(tmp_path, {4: {"markdown": _CH4_MD}}, _CH4_FILLED)
     caps = "\n".join(p.text for p in doc.paragraphs)
-    for _c in ("表4-8 土地复垦主导限制因素", "表4-11 临时用地表土资源平衡分析表",
-               "表4-12 临时用地水资源分析表", "表4-13 临时用地复垦前复垦后结构对比表"):
+    # 表号按正文出现顺序重排（2026-11-11 业主口径：不跳号、按顺序），只校验表题
+    for _c in ("土地复垦主导限制因素", "临时用地表土资源平衡分析表",
+               "临时用地水资源分析表", "临时用地复垦前复垦后结构对比表"):
         assert _c in caps, _c
 
 
@@ -1094,8 +1095,8 @@ def test_ch4_tables_land_under_their_sections(tmp_path):
     order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     assert any(t.startswith("## 4.5") or t.endswith("水土资源平衡分析") for t in order)
     i45 = next(i for i, t in enumerate(order) if "水土资源平衡分析" in t)
-    i48 = next(i for i, t in enumerate(order) if t.startswith("表4-8"))
-    i413 = next(i for i, t in enumerate(order) if t.startswith("表4-13"))
+    i48 = next(i for i, t in enumerate(order) if "主导限制因素" in t and t.startswith("表4-"))
+    i413 = next(i for i, t in enumerate(order) if "复垦前复垦后结构对比表" in t and t.startswith("表4-"))
     assert i48 < i45 < i413
 
 
@@ -1103,7 +1104,8 @@ def test_ch4_tables_skipped_when_model_wrote_its_own(tmp_path):
     """模型已自己写了同题表 → 系统不重复补（避免两张同题表）。"""
     md = _CH4_MD + "\n表4-13 临时用地复垦前复垦后结构对比表\n\n| 地类 | 面积 |\n| --- | --- |\n| 耕地 | 0.0478 |\n"
     doc = _render_doc_full(tmp_path, {4: {"markdown": md}}, _CH4_FILLED)
-    caps = [p.text for p in doc.paragraphs if p.text.startswith("表4-13")]
+    caps = [p.text for p in doc.paragraphs
+            if p.text.startswith("表4-") and "复垦前复垦后结构对比表" in p.text]
     assert len(caps) <= 1, caps
 
 
@@ -1556,8 +1558,9 @@ def test_ch7_tables_render_from_budget_estimate(tmp_path, monkeypatch):
                                       7: {"markdown": _CH7_MD}},
                            {"project_name": "测试复垦项目", "area_m2": 8070.0})
     order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-3"))
-    i74 = next(i for i, t in enumerate(order) if t.startswith("表7-4"))
+    # 表号按出现顺序重排：用表题定位，不再依赖样本表号 7-3/7-4
+    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-") and "工程施工费估算表" in t)
+    i74 = next(i for i, t in enumerate(order) if t.startswith("表7-") and "土地复垦投资估算表" in t)
     i722 = next(i for i, t in enumerate(order) if t.startswith("7.2.2"))
     assert i73 < i722 < i74, (i73, i722, i74)
     tb3 = _table_by_header(doc, "综合单价")
@@ -1622,7 +1625,7 @@ def test_ch7_tables_flush_on_four_level_headings(tmp_path, monkeypatch):
     doc = _render_doc_full(tmp_path, {6: {"markdown": _QTY_MD}, 7: {"markdown": md}},
                            {"project_name": "测试复垦项目", "area_m2": 8070.0})
     order = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-3"))
+    i73 = next(i for i, t in enumerate(order) if t.startswith("表7-") and "工程施工费估算表" in t)
     i722 = next(i for i, t in enumerate(order) if t.startswith("7.2.2"))
     assert i73 < i722, (i73, i722)
 

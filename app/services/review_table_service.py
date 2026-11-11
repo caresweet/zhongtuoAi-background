@@ -634,18 +634,18 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
 
     # r0~r2 决策事项名称 / 适用程序
     tbl.cell(0, 0).merge(tbl.cell(2, 0))
-    _rv_cell(tbl, 0, 0, "决策\n事项\n名称", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 0, 0, "决策\n事项\n名称", bold=False, align=_C, font='黑体')
     tbl.cell(0, 1).merge(tbl.cell(2, 1))
     _rv_cell(tbl, 0, 1, d['name'] or "【待填写】", align=_C)
     tbl.cell(0, 2).merge(tbl.cell(2, 2))
-    _rv_cell(tbl, 0, 2, "适用\n程序", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 0, 2, "适用\n程序", bold=False, align=_C, font='黑体')
     for _i, _p in enumerate(["简易程序", "一般程序", "特殊程序"]):
         _rv_cell(tbl, _i, 3, _p, align=_C)
         _rv_cell(tbl, _i, 4, "√" if _p == "一般程序" else "", align=_C)
 
     # r3~r5 稳评责任单位
     tbl.cell(3, 0).merge(tbl.cell(5, 0))
-    _rv_cell(tbl, 3, 0, "稳评\n责任\n单位", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 3, 0, "稳评\n责任\n单位", bold=False, align=_C, font='黑体')
     _rv_cell(tbl, 3, 1, "单位\n名称", align=_C)
     tbl.cell(3, 2).merge(tbl.cell(3, 4))
     _rv_cell(tbl, 3, 2, d['org'])
@@ -660,7 +660,7 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
 
     # r6~r8 稳评实施单位
     tbl.cell(6, 0).merge(tbl.cell(8, 0))
-    _rv_cell(tbl, 6, 0, "稳评\n实施\n单位", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 6, 0, "稳评\n实施\n单位", bold=False, align=_C, font='黑体')
     _rv_cell(tbl, 6, 1, "单位\n名称", align=_C)
     tbl.cell(6, 2).merge(tbl.cell(6, 4))
     _rv_cell(tbl, 6, 2, d['impl_unit'])
@@ -683,7 +683,7 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
     #    两端对齐 + 首行缩进 2 字符 + 固定行距 16pt。
     #    旧实现把「N.标题 内容」挤成一行、左对齐、无缩进（业主：「段落格式不正确」）。
     tbl.cell(10, 0).merge(tbl.cell(10, 1))
-    _rv_cell(tbl, 10, 0, "决策\n概况", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 10, 0, "决策\n概况", bold=False, align=_C, font='黑体')
     tbl.cell(10, 2).merge(tbl.cell(10, 4))
     _ovc = tbl.cell(10, 2)
     _ovc.paragraphs[0].clear()
@@ -714,13 +714,13 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
 
     for _r, _label, _val in _single:
         tbl.cell(_r, 0).merge(tbl.cell(_r, 1))
-        _rv_cell(tbl, _r, 0, _label, bold=True, align=_C, font='黑体')
+        _rv_cell(tbl, _r, 0, _label, bold=False, align=_C, font='黑体')
         tbl.cell(_r, 2).merge(tbl.cell(_r, 4))
         _rv_cell(tbl, _r, 2, _val, align=_L, indent=True, blank_after_subhead=True)
 
     # r13~r15 各方意见
     tbl.cell(13, 0).merge(tbl.cell(15, 0))
-    _rv_cell(tbl, 13, 0, "各方\n意见", bold=True, align=_C, font='黑体')
+    _rv_cell(tbl, 13, 0, "各方\n意见", bold=False, align=_C, font='黑体')
     for _r, _label, _val in [
         (13, "利益\n相关\n者诉\n求", d['demands']),
         (14, "基层\n组织\n意见", d['grassroots']),
@@ -737,7 +737,7 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
         (18, "稳评\n实施\n单位\n结论", d['conclusion']),
     ]:
         tbl.cell(_r, 0).merge(tbl.cell(_r, 1))
-        _rv_cell(tbl, _r, 0, _label, bold=True, align=_C, font='黑体')
+        _rv_cell(tbl, _r, 0, _label, bold=False, align=_C, font='黑体')
         tbl.cell(_r, 2).merge(tbl.cell(_r, 4))
         _rv_cell(tbl, _r, 2, _val, align=_L, indent=True, blank_after_subhead=True)
 
@@ -748,7 +748,7 @@ def build_review_table_docx(doc, filled_data: dict, chapters: dict = None,
         (21, "备案\n情况", "备案单位（签章）："),
     ]:
         tbl.cell(_r, 0).merge(tbl.cell(_r, 1))
-        _rv_cell(tbl, _r, 0, _label, bold=True, align=_C, font='黑体')
+        _rv_cell(tbl, _r, 0, _label, bold=False, align=_C, font='黑体')
         tbl.cell(_r, 2).merge(tbl.cell(_r, 4))
         _rv_cell(tbl, _r, 2, f"\n\n\n{_sign}\n\n　　　　　　　　年　　月　　日",
                  align=_L, font='方正楷体GBK', indent=True)

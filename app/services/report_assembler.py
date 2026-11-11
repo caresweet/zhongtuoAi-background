@@ -781,6 +781,16 @@ class ReportAssembler:
                         _ch["markdown"] = strip_md_tables_by_caption(
                             _ch["markdown"],
                             ("工程施工费估算表", "其他费用估算表", "土地复垦投资估算表"))
+            # 专家批注修补：单位、断号/重号、重复段、服务年限与管护期、复垦方向与面积、
+            # 剥离厚度、管护费/动态投资、缺失的表3-1、表图编号等
+            try:
+                from app.services.reclamation_content_repairs import (
+                    repair_reclamation_chapters)
+                _rlogs = repair_reclamation_chapters(chapters or {}, filled or {})
+                if _rlogs:
+                    logger.info("[复垦修补] %s", "；".join(_rlogs))
+            except Exception as _re:
+                logger.warning(f"[复垦修补] 跳过: {_re}")
         _chapters = all_chapters(self._domain)   # 本域章号列表
         _total = total_chapters(self._domain)    # 本域总章数
 
@@ -789,6 +799,12 @@ class ReportAssembler:
         #    放在装配入口而不是工作流节点里 —— 脚本/离线重装配也走同一份代码，不会漏。
         if self._domain == "stability":
             try:
+                # 专家批注中的硬伤统一修补（面积分项、风险条数、日期先后、
+                # 伪造法规名、错位句、得分公式、附件指向）
+                from app.services.report_content_repairs import repair_stability_chapters
+                _repairs = repair_stability_chapters(chapters)
+                if _repairs:
+                    logger.info("[内容修补] %s", "；".join(_repairs))
                 from app.validation.content_guardrails import (
                     fix_risk_score_consistency, strip_chapter_self_reference)
                 chapters, _score_fixes = fix_risk_score_consistency(chapters)
@@ -1192,6 +1208,13 @@ class ReportAssembler:
         self._dedup_headings(doc)
         self._dedup_table_titles(doc)
         self._dedup_duplicate_tables(doc)
+        if self._domain == "reclamation":
+            self._normalize_caption_order(doc)
+            self._normalize_section_numbers(doc)
+            self._fix_reclamation_cost_sentences(doc)
+        if self._domain == "stability":
+            self._fix_stability_area(doc)
+            self._fix_stability_score_table(doc)
         # ── Fill tables with computed project data ──
         self._fill_table_data(doc, filled)
 
@@ -1626,6 +1649,246 @@ class ReportAssembler:
                         # This table title has no table — mark as empty
                         if not has_table_nearby:
                             pass  # Keep, might be between heading transitions
+
+    def _normalize_caption_order(self, doc):
+        """复垦：表/图号按**正文出现顺序**重排成 1,2,3…，不跳号、不重号。
+
+        业主 2026-11-11：「表格编号要按数字顺序排列，不能跳数字，也不能让
+        表4-6 出现在 4-5 内容前面」。旧逻辑给系统表保留样本表号（4-8/4-11…），
+        LLM 表在空隙里跳号，于是出现「表4-2 在表4-1 前」「表4-5 缺失」。
+        这里不再区分系统表/模型表，一律按出现顺序编号，并同步改正文引用。
+        """
+        cap = re.compile(r'^((?:表|图)\s*)(\d+)\s*[-—－]\s*(\d+)(.*)$')
+
+        def _rewrite(p, text):
+            if not p.runs:
+                p.add_run(text)
+                return
+            p.runs[0].text = text
+            for r in p.runs[1:]:
+                r.text = ""
+
+        counters = {}
+        mapping = {}
+        cur_ch = 0
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if not t:
+                continue
+            c = chapter_no_of_text(self._domain, t)
+            if c:
+                cur_ch = c
+            m = cap.match(t)
+            if not m or not cur_ch:
+                continue
+            kind, ch, old = m.group(1).strip(), int(m.group(2)), int(m.group(3))
+            if ch != cur_ch:
+                continue
+            _rest = m.group(4) or ""
+            if "。" in _rest or len(t) > 60:
+                continue          # 「图4-1 反映了…。施工场站…」是正文，不是图题
+            key = (kind, ch)
+            counters[key] = counters.get(key, 0) + 1
+            new = counters[key]
+            mapping.setdefault((kind, ch, old), new)
+            newt = f"{kind}{ch}-{new}{m.group(4)}"
+            if newt != t:
+                _rewrite(p, newt)
+
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            if not t or cap.match(t):
+                continue
+            nt = t
+            for (kind, ch, old), new in mapping.items():
+                nt = re.sub(rf'{kind}{ch}\s*[-—－]\s*{old}(?!\d)',
+                            f"{kind}{ch}-{new}", nt)
+            if nt != t:
+                _rewrite(p, nt)
+
+    def _normalize_section_numbers(self, doc):
+        """复垦：小节号按出现顺序重排（4.1.1、4.1.3 → 4.1.1、4.1.2）。"""
+        import re as _re
+        cur, c2, c3 = 0, 0, {}
+
+        def _rewrite(p, text):
+            if not p.runs:
+                p.add_run(text)
+                return
+            p.runs[0].text = text
+            for r in p.runs[1:]:
+                r.text = ""
+
+        for p in doc.paragraphs:
+            t = p.text.strip()
+            m = _re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?\s+(\S.*)$', t)
+            if not m:
+                continue
+            if len(t) > 50 and not p.style.name.startswith("Heading"):
+                continue          # 正文里以数字开头的句子，不是小节标题
+            ch, a, b, title = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+            if ch != cur:
+                cur, c2, c3 = ch, 0, {}
+            if b is None:
+                c2 += 1
+                c3[c2] = 0
+                new = f"{ch}.{c2}"
+            else:
+                k = a or c2
+                c3[k] = c3.get(k, 0) + 1
+                new = f"{ch}.{k}.{c3[k]}"
+            if f"{ch}.{a}" + (f".{b}" if b else "") != new:
+                _rewrite(p, f"{new} {title}")
+
+    def _fix_reclamation_cost_sentences(self, doc):
+        """管护费/动态投资句里的错数（21500 万元）按预算结果改回来。"""
+        import re as _re
+        filled = getattr(self, "_filled", {}) or {}
+        est = filled.get("_budget_estimate") or {}
+        care = float(est.get("care") or 0)
+        monitor = float(est.get("monitor") or 0)
+        if not care:
+            m = _re.search(r'\d+(?:\.\d+)?', str(filled.get("care_period_months") or ""))
+            if m:
+                care = round(1 * float(m.group(0)) * 1000.0 / 10000.0, 2)
+        if not care and not monitor:
+            return
+
+        def _rewrite(p, text):
+            if not p.runs:
+                p.add_run(text)
+                return
+            p.runs[0].text = text
+            for r in p.runs[1:]:
+                r.text = ""
+
+        for p in doc.paragraphs:
+            t = p.text
+            nt = t
+            if care and "管护" in nt and "共计" in nt:
+                nt = _re.sub(r'共计\s*[\d.]+\s*万元', f"共计 {care:.2f} 万元", nt)
+            if monitor and "动态投资" in nt:
+                nt = _re.sub(r'动态投资\s*[\d.]+\s*万元',
+                             f"动态投资 {monitor:.2f} 万元", nt)
+            if nt != t:
+                _rewrite(p, nt)
+
+    def _fix_stability_area(self, doc):
+        """以表6-1 的「合计」行为准，改写正文「总面积/地类构成」句。
+
+        批注（2026-11-11）：正文只列了 8 个地类，合计比表6-1 少 3948 ㎡。
+        表6-1 是勘测定界成果，权威；正文按表的列补齐，而不是把总数改小。
+        """
+        import re as _re
+        total, pairs = None, []
+        for tbl in doc.tables:
+            if not tbl.rows:
+                continue
+            hdr = [c.text.strip() for c in tbl.rows[0].cells]
+            if "面积总计" not in hdr or "耕地" not in hdr:
+                continue
+            ti = hdr.index("面积总计")
+            skip = {"面积总计", "备注", "权属类别", "被征（用）地单位", "被征(用)地单位"}
+            row = None
+            for r in tbl.rows:
+                if r.cells and "合计" in r.cells[0].text:
+                    row = [c.text.strip() for c in r.cells]
+                    break
+            if not row:
+                continue
+            for k, name in enumerate(hdr):
+                if k == ti or name in skip or not name:
+                    continue
+                try:
+                    v = float(row[k].replace(",", ""))
+                except (ValueError, IndexError):
+                    continue
+                if v > 0:
+                    pairs.append((name, v))
+            try:
+                total = float(row[ti].replace(",", ""))
+            except (ValueError, IndexError):
+                total = sum(v for _n, v in pairs)
+            break
+        if total is None or not pairs:
+            return
+
+        def _fmt(x):
+            return f"{x:.1f}" if abs(x - round(x)) > 1e-9 else f"{round(x)}"
+
+        lst = "、".join(f"{n}{_fmt(v)}平方米" for n, v in pairs)
+        for para in doc.paragraphs:
+            txt = para.text
+            if "拟征收土地总面积" not in txt or "地类构成包括" not in txt:
+                continue
+            new = _re.sub(r'(拟征收土地总面积)\s*[\d.]+\s*平方米',
+                          rf'\g<1>{_fmt(total)}平方米', txt)
+            new = _re.sub(r'(地类构成包括)[^。]+(。)', rf'\g<1>{lst}\g<2>', new)
+            if new != txt:
+                if not para.runs:
+                    para.add_run(new)
+                else:
+                    para.runs[0].text = new
+                    for r in para.runs[1:]:
+                        r.text = ""
+            break
+
+    def _fix_stability_score_table(self, doc):
+        """群众意见评分表按**实际反对率**重算得分，并与正文「得分为X分」对齐。
+
+        批注（2026-11-11）：P60 表里得分为 0，正文却写 12.0 分；且表格第 3 行
+        还留着模板的 100% 反对率（实际群众反对率 0%），算出 10.5 分。
+        """
+        filled = getattr(self, "_filled", {}) or {}
+        try:
+            oppose = float(str(filled.get("oppose_rate") or 0).replace("%", ""))
+        except ValueError:
+            oppose = 0.0
+        total = None
+        for tbl in doc.tables:
+            if not tbl.rows:
+                continue
+            hdr = [c.text.strip() for c in tbl.rows[0].cells]
+            if not any("反对率" in h for h in hdr) or not any("得分" in h for h in hdr):
+                continue
+            ai = next((i for i, h in enumerate(hdr) if "反对率" in h), None)
+            si = next((i for i, h in enumerate(hdr) if "得分" in h), None)
+            total = 0.0
+            for r in tbl.rows[1:]:
+                cells = r.cells
+                if any("合计" in c.text for c in cells):
+                    continue
+                desc = " ".join(c.text for c in cells)
+                b = 1.0
+                if "很小" in desc:
+                    b = 0.3
+                elif "有可能" in desc:
+                    b = 0.7
+                score = round(oppose / 100.0 * b * 35.0, 2)
+                total += score
+                if ai is not None and ai < len(cells):
+                    cells[ai].text = f"{oppose:.2f}%"
+                if si is not None and si < len(cells):
+                    cells[si].text = f"{score:.2f}"
+            total = round(total, 2)
+            for r in tbl.rows:
+                if any("合计" in c.text for c in r.cells) and si is not None and si < len(r.cells):
+                    r.cells[si].text = f"{total:.2f}"
+            break
+        if total is None:
+            return
+        for p in doc.paragraphs:
+            t = p.text
+            if "得分为" not in t:
+                continue
+            nt = re.sub(r'(得分为)\s*[\d.]+(\s*分)', rf'\g<1>{total:.1f}\g<2>', t)
+            if nt != t:
+                if not p.runs:
+                    p.add_run(nt)
+                else:
+                    p.runs[0].text = nt
+                    for r in p.runs[1:]:
+                        r.text = ""
 
     def _dedup_duplicate_tables(self, doc):
         """同章内容重复表格去重。
@@ -7951,8 +8214,12 @@ class ReportAssembler:
             return
         _done.add(_key)
 
-        _MAP_KWS = ("位置", "红线", "现状", "勘界", "分布", "示意", "图")
+        _MAP_KWS = ("位置", "红线", "现状", "勘界", "分布", "影像图")
         _PHOTO_KWS = ("照片", "影像", "现场", "微信")
+        # 🔴 断面图/大样图/做法图是**工程示意**，里面没有红线、也不是现场影像。
+        #    实测（2026-11-11）：图6-1 临时拦挡措施断面示意图 下面被塞了
+        #    「图中红线范围为本次复垦责任范围…」，图上根本没有红线。
+        _SCHEMA_KWS = ("断面", "大样", "做法", "详图", "设计图", "结构图")
         _leads = ["图中", "该图", "上图", "本图", "所附影像"]
         for _i, _it in enumerate(items):
             if isinstance(_it, dict):
@@ -7962,8 +8229,11 @@ class ReportAssembler:
             else:
                 _label = str(_it or "")
             _is_photo = any(k in _label for k in _PHOTO_KWS)
+            _is_schema = any(k in _label for k in _SCHEMA_KWS)
             _lead = _leads[_i % len(_leads)]
             parts = []
+            if _is_schema:
+                continue          # 示意图不写红线/面积解读
             if _is_photo:
                 if m2 > 0:
                     parts.append(f"{_lead}为临时用地现场影像，拍摄范围为本次复垦责任范围"

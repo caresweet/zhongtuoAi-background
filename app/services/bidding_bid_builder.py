@@ -1090,6 +1090,28 @@ def _auth_fields(texts: Dict[str, str]) -> Dict[str, str]:
     }
 
 
+def _small_enterprise_facts(texts: Dict[str, str]) -> Dict[str, str]:
+    """从公司档案《中小企业声明函》里取从业人数/营业收入/资产总额/企业类型。
+
+    🔴 投标文件里的声明函若留「______」，评审会当成未填写（2026-11-11 实测）。
+       这些数值公司档案里本来就有，直接复用，不要空着。
+    """
+    src = texts.get("中小企业声明函") or ""
+    if not src:
+        return {}
+
+    def grab(pat: str) -> str:
+        m = re.search(pat, src)
+        return m.group(1).strip() if m else ""
+
+    return {
+        "employees": grab(r'从业人员\s*(\d+)\s*人'),
+        "revenue": grab(r'营业收入[为约]?\s*([\d.]+)\s*万元'),
+        "assets": grab(r'资产总额[为约]?\s*([\d.]+)\s*万元'),
+        "type": grab(r'属于\s*([中小微]{1,2}企业)'),
+    }
+
+
 def _deviation_rows(tender: dict, project: str, duration: int) -> List[List[str]]:
     """偏离表：按人工稿逐条拆行（资格条件/拒绝情形/人员/期限/地点/验收）。
 
@@ -1711,6 +1733,8 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         members=max(int((tender.get("staff_min") or {}).get("项目组成员") or 3), 3))
     texts = _asset_texts(co_name)
     af = _auth_fields(texts)
+    # 公司档案里的中小企业声明数据（从业人员/营业收入/资产总额/企业类型）
+    _se = _small_enterprise_facts(texts)
     small, big = _price_text(price_wan)
     total_yuan = int(round(float(price_wan) * 10000))
     project = tender.get("project_name") or ""
@@ -1814,43 +1838,10 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     ):
         _p(doc, _line, size=12, indent=False, name="仿宋")
 
-    _p(doc, "具备履行合同所必需的设备和专业技术能力的书面声明",
-       size=12, bold=False, align="center", indent=False, name="仿宋")
-    _p(doc, f"我公司郑重声明：我公司具备履行本项采购合同所必需的设备和专业技术能力，"
-            f"为履行本项采购合同我公司具备如下主要设备和主要专业技术能力：",
-       size=12, align="justify", name="仿宋")
-    _p(doc, "主要设备有：全站仪、GNSS 接收机（RTK）、无人机、绘图仪、测高仪、"
-            "水位仪、CASS 成图软件及图形工作站等。", size=12, align="justify",
-       name="仿宋")
-    _p(doc, "主要专业技术能力有：工程测量、不动产测绘（地籍测绘、房产测绘）、"
-            "权籍调查与数据库建设、测绘成果质量检查与验收。", size=12,
-       align="justify", name="仿宋")
-    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
-
-    _p(doc, "参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
-       size=12, bold=False, align="center", indent=False, name="仿宋")
-    _p(doc, "我公司郑重声明：参加本次政府采购活动前3年内，我公司在经营活动中"
-            "没有因违法经营受到刑事处罚或者责令停产停业、吊销许可证或者执照、"
-            "较大数额罚款等行政处罚。", size=12, align="justify", name="仿宋")
-    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
-
-    _p(doc, "法人授权书", size=14, bold=False, align="center", indent=False,
-       name="仿宋")
-    _p(doc, f"本授权书声明：{co_name}授权{af['agent']}为我方就{project}"
-            f"项目采购活动的合法代理人，以本公司名义全权处理一切与该项目采购"
-            f"有关的事务。", size=12, align="justify", name="仿宋")
-    _p(doc, f"本授权书于{today}起生效，特此声明。", size=12, align="justify",
-       name="仿宋")
-    _p(doc, f"代理人（被授权人）：{af['agent']}", size=12, indent=False,
-       name="仿宋")
-    _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
-    _p(doc, "授权单位盖章：", size=12, indent=False, name="仿宋")
-    _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
-    _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
-
-    # 文件1～8 按招标目录逐件附扫描件（人工稿每件前有「1.营业执照」式小标题）
+    # 文件1～8 按招标目录**逐件、按序**附扫描件（人工稿顺序：1营业执照→2财务→
+    # 3税收社保→4设备声明→5无违法声明→6授权书→7资质→8其他材料）。
+    # 🔴 旧实现把 4/5/6 三份声明写在文件1前面，与招标目录的 1..8 顺序对不上，
+    #    评审逐件核对时会以为缺件（2026-11-11 业主：「跟之前模板缺少那么多内容」）。
     _p(doc, "文件1  法人或者其他组织的营业执照等证明文件，自然人的身份证明",
        size=12, bold=False, indent=False, name="仿宋")
     _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照")
@@ -1871,12 +1862,78 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
                  caption="社会保障资金证明")
     _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
                  caption="社会保险权益记录单")
+
+    # ── 文件4：设备与专业技术能力声明 ──
+    _p(doc, "文件4  具备履行合同所必需的设备和专业技术能力的书面声明",
+       size=12, bold=False, indent=False, name="仿宋")
+    _p(doc, "具备履行合同所必需的设备和专业技术能力的书面声明",
+       size=12, bold=False, align="center", indent=False, name="仿宋")
+    _p(doc, f"我公司郑重声明：我公司具备履行本项采购合同所必需的设备和专业技术能力，"
+            f"为履行本项采购合同我公司具备如下主要设备和主要专业技术能力：",
+       size=12, align="justify", name="仿宋")
+    _p(doc, "主要设备有：全站仪、GNSS 接收机（RTK）、无人机、绘图仪、测高仪、"
+            "水位仪、CASS 成图软件及图形工作站等。", size=12, align="justify",
+       name="仿宋")
+    _p(doc, "主要专业技术能力有：工程测量、不动产测绘（地籍测绘、房产测绘）、"
+            "权籍调查与数据库建设、测绘成果质量检查与验收。", size=12,
+       align="justify", name="仿宋")
+    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
+    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
+
+    # ── 文件5：无重大违法记录声明 ──
+    _p(doc, "文件5  参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
+       size=12, bold=False, indent=False, name="仿宋")
+    _p(doc, "参加政府采购活动前3年内在经营活动中没有重大违法记录的书面声明",
+       size=12, bold=False, align="center", indent=False, name="仿宋")
+    _p(doc, "我公司郑重声明：参加本次政府采购活动前3年内，我公司在经营活动中"
+            "没有因违法经营受到刑事处罚或者责令停产停业、吊销许可证或者执照、"
+            "较大数额罚款等行政处罚。", size=12, align="justify", name="仿宋")
+    _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
+    _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
+
+    # ── 文件6：法人授权书 ──
+    _p(doc, "文件6  法人授权书", size=12, bold=False, indent=False, name="仿宋")
+    _p(doc, "法人授权书", size=14, bold=False, align="center", indent=False,
+       name="仿宋")
+    _p(doc, f"本授权书声明：{co_name}授权{af['agent']}为我方就{project}"
+            f"项目采购活动的合法代理人，以本公司名义全权处理一切与该项目采购"
+            f"有关的事务。", size=12, align="justify", name="仿宋")
+    _p(doc, f"本授权书于{today}起生效，特此声明。", size=12, align="justify",
+       name="仿宋")
+    _p(doc, f"代理人（被授权人）：{af['agent']}", size=12, indent=False,
+       name="仿宋")
+    _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
+    _p(doc, "授权单位盖章：", size=12, indent=False, name="仿宋")
+    _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
+    _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
+
     _p(doc, "文件7  投标人资质证书", size=12, bold=False, indent=False,
        name="仿宋")
     _asset_block(doc, "测绘资质", [("9.供应商具有有效期内的测绘资质乙级及以上资质证书",)],
                  caption="测绘资质证书")
     _p(doc, "文件8  招标文件中规定要求提供的证明材料和投标人认为需要提供的其他材料",
        size=12, bold=False, indent=False, name="仿宋")
+    # （1）承诺书：公司档案里的信用记录/独立性承诺，逐字落进正文
+    #     （人工稿文件8 第（1）项就是这份承诺书；旧实现只有截图，没有承诺文字）
+    _credit = (texts.get("信用记录承诺书") or "").strip()
+    _indep = (texts.get("供应商独立性承诺书") or "").strip()
+    if _credit or _indep:
+        _p(doc, "（1）承诺书", size=12, bold=True, indent=False, name="仿宋")
+        _p(doc, f"{purchaser}：", size=12, indent=False, name="仿宋")
+        _p(doc, f"我方在{project}的响应过程中，做如下承诺：", size=12,
+           align="justify", name="仿宋")
+        _body = "\n".join(x for x in (_credit, _indep) if x)
+        # 去掉档案里重复的标题/落款（含档案里的旧日期），只留承诺条目；
+        # 落款统一用本次投标日期写在最后。
+        _skip_pref = ("承诺书", "特此承诺", "磋商供应商", "供应商：", "供应商:",
+                      "法定代表人", "单位名称", "日期")
+        _lines = [x.strip() for x in _body.splitlines()
+                  if x.strip() and not x.strip().startswith(_skip_pref)]
+        for _ln in _lines:
+            _p(doc, _ln, size=12, align="justify", name="仿宋")
+        _p(doc, f"供应商：{co_name}（盖单位章）", size=12, indent=False,
+           name="仿宋")
+        _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
     _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
                               ("未被列入重大税收违法失信主体",),
                               ("未被列入政府采购严重违法失信行为记录名单",)],
@@ -1957,13 +2014,18 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
              "增值税及附加税费、市场价格波动风险费、常规返工修改费、报审配合"
              "服务费、零星杂费等一切费用。合价以投标总价为准，综合单价按总价"
              "折算。")
+    _scope = (tender.get("scope") or "").strip()
+    if not _scope:
+        _scope = (f"{project}约{households}户的乡村建设规划许可证、土地测绘落宗、"
+                  f"资料建档及不动产权证办理工作" if households
+                  else f"{project}服务范围内的全部工作内容")
     _table(doc, ["序号", "项目名称", "工作范围", "单位", "数量",
                  "全费用综合单价（元）", "合价（元）", "备注"],
-           [["1", project, (tender.get("scope") or
-             f"大冈镇佳富村约{households}户的乡村建设规划许可证、土地测绘落宗、"
-             f"资料建档及不动产权证办理工作")[:160],
+           [["1", project, _scope[:160],
              "户" if households else "项", _qty, _unit_txt, str(total_yuan),
-             _note]],
+             _note],
+            # 人工稿的报价表里「合计」是表内一行，不是表外一句话
+            ["", "合    计", "", "", "", "", str(total_yuan), ""]],
            widths=[1.2, 3.4, 7.6, 1.4, 1.2, 3.2, 2.8, 3.9], font_size=10.5,
            aligns=["center", "left", "left", "center", "center", "center",
                    "center", "left"])
@@ -1980,24 +2042,30 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
        name="仿宋")
     _p(doc, f"投标人全称：{co_name}          （加盖公章）", size=12,
        indent=False, name="仿宋")
-    _biz = [
-        ("服务期限", f"服务期限 {duration} 日历天，具体时间服从采购人要求。",
-         "完全响应，按采购人要求组织作业，确保按期完成。"),
-        ("服务地点", "盐都区大冈镇境内。", "完全响应，在采购人指定地点服务。"),
-        ("服务内容", "大冈镇佳富村约124户乡村建设规划许可证、土地测绘落宗、"
-         "资料建档及不动产权证办理。",
-         "完全响应，按权籍调查、地籍测绘、房产测绘、成果编制与办证配合"
-         "全流程实施。"),
-        ("人员配备", "成立项目服务小组，配备专职服务人员。",
-         f"完全响应，投入项目负责人{lead}及专业技术人员，专人对接采购人。"),
-        ("报价要求", "全费用综合单价包干，含税费、代理费等全部费用。",
-         "完全响应，报价为全费用综合单价，合同期内不调整。"),
-        ("成果要求", "成果符合不动产登记入库要求。",
-         "完全响应，成果经二级检查一级验收合格后交付。"),
-        ("保密要求", "严格保守项目数据与个人信息。",
-         "完全响应，签订保密承诺，涉密数据专人专机管理。"),
-        ("违约责任", "按合同约定承担违约责任。", "完全响应。"),
-    ]
+    # 商务条款逐条响应：条款文字一律取招标文件原文（`parse_tender.commerce`），
+    # 不再写死「盐都区大冈镇 / 124 户」这类只对单个项目成立的句子
+    # （2026-11-11 业主：「跟原来模板缺少那么多内容」——缺的正是这些商务条款）。
+    _com = tender.get("commerce") or {}
+    _biz = []
+
+    def _add(label, req, ans="完全响应。"):
+        if req:
+            _biz.append((label, req, ans))
+
+    _add("投标有效期", _com.get("投标有效期"),
+         "完全响应，投标有效期内不撤回投标、不修改报价。")
+    _add("服务期限", f"{duration} 日历天，具体时间服从采购人要求。",
+         "完全响应，按采购人要求组织作业，确保按期完成。")
+    _add("报价要求",
+         (f"报价不高于最高限价 {max_yuan} 元，且不得采用选择性报价。"
+          if max_yuan else "全费用综合单价包干，不得采用选择性报价。"),
+         "完全响应，报价不超最高限价，无选择性报价。")
+    for _label in ("履约保证金", "招标代理费", "投标保证金", "投标文件份数",
+                   "付款方式", "质量要求", "其他实质性要求"):
+        _add(_label, _com.get(_label))
+    if not _biz:      # 招标文件里一条商务条款都没解析出来时的最小回退
+        _add("报价要求", "全费用综合单价包干，不得采用选择性报价。",
+             "完全响应。")
     _table(doc, ["项目", "招标文件要求", "是否响应", "投标人的承诺或说明"],
            [[a, b, "是", c] for a, b, c in _biz],
            widths=[2.6, 6.4, 1.8, 4.2], font_size=12,
@@ -2016,8 +2084,10 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
        size=12, align="justify", name="仿宋")
     _p(doc, "相关企业的具体情况如下：", size=12, align="justify", name="仿宋")
     _p(doc, f"1. {project}，属于测绘服务行业；承接企业为{co_name}，"
-            "从业人员______人，营业收入为______万元，资产总额为______万元，"
-            "属于（中型企业、小型企业、微型企业）。", size=12,
+            f"从业人员{_se.get('employees') or '______'}人，"
+            f"营业收入为{_se.get('revenue') or '______'}万元，"
+            f"资产总额为{_se.get('assets') or '______'}万元，"
+            f"属于（{_se.get('type') or '小型企业'}）。", size=12,
        align="justify", name="仿宋")
     _p(doc, "以上企业，不属于大企业的分支机构，不存在控股股东为大企业的情形，"
             "也不存在与大企业的负责人为同一人的情形。", size=12, align="justify",

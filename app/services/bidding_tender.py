@@ -296,6 +296,37 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         plots.append({"name": _clean(mm.group(2)), "type": kind,
                       "area": area, "location": loc})
 
+    # ── 商务条款（偏离表逐条响应用，不能只写服务内容）──
+    # 🔴 人工稿的「商务条款响应及偏离表」覆盖：投标有效期 / 服务期限 / 报价要求 /
+    #    履约保证金 / 招标代理费 / 投标保证金 / 投标文件份数 / 付款方式 / 质量要求 /
+    #    其他实质性要求。旧实现只写了服务内容类 8 行，商业条款整批缺失
+    #    （2026-11-11 业主：「跟之前模板缺少那么多内容」）。
+    commerce: Dict[str, str] = {}
+
+    def _clause(label: str, pat: str, repl=None) -> str:
+        m = re.search(pat, blob)
+        if m:
+            txt = (repl(m) if repl else m.group(0))
+            commerce[label] = _clean(txt)
+        return commerce.get(label, "")
+
+    _clause("投标有效期", r'投标有效期为\s*(\d+)\s*天',
+            lambda m: f"自开标之日起 {m.group(1)} 天")
+    _clause("履约保证金", r'履约保证金[（(]合同金额的[^）)]{1,8}[）)][^。]{0,30}')
+    _clause("招标代理费", r'招标代理费合计\s*([\d,]+)\s*元[^。]{0,40}',
+            lambda m: f"招标代理费合计 {m.group(1)} 元，由中标人支付")
+    _clause("投标保证金", r'本项目不收取投标保证金')
+    if not commerce.get("投标保证金"):
+        _clause("投标保证金", r'投标保证金[^。]{0,30}')
+    _clause("投标文件份数",
+            r'投标文件要求正本\s*[一二三四五六七八九十\d]+\s*份[，,]\s*副本\s*[一二三四五六七八九十\d]+\s*份')
+    _clause("付款方式", r'付款方式[\s\S]{0,200}?7\.\d[^\n]{0,120}',
+            lambda m: re.sub(r'^付款方式[^\n]*\n?', '', m.group(0)).strip())
+    _clause("质量要求", r'符合甲方质量要求[^。]{0,20}',
+            lambda m: "成果" + m.group(0))
+    _clause("其他实质性要求", r'其他实质性要求[^\n。]{0,50}',
+            lambda m: "满足招标文件列明的其他实质性要求")
+
     return {
         "source": str(path),
         "project_name": project_name,
@@ -320,6 +351,7 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "format_titles": format_titles,
         "households": households,
         "unit_price": unit_price,
+        "commerce": commerce,
         "text_chars": len(text),
     }
 

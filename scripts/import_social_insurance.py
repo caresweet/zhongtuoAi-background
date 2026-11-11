@@ -46,6 +46,35 @@ def _rows_from_csv(path: Path):
     return [row for row in csv.reader(io.StringIO(text))]
 
 
+def _roster_from_pdf(path: Path):
+    """从**电子版**单位权益记录单 PDF 里直接解析参保人（姓名+身份证号）。
+
+    权益记录单就是人员社保信息：表格行是「序号 姓名 身份证号 缴费起止年月 月数」。
+    扫描件（没有文字层）解析不到时，退回 `--roster` 名单。
+    """
+    import re
+    try:
+        import fitz
+        doc = fitz.open(str(path))
+    except Exception:
+        return []
+    out = []
+    try:
+        text = "\n".join(p.get_text() for p in doc)
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    # 表格行：1 甘文锋 429006197804105139 202608 - 202608 1
+    pat = re.compile(
+        r'\d{1,3}\s+([一-龥][一-龥·]{1,5})\s+'
+        r'([0-9Xx]{18,19})\s+\d{6}')
+    for name, id_no in pat.findall(text):
+        out.append((name, id_no.upper()))
+    return out
+
+
 def parse_roster(path: Path):
     """→ [(姓名, 身份证号)]；表头认常见写法，找不到「姓名」列就报错。"""
     rows = (_rows_from_xlsx(path) if path.suffix.lower() in (".xlsx", ".xlsm")
@@ -101,6 +130,14 @@ def main() -> int:
     ensure_tables()
 
     people = parse_roster(Path(a.roster).expanduser()) if a.roster else []
+    if not people:
+        # 只给单位权益记录单（电子版 PDF）也能用：直接从表里解析参保人
+        for _f in a.images or []:
+            if str(_f).lower().endswith(".pdf"):
+                people = _roster_from_pdf(Path(_f).expanduser())
+                if people:
+                    print(f"从单位权益记录单解析到 {len(people)} 名参保人员")
+                    break
     imgs = _store_images(a.period, a.images) if a.images else []
 
     con = sqlite3.connect(str(DB))

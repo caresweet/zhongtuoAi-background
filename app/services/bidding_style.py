@@ -39,7 +39,7 @@ DEFAULT_STYLE: Dict[str, Any] = {
             "title_bold": True,
             "entry_font": "宋体", "entry_size": 14, "line_pt": 33,
             "show_page_numbers": False},
-    "images": {"id_card_cm": 7.5, "cert_cm": 7.5, "screenshot_cm": 15.8,
+    "images": {"id_card_cm": 7.0, "cert_cm": 7.5, "screenshot_cm": 15.8,
                "financial_cm": 16.0},
 }
 

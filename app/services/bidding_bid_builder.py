@@ -2019,6 +2019,31 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, "授权单位盖章：", size=12, indent=False, name="仿宋")
         _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
         _p(doc, f"日    期：{today}", size=12, indent=False, name="仿宋")
+        # 身份证按人工稿位置：法人授权书后另起一页，正反面**并排**（先法定代表人，
+        # 再授权委托人），不是一图一行、也不是贴在营业执照后面。
+        def _id_pair(name: str):
+            _imgs = _asset_images(f"{name} 身份证", limit=4)
+            if not _imgs:
+                return False
+            _pp = doc.add_paragraph()
+            for _i, (_nm, _data) in enumerate(_imgs[:2]):
+                _r = _pp.add_run()
+                try:
+                    from docx.shared import Cm as _Cm
+                    _r.add_picture(io.BytesIO(_data), width=_Cm(_imgw["id_card_cm"]))
+                    if _i == 0:
+                        _pp.add_run("    ")
+                except Exception as _e:
+                    logger.warning(f"[投标文件] 身份证图插入失败: {_e}")
+            return True
+
+        doc.add_page_break()
+        _p(doc, "法定代表人身份证：", size=12, indent=False, name="仿宋")
+        _id_pair(af["legal"])
+        if af.get("agent") and af["agent"] != af["legal"]:
+            _p(doc, "授权委托人身份证：", size=12, indent=False, name="仿宋")
+            _id_pair(af["agent"])
+        doc.add_page_break()
 
     def _credit_block():
         _credit = (texts.get("信用记录承诺书") or "").strip()
@@ -2042,18 +2067,9 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     def _file_assets(text: str):
         t = str(text)
         if any(k in t for k in ("营业执照", "身份证明")):
+            # 人工稿：文件1 只放营业执照；身份证跟着**法人授权书**（文件6）走
             _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照",
                          width_cm=_imgw["financial_cm"])
-            _asset_block(doc, f"{af['legal']} 身份证", [(f"{af['legal']} 身份证",)],
-                         caption="法定代表人身份证复印件",
-                         width_cm=_imgw["id_card_cm"], break_after=False)
-            if af.get("agent") and af["agent"] != af["legal"]:
-                _asset_block(doc, f"{af['agent']} 身份证",
-                             [(f"{af['agent']} 身份证",)],
-                             caption="被授权代表身份证复印件",
-                             width_cm=_imgw["id_card_cm"])
-            else:
-                doc.add_page_break()
             return
         if "财务" in t:
             _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告",)],

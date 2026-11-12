@@ -422,6 +422,10 @@ def fix_zone_plot_counts(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
         out, k = re.subn(r'((?:共|合计|共计|涉及|分为|划分为)\s*)\d+\s*个地块',
                          rf'\g<1>{total}个地块', out)
         n += k
+        # 模型有时写「涉及多个地块」——同样给确数（表4-1 是 8 个）
+        out, k = re.subn(r'((?:共|合计|共计|涉及|分为|划分为)\s*)多个\s*地块',
+                         rf'\g<1>{total}个地块', out)
+        n += k
     return out, n
 
 

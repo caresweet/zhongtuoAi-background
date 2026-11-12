@@ -420,7 +420,8 @@ def test_reclamation_zone_plot_counts_match_table():
         {"name": "表土堆放区", "area_m2": 3000, "plot_count": 2},
     ]}
     md = ("施工场站2个地块。管道开挖带1个地块。"
-          "施工便道为1个地块。表土堆放区1个地块。涉及4个地块。")
+          "施工便道为1个地块。表土堆放区1个地块。涉及4个地块。"
+          "本项目涉及多个地块。")
     out, n = fix_zone_plot_counts(md, filled)
     assert n >= 3
     assert "管道开挖带3个地块" in out
@@ -435,7 +436,7 @@ def test_two_level_land_table_total_keeps_alignment(tmp_path):
     from app.services.report_assembler import ReportAssembler
     md = ("# 4 土地复垦方向可行性分析\n\n## 4.2 复垦区土地利用状况\n\n"
           "表4-5 主体项目用地土地利用现状统计表\n\n"
-          "| 地类名称及编码 | 二级地类 | 面积（hm²） | 占比（%） |\n"
+          "| 一级地类 | 二级地类 | 面积（hm²） | 占比（%） |\n"
           "|---|---|---|---|\n"
           "| 工业仓储用地（06） | 工业用地（0601） | 5.4000 | 100.00 |\n"
           "| 合计 | 5.4000 | 100.00 |\n")

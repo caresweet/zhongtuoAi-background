@@ -4344,7 +4344,7 @@ class ReportAssembler:
         _h0 = rows[0][0].strip() if rows else ""
         _h1 = rows[0][1].strip() if rows and len(rows[0]) > 1 else ""
         _dup_first = bool("地类" in _h0 and _h0 == _h1)          # 地类名称及编码 ×2
-        _two_level = bool(_h0.startswith("地类") and "二级地类" in _h1)  # 一级/二级两列
+        _two_level = bool("地类" in _h0 and "二级地类" in _h1)  # 一级/二级两列
         if len(rows) > 1 and len(rows[0]) >= 3 and (_dup_first or _two_level):
             _fixed = [rows[0]]
             for _r in rows[1:]:

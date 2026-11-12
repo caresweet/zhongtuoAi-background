@@ -229,6 +229,16 @@ FONT_CAPTION = '宋体'           # 图名/表名 小四 12pt 居中
 CAPTION_SIZE = Pt(12)
 FONT_COVER_TITLE = '宋体'       # 封面标题（参照件封面同为宋体）
 FONT_SONGTI = '宋体'            # 宋体（工作组/编制说明/目录等）
+# 🔴 纯 AI 套话：「依据相关法律法规。」可以删；但「依据有关法律法规，制定本预案。」
+#    后面接了实际动作/成果，是正文，不能删（实测 2026-11-12 把第5章 1.编制目的
+#    整句吃掉，看起来像内容丢了）。
+_AI_BOILERPLATE_RE = re.compile(
+    r'(?:严格按照|根据|依据|按照)\s*(?:相关|有关)'
+    r'(?:法律法规|规定|政策|文件|程序|流程|步骤|要求|标准|规范)'
+    r'(?![^。\n]{0,80}(?:制定|编制|开展|建立|实施|签订|办理|执行|落实))'
+    r'[^。\n]{0,80}[。]?'
+)
+
 FONT_ASCII = 'Times New Roman'  # 西文/数字字体（参照件正文数字用 Times）
 FONT_PAGE_NUM = 'Times New Roman'  # 页码
 FONT_DIGIT = 'Times New Roman'     # 数字字体
@@ -2562,16 +2572,8 @@ class ReportAssembler:
             _filler_parts.append(re.escape(kw) + r'[^。\n]{0,80}[。]?')
         filler_pattern = re.compile('|'.join(_filler_parts))
 
-        # 🔴 只删「纯套话」：「依据有关法律法规」后面如果接了**实际动作/成果**
-        #    （制定本预案 / 开展评估 / 建立台账 / 编制方案…），那是正文，不能删。
-        #    实测 2026-11-12：这条正则把第5章「依据有关法律法规，制定本预案。」
-        #    整句吃掉，1.编制目的 只剩前半句、内容像丢了一样。
-        ai_boilerplate_pattern = re.compile(
-            r'(?:严格按照|根据|依据|按照)\s*(?:相关|有关)'
-            r'(?:法律法规|规定|政策|文件|程序|流程|步骤|要求|标准|规范)'
-            r'(?![^。\n]{0,80}(?:制定|编制|开展|建立|实施|签订|办理|执行|落实))'
-            r'[^。\n]{0,80}[。]?'
-        )
+        # 🔴 只删「纯套话」（规则见模块级 `_AI_BOILERPLATE_RE` 注释）
+        ai_boilerplate_pattern = _AI_BOILERPLATE_RE
         report_boilerplate = re.compile(
             r'本(?:章|节|报告)严格[^。\n]{0,60}(?:标准|规范)[^。\n]{0,40}[。]?'
         )

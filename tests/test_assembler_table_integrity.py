@@ -478,3 +478,43 @@ def test_review_risk_factors_exclude_method_sections():
     assert len(lines) == 3
     assert lines[0].endswith("土地征收补偿方案方面的风险")
     assert not any("风险估计方法" in x or "初始风险等级" in x for x in lines)
+
+
+def test_ai_boilerplate_keeps_meaningful_clause():
+    """纯套话可删；「依据有关法律法规，制定本预案。」是正文，不能删。"""
+    from app.services.report_assembler import _AI_BOILERPLATE_RE
+
+    pure = "依据相关法律法规。"
+    assert _AI_BOILERPLATE_RE.search(pure)
+    real = "依据有关法律法规，制定本预案。"
+    assert not _AI_BOILERPLATE_RE.search(real)
+
+
+def test_review_cell_content_not_bold():
+    """评审表内容单元格复制模板 rPr 时要去掉加粗。"""
+    from docx import Document
+    from app.services.review_table_filler import _set_cell
+
+    d = Document()
+    t = d.add_table(rows=1, cols=2)
+    cell = t.cell(0, 1)
+    r = cell.paragraphs[0].add_run("模板小标题")
+    r.bold = True
+    _set_cell(cell, "第一条 正文内容。")
+    run = cell.paragraphs[0].runs[0]
+    assert not run.bold
+    _set_cell(cell, "标签", bold=True)
+    assert cell.paragraphs[0].runs[0].bold
+
+
+def test_necessity_is_enriched():
+    """必要性不能只有一句残句；要用问卷/户数/理由补足。"""
+    from app.services.review_table_service import _enrich_necessity
+
+    vals = {"total_samples": "46", "support_rate": "100",
+            "awareness_rate": "100", "household_count": "46"}
+    out = _enrich_necessity("公告载明征收目的、征收范围及工作安排。",
+                            "1.为维护人民群众的合法权益。", lambda k: vals.get(k, ""))
+    assert len(out) > 120
+    assert "46份" in out and "支持率100%" in out
+    assert "维护人民群众" in out and "具有实施的必要性" in out

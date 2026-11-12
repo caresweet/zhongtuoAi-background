@@ -137,14 +137,29 @@ class RAGService:
         general_items = cache.get(key)
         if general_items is None:
             # 🔴 内容类型库检索（kb_* 集合）：按章节→内容类型，取回该类型范文正文。
-            # 若类型库为空（本机未重建）则回退到旧 knowledge_base 检索。
             type_items = await self.retriever.retrieve_by_kb_type(
                 chapter_number, project_context=project_context,
                 main_results=8, alt_results=3, domain=domain,
             )
-            if type_items:
-                general_items = type_items
-            else:
+            # 🔴 类型库只有**范文**，没有法规/标准条文；旧实现「类型库有结果就不再查
+            #    主库」，导致 `chapter_context`（评估依据）恒为 0 字，模型只能凭记忆
+            #    写法条（业主 2026-11-12：「模型不能结合 RAG 数据库资料么」）。
+            #    这里**总是**再从主库补一层法规/标准，与范文合并。
+            reg_items = []
+            try:
+                gen_items = await self.retriever.retrieve_general_for_chapter(
+                    chapter_number=chapter_number, project_context=project_context,
+                    n_results=max(6, n_results // 2), domain=domain,
+                )
+                _reg_types = ("regulation", "standard", "local_regulation",
+                              "policy", "law")
+                reg_items = [it for it in gen_items
+                             if str((it.get("metadata") or {}).get("document_type")
+                                    or "") in _reg_types]
+            except Exception as _re:
+                logger.warning(f"[RAG] 法规补充检索失败（第{chapter_number}章）: {_re}")
+            general_items = reg_items + (type_items or [])
+            if not general_items:
                 general_items = await self.retriever.retrieve_general_for_chapter(
                     chapter_number=chapter_number, project_context=project_context,
                     n_results=n_results, domain=domain,

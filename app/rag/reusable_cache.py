@@ -52,10 +52,15 @@ class ReusableCache:
 
     # ── key ──
 
+    # 🔴 检索策略变更时改版本号，旧缓存自动失效。
+    #    v2：2026-11-12 类型库范文 + 主库法规合并（旧缓存只有范文）。
+    _CACHE_VERSION = "v2"
+
     @staticmethod
     def make_key(domain: str, chapter: Optional[int], query: str) -> str:
         ch = "-" if chapter is None else str(chapter)
-        return f"{domain or 'any'}::{ch}::{_signature(query)}"
+        return (f"{ReusableCache._CACHE_VERSION}::{domain or 'any'}::{ch}::"
+                f"{_signature(query)}")
 
     # ── SQLite tier ──
 

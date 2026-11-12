@@ -1319,6 +1319,10 @@ class ChapterAgentBase(BaseAgent):
             txt = str(rag_context.get(key) or "").strip()
             if len(txt) < 30:
                 continue
+            # 🔴 知识库里有些地方规范是**模板**（`{位置}` `{文号}` 占位符），
+            #    直接喂给模型会被原样抄进正文。这里统一替换成「××」。
+            import re as _re_ph
+            txt = _re_ph.sub(r'\{[^{}\n]{1,20}\}', '××', txt)
             parts.append(f"### 【{label}】\n{txt[:max_per_section]}")
         if not parts:
             return ""

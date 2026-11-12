@@ -297,6 +297,34 @@ async def main():
     except Exception as e:
         print(f"⚠️ 签到表解析跳过: {e}")
 
+    # 🔴 网络舆情检索（与线上同一函数；未配置搜索 API 时明确「未开展」）
+    try:
+        from app.services.web_opinion import search_opinion
+        _f = state.get("filled_data") or {}
+        state["_web_search_results"] = await search_opinion(
+            str(_f.get("project_name") or ""), str(_f.get("location") or ""),
+            str(_f.get("doc_reference") or ""))
+        _wr = state["_web_search_results"]
+        if _wr.get("available"):
+            if not str(_f.get("online_opinion") or "").strip():
+                _f["online_opinion"] = _wr.get("summary") or ""
+            # 生成一张「网络舆情检索记录」图，随图片目录进第9章
+            try:
+                from app.services.web_opinion import render_opinion_record
+                from app.config import settings as _st
+                import hashlib as _hl
+                _h = _hl.md5((_wr.get("query") or "").encode("utf-8")).hexdigest()[:8]
+                _img = _st.STORAGE_DIR / "images" / f"网络舆情检索记录_{_h}.png"
+                if render_opinion_record(_wr, str(_img)):
+                    state.setdefault("_uploaded_files", []).append(
+                        {"path": str(_img), "original_name": "网络舆情检索记录.png"})
+                    print("🖼 舆情检索记录图:", _img)
+            except Exception as _re_img:
+                print("⚠️ 舆情记录图生成失败:", _re_img)
+        print("🌐 网络舆情：", _wr.get("summary") or _wr.get("reason"))
+    except Exception as _we:
+        print("⚠️ 网络舆情检索跳过:", _we)
+
     # 🔴 图片目录与线上一致：上传图片先分类（正文按章取图、附件去重都靠它）
     try:
         from app.services.image_catalog import build_image_catalog
@@ -313,20 +341,6 @@ async def main():
             domain="stability")
     except Exception as _ie:
         print("⚠️ 图片目录构建跳过:", _ie)
-
-    # 🔴 网络舆情检索（与线上同一函数；未配置搜索 API 时明确「未开展」）
-    try:
-        from app.services.web_opinion import search_opinion
-        _f = state.get("filled_data") or {}
-        state["_web_search_results"] = await search_opinion(
-            str(_f.get("project_name") or ""), str(_f.get("location") or ""),
-            str(_f.get("doc_reference") or ""))
-        _wr = state["_web_search_results"]
-        if _wr.get("available") and not str(_f.get("online_opinion") or "").strip():
-            _f["online_opinion"] = _wr.get("summary") or ""
-        print("🌐 网络舆情：", _wr.get("summary") or _wr.get("reason"))
-    except Exception as _we:
-        print("⚠️ 网络舆情检索跳过:", _we)
 
     state = await generate_all(state, only)
     # 🔴 这份 pkl 已**降级为「离线兜底」**：只有在没传 `--session` 时才会被读到。

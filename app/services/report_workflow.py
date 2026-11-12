@@ -1076,6 +1076,20 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                     # 检索到的结论给第9章「网络媒体舆论意见」直接用（用户已填则不覆盖）
                     if not str(filled.get("online_opinion") or "").strip():
                         filled["online_opinion"] = _wr.get("summary") or ""
+                    # 生成「网络舆情检索记录」图（无需浏览器），随图片目录进第9章
+                    try:
+                        from app.services.web_opinion import render_opinion_record
+                        from app.config import settings as _st
+                        import hashlib as _hl
+                        _h = _hl.md5((_wr.get("query") or "").encode("utf-8")).hexdigest()[:8]
+                        _img = _st.STORAGE_DIR / "images" / f"网络舆情检索记录_{_h}.png"
+                        if render_opinion_record(_wr, str(_img)):
+                            state.setdefault("_uploaded_files", []).append(
+                                {"path": str(_img),
+                                 "original_name": "网络舆情检索记录.png"})
+                            logs.append(f"🖼 舆情检索记录图已生成")
+                    except Exception as _re_img:
+                        logger.warning(f"[舆情] 记录图生成失败: {_re_img}")
                     logs.append(f"🌐 网络舆情检索：{_wr.get('summary')}")
                 else:
                     logs.append(f"🌐 网络舆情未检索（{_wr.get('reason', '未配置搜索 API')}）")

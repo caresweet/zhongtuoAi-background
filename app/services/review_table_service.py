@@ -343,6 +343,7 @@ def _enrich_necessity(base: str, ch1: str, g) -> str:
     if _hh:
         parts.append(f"本次征收涉及被征地农户{_hh}户，补偿安置和社会保障衔接工作已按法定程序开展。")
     _reason = _pick_sentence(ch1, "维护", "合法权益", "民生需求", limit=120)
+    _reason = re.sub(r'^\s*\d+[.、]\s*', '', _reason).strip()
     if _reason and _reason not in b:
         parts.append(_reason if _reason.endswith("。") else _reason + "。")
     parts.append("综上，本决策符合国家法律法规和相关规划要求，具有实施的必要性。")

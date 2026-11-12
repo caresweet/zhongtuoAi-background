@@ -432,10 +432,11 @@ class TableGenerationService:
 
         # ── 网络舆情 (Online Public Opinion) ──
         web_results = state.get("_web_search_results", {})
-        if web_results:
-           舆情 = web_results.get("summary", "未发现负面舆情")
+        # 🔴 没真正检索过就不能写「未发现负面舆情」（业主 2026-11-12）
+        if isinstance(web_results, dict) and web_results.get("available"):
+            舆情 = web_results.get("summary") or "经公开网络检索，未发现相关负面舆情。"
         else:
-           舆情 = "经排查，未发现与本决策相关的负面网络舆情"
+            舆情 = "本次未开展公开网络检索，舆情情况以提交的检索截图或记录为准"
 
         rows.append([
             "网络舆情",
@@ -619,7 +620,6 @@ class TableGenerationService:
             risk_level = "低风险"
         elif total_score <= 35:
             risk_level = "中风险"
-        else:
             risk_level = "高风险"
 
         if public_stats.total_samples > 0:
@@ -666,7 +666,6 @@ class TableGenerationService:
         elif oppose_rate > 0:
             current_prob = 0.3
             current_status = "适用"
-        else:
             current_prob = 0.0
             current_status = "适用（无反对）"
 
@@ -773,7 +772,6 @@ class TableGenerationService:
 
             if improved:
                 post_rows.append([indicator, row[1], item_name, row[3], str(post_score), explanation])
-            else:
                 # Non-controllable items remain unchanged
                 post_rows.append(row)
 
@@ -785,7 +783,6 @@ class TableGenerationService:
             post_rows[-1] = ["合计", "100", "—", "—", str(post_total),
                              f"措施后风险等级评分：{post_total} 分，"
                              f"判定为{'低风险' if post_total <= 20 else '中风险'}"]
-        else:
             post_rows.append(["合计", "100", "—", "—", str(post_total),
                               f"措施后风险等级评分：{post_total} 分，"
                               f"判定为{'低风险' if post_total <= 20 else '中风险'}"])
@@ -794,7 +791,6 @@ class TableGenerationService:
             risk_level = "低风险"
         elif post_total <= 35:
             risk_level = "中风险"
-        else:
             risk_level = "高风险"
 
         reduction = round(pre_total - post_total, 1)
@@ -1150,7 +1146,6 @@ class TableGenerationService:
             )
             if stats.oppose_count > 0:
                 parts.append(f"{stats.oppose_rate:.1f}% 持反对态度（{stats.oppose_count} 人）。")
-            else:
                 parts.append("无群众持反对态度。")
 
         if stats.awareness_levels:

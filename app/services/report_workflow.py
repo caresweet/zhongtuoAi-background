@@ -1059,6 +1059,28 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
     state["phase"] = WorkflowPhase.GENERATING.value
     logs = state.setdefault("logs",[])
     filled = state.get("filled_data",{})
+    # 🔴 网络舆情：公开网络检索一次（业主 2026-11-12：「agent 自己去找」）。
+    #    未配置搜索 API 时返回 available=False，正文按「未开展检索」写，不冒充「未发现」。
+    if "_web_search_results" not in state and not state.get("_web_opinion_tried"):
+        state["_web_opinion_tried"] = True
+        try:
+            from app.domains import domain_of_state as _dos
+            if _dos(state) == "stability":
+                from app.services.web_opinion import search_opinion
+                _wr = await search_opinion(
+                    str(filled.get("project_name") or ""),
+                    str(filled.get("location") or ""),
+                    str(filled.get("doc_reference") or ""))
+                state["_web_search_results"] = _wr
+                if _wr.get("available"):
+                    # 检索到的结论给第9章「网络媒体舆论意见」直接用（用户已填则不覆盖）
+                    if not str(filled.get("online_opinion") or "").strip():
+                        filled["online_opinion"] = _wr.get("summary") or ""
+                    logs.append(f"🌐 网络舆情检索：{_wr.get('summary')}")
+                else:
+                    logs.append(f"🌐 网络舆情未检索（{_wr.get('reason', '未配置搜索 API')}）")
+        except Exception as _we:
+            logger.warning(f"[舆情检索] 跳过: {_we}")
     outline_list = state.get("outline_list",[]) or []
     idx = state.get("_chapter_idx", 0)
     retry = state.get("_chapter_retry", 0)

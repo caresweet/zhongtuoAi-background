@@ -160,7 +160,11 @@ async def main() -> int:
 
     out = report_assembler.assemble(state)
     src = settings.STORAGE_DIR / out
-    fixed = settings.STORAGE_DIR / "generated" / args.out
+    # 🔴 每次生成都带时间戳标识，不覆盖上一版（业主 2026-11-12）—— 旧的批注稿
+    #    与新稿同名过，打开时点错看到的还是旧批注。
+    from app.services.report_naming import stamped_filename
+    _out_name = stamped_filename(args.out)
+    fixed = settings.STORAGE_DIR / "generated" / _out_name
     fixed.parent.mkdir(parents=True, exist_ok=True)
     if src.resolve() != fixed.resolve():
         shutil.copyfile(src, fixed)
@@ -170,7 +174,7 @@ async def main() -> int:
             pass
     print("OUTPUT", fixed, fixed.exists(), flush=True)
     try:
-        dl = Path.home() / "Downloads" / args.out
+        dl = Path.home() / "Downloads" / _out_name
         shutil.copyfile(fixed, dl)
         print("DOWNLOAD", dl, flush=True)
     except Exception as e:

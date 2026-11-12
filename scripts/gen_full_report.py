@@ -172,6 +172,8 @@ async def main():
     ap.add_argument("--cert-personnel", default="", help="逗号分隔的证书人员姓名（最多 3 人，决定公司资质证书区贴哪几张人员证书）")
     ap.add_argument("--session", default="", help="🔴 界面会话 id —— 以该会话的状态为准（用户在界面填的值才进得了报告）")
     ap.add_argument("--api", default="", help="后端地址，默认 http://localhost:8000")
+    ap.add_argument("--download-name", default="",
+                    help="复制到 ~/Downloads 的文件基名（自动追加 _YYYYMMDD_HHMM 标识，不覆盖旧稿）")
     args = ap.parse_args()
 
     try:
@@ -376,6 +378,16 @@ async def main():
         print(f"   副本 → {out}")
     except Exception as e:
         print(f"   副本失败: {e}")
+
+    if args.download_name.strip():
+        try:
+            import shutil
+            from app.services.report_naming import stamped_filename
+            _dl = Path.home() / "Downloads" / stamped_filename(args.download_name.strip())
+            shutil.copy2(path, _dl)
+            print(f"   下载 → {_dl}")
+        except Exception as e:
+            print(f"   下载复制失败: {e}")
 
 
 if __name__ == "__main__":

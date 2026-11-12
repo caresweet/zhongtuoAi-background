@@ -100,7 +100,7 @@ _FILLED = {
          "面积_m2": 3000, "占比": "11.19", "权属": "宋集村"}]},
     "area_m2": 26800, "care_period_months": 6, "reclaim_period_months": 6,
     "service_months": 30, "land_use_start": "2027-01",
-    "_budget_estimate": {"care": 0.6, "monitor": 4.23},
+    "_budget_estimate": {"care": 0.6, "monitor": 4.23, "dynamic_total": 57.48},
 }
 
 
@@ -130,7 +130,8 @@ def test_reclamation_service_direction_depth_cost():
     assert "共计 0.60 万元" in md
     assert "服务年限为30个月" in md
     assert "2029年6月" in md
-    assert "动态投资4.23 万元" in md
+    # 「动态投资」改成的是**动态总投资**（57.48），不是复垦监测费（4.23）
+    assert "动态投资57.48 万元" in md
     # 阶段日期不能被服务年限改写
     assert "2027年2月至2028年6月" in md
 

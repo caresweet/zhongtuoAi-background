@@ -20,7 +20,6 @@ from datetime import date
 from typing import Any, Dict, List, Tuple
 
 _HEAD = re.compile(r'^(#*\s*)(\d+)\.(\d+)(?:\.(\d+))?\s+')
-_CAPTION = re.compile(r'^(\s*)(表|图)\s*(\d+)\s*[-—－]\s*(\d+)\s*(.*)$')
 
 
 # ── 单位 ─────────────────────────────────────────────────────
@@ -180,6 +179,24 @@ def _land_targets(filled: Dict[str, Any]) -> Tuple[str, float, Dict[str, float]]
     return "、".join(names), area, per
 
 
+# 正文里的地类叫法与基础资料不同：基础资料按二级地类写「果园/旱地」，
+# 正文常写「园地/耕地」。批注 2026-11-12：「沟渠复垦面积 2.6800 公顷（应 0.38）」——
+# 只认 `复垦{name}面积` 一种语序还不够，正文实际写的是「沟渠复垦面积」。
+_LAND_ALIAS = {
+    "果园": ("园地",), "园地": ("果园",),
+    "旱地": ("耕地",), "水田": ("耕地",), "耕地": ("旱地", "水田"),
+}
+
+
+def _land_alias_areas(per: Dict[str, float]) -> Dict[str, float]:
+    """在二级地类面积上补一层正文别名（耕地=旱地+水田，园地=果园…）。"""
+    out: Dict[str, float] = dict(per)
+    for name, a in per.items():
+        for al in _LAND_ALIAS.get(name, ()):
+            out[al] = out.get(al, 0.0) + a
+    return out
+
+
 def fix_restoration(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     names, area_ha, per = _land_targets(filled)
     n = 0
@@ -191,14 +208,184 @@ def fix_restoration(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
         n += k
     if area_ha:
         out, k = re.subn(
-            r'(?<!旱地)(?<!园地)(?<!耕地)(?<!林地)(?<!水田)复垦面积\s*\d+(?:\.\d+)?\s*公顷',
+            r'(?<!旱地)(?<!园地)(?<!耕地)(?<!林地)(?<!水田)复垦面积\s*\d+(?:\.\d+)?\s*(?:公顷|hm²|hm2)',
             f"复垦面积{area_ha:.4f}公顷", out)
         n += k
-    # 按地类写各复垦面积（批注：9.1 把「复垦旱地面积」写成 2.0，实际旱地只有 1.4）
-    for name, a in per.items():
-        out, k = re.subn(rf'复垦{name}面积\s*\d+(?:\.\d+)?\s*公顷',
-                         f"复垦{name}面积{a:.4f}公顷", out)
-        n += k
+    # 按地类写各复垦面积（批注：9.1 把「复垦旱地面积」写成 2.0，实际旱地只有 1.4；
+    # 9.1 又把「沟渠/农村道路复垦面积」都写成总面积 2.68，实际 0.38 / 0.30）。
+    for name, a in _land_alias_areas(per).items():
+        # 「复垦旱地面积 1.4」「旱地复垦面积 2.68」两种语序都要认；单位公顷/hm² 都认
+        for pat, rep in (
+                (rf'复垦{name}面积\s*\d+(?:\.\d+)?\s*(?:公顷|hm²|hm2)',
+                 f"复垦{name}面积{a:.4f}公顷"),
+                (rf'{name}复垦面积\s*\d+(?:\.\d+)?\s*(?:公顷|hm²|hm2)',
+                 f"{name}复垦面积{a:.4f}公顷")):
+            out, k = re.subn(pat, rep, out)
+            n += k
+    return out, n
+
+
+# 农用地一级地类（表土剥离只针对这些；水域/道路/建设用地不剥离）
+_AGRI_TOP = {"耕地", "园地", "林地", "草地", "其他农用地"}
+_TOP_OF_SECOND = {
+    "旱地": "耕地", "水田": "耕地", "水浇地": "耕地",
+    "果园": "园地", "茶园": "园地", "其他园地": "园地",
+    "乔木林地": "林地", "灌木林地": "林地", "其他林地": "林地",
+}
+
+
+def _land_rows_full(filled: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """基础资料《土地分类面积》→ [{top, second, area}]（公顷）。"""
+    lc = filled.get("land_classification")
+    rows = (lc or {}).get("rows") if isinstance(lc, dict) else []
+    out: List[Dict[str, Any]] = []
+    for r in rows or []:
+        second = str((r or {}).get("二级地类") or (r or {}).get("地类") or "").strip()
+        top = str((r or {}).get("一级地类") or "").strip() \
+            or _TOP_OF_SECOND.get(second, second)
+        a = _num((r or {}).get("面积_m2")) / 10000.0
+        if second and a > 0:
+            out.append({"top": top, "second": second, "area": a})
+    return out
+
+
+def _subset_for_area(rows: List[Dict[str, Any]], value: float) -> List[Dict[str, Any]]:
+    """找出面积之和≈value 的地类组合（本项目 2.0000 = 旱地 1.4 + 果园 0.6）。
+
+    用**实际地类面积**反推这句话在说哪几类，而不是假定「耕地+园地」。
+    """
+    if not rows or value <= 0:
+        return []
+    best: List[Dict[str, Any]] = []
+    n = len(rows)
+    if n > 12:                     # 组合数太大时不做穷举
+        tot = sum(r["area"] for r in rows)
+        return rows if abs(tot - value) <= 0.02 else []
+    for mask in range(1, 1 << n):
+        sel = [rows[i] for i in range(n) if mask >> i & 1]
+        _s = sum(r["area"] for r in sel)
+        if abs(_s - value) <= 0.02 and (not best or len(sel) > len(best)):
+            best = sel
+    return best
+
+
+def _class_phrase(rows: List[Dict[str, Any]], style: str) -> str:
+    """按句子里原有的叫法给地类列表：一级（耕地/园地）或二级（旱地/果园）。"""
+    names: List[str] = []
+    for r in rows:
+        nm = r["second"] if style == "second" else r["top"]
+        if nm and nm not in names:
+            names.append(nm)
+    if len(names) <= 1:
+        return "".join(names)
+    return "、".join(names[:-1]) + "和" + names[-1]
+
+
+def _class_style(text: str) -> str:
+    """这句话用的是二级地类（旱地/果园…）还是一级地类（耕地/园地…）。"""
+    return "second" if any(k in text for k in _TOP_OF_SECOND) else "top"
+
+
+def _seg_present(seg: str, style: str, present_top, present_second) -> bool:
+    """句子里的地类名是不是本项目真有的（按同一层级比对）。"""
+    pool = present_second if style == "second" else present_top
+    names = [x.strip() for x in re.split(r'[、和及]', str(seg or "")) if x.strip()]
+    return bool(names) and all(x in pool for x in names)
+
+
+def fix_topsoil_land_types(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """表土剥离对象的地类 —— 批注 2026-11-12：「园地」「耕地和园地」。
+
+    🔴 不能把「旱地」一律改写成「耕地和园地」：是旱地还是耕地、是果园还是园地，
+        取决于**本项目的土地分类面积表**。这里只做两件事：
+        ① 句子里出现了本项目**没有**的地类（如「耕地和林地」，项目无林地）→
+           换成按面积反推出的实际地类；
+        ② 句子说的地类**覆盖不全**（2.0000 公顷其实是旱地 1.4 + 果园 0.6）→ 补齐。
+        命名口径跟随原句（原句写旱地就写「旱地和果园」，写耕地就写「耕地和园地」）。
+    """
+    rows = _land_rows_full(filled)
+    agri = [r for r in rows if r["top"] in _AGRI_TOP]
+    if not agri:
+        return md, 0
+    present_top = {r["top"] for r in agri}
+    present_second = {r["second"] for r in agri}
+    # 表土剥离范围：句子里给出的面积能对上哪几类，就按哪几类（找不到才用全部农用地）
+    _m = re.search(r'(?:表土剥离主要针对现状的[^。；\n]{0,12}?|需剥离表土的地类主要为[^。；\n]{0,12}?)，?'
+                   r'?面积为\s*(\d+(?:\.\d+)?)', md)
+    if not _m:
+        _m = re.search(r'剥离表土[^。；\n]{0,20}?面积为\s*(\d+(?:\.\d+)?)', md)
+    strip_rows = _subset_for_area(agri, float(_m.group(1))) if _m else []
+    if not strip_rows:
+        strip_rows = agri
+
+    n = 0
+    out = md
+
+    # ① 出现本项目不存在的地类 → 整串换成实际地类
+    def _fix_list(m):
+        nonlocal n
+        seg = m.group(2)
+        style = _class_style(seg)
+        exists = all(
+            (nm.strip() in present_second) if style == "second" else (nm.strip() in present_top)
+            for nm in re.split(r'[、和及]', seg) if nm.strip())
+        if exists:
+            return m.group(0)
+        n += 1
+        return m.group(1) + _class_phrase(strip_rows, style)
+
+    out = re.sub(
+        r'(需剥离表土的地类主要为\s*)([^，。；\n]{2,20}?)(?=[，。；])', _fix_list, out)
+    out = re.sub(
+        r'(需剥离表土的地类为\s*)([^，。；\n]{2,20}?)(?=[，。；])', _fix_list, out)
+
+    # ② 句子里的面积实际覆盖多类，但只写了一类 → 补齐（值不动，只改地类名）
+    def _rep_classes(m, _pre: int = 1, _seg: int = 2, _mid: int = 3, _val: int = 4):
+        nonlocal n
+        seg = m.group(_seg)
+        try:
+            val = float(m.group(_val))
+        except (TypeError, ValueError):
+            return m.group(0)
+        sel = _subset_for_area(agri, val)
+        if not sel:
+            return m.group(0)
+        style = _class_style(seg)
+        if len(sel) <= 1 and _seg_present(seg, style, present_top, present_second):
+            return m.group(0)
+        phrase = _class_phrase(sel, style)
+        if phrase == seg:
+            return m.group(0)
+        n += 1
+        return m.group(_pre) + phrase + m.group(_mid) + m.group(_val)
+
+    out = re.sub(
+        r'(表土剥离主要针对现状的\s*)([^，,。；\n]{1,12}?)(\s*[，,]\s*面积为\s*)(\d+(?:\.\d+)?)',
+        _rep_classes, out)
+    out = re.sub(
+        r'(复垦后\s*)([^，,。；\n]{1,12}?)(\s*面积为\s*)(\d+(?:\.\d+)?)',
+        _rep_classes, out)
+
+    # 「…面积均为 2.0000hm²，与复垦后旱地面积对应」—— 面积在前、地类在后
+    for m in list(re.finditer(
+            r'[^。；\n]{0,60}?与复垦后\s*([^，,。；\n]{1,12}?)(?=面积对应)', out)):
+        seg = m.group(1)
+        vm = None
+        for vm in re.finditer(r'(?:均为|为)\s*(\d+(?:\.\d+)?)\s*(?:hm²|公顷|m²)',
+                              m.group(0)[:m.start(1) - m.start(0)]):
+            pass
+        if not vm:
+            continue
+        sel = _subset_for_area(agri, float(vm.group(1)))
+        if not sel:
+            continue
+        style = _class_style(seg)
+        if len(sel) <= 1 and _seg_present(seg, style, present_top, present_second):
+            continue
+        phrase = _class_phrase(sel, style)
+        if phrase != seg:
+            out = out[:m.start(1)] + phrase + out[m.end(1):]
+            n += 1
     return out, n
 
 
@@ -227,10 +414,19 @@ def fix_cost_numbers(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
         out, k = re.subn(r'([^。；\n]*管护[^。；\n]*?共计)\s*[\d.]+\s*万元',
                          rf'\g<1> {care:.2f} 万元', out)
         n += k
-    if monitor:
-        out, k = re.subn(r'(动态投资)\s*[\d.]+(?:\s*)?万元',
-                         rf'\g<1>{monitor:.2f} 万元', out)
+        # 第8章「管护期安排费用 0.60 万元」——批注 2026-11-12：与表8-1 的 1.26 打架。
+        # 管护费只认 7.2.4 的 1 人 × 管护月数 × 1000 元/（人·月）。
+        out, k = re.subn(r'(管护期安排费用)\s*[\d.]+\s*万元',
+                         rf'\g<1>{care:.2f}万元', out)
         n += k
+    if monitor:
+        # 🔴 这里以前写的是 monitor（复垦监测费 0.37），把「动态投资 57.48 万元」
+        #    改成了 0.37 万元。要改的是动态总投资，不是监测费。
+        dynamic = float(est.get("dynamic_total") or 0)
+        if dynamic:
+            out, k = re.subn(r'(动态(?:总)?投资)\s*[\d.]+(?:\s*)?万元',
+                             rf'\g<1>{dynamic:.2f} 万元', out)
+            n += k
     return out, n
 
 
@@ -243,10 +439,15 @@ def fix_land_table_ref(md: str, land_caption: str = "") -> Tuple[str, int]:
     """
     if "表3-1" not in md:
         return md, 0
+    # 🔴 只改「见表3-1」这种**引用**，绝不能碰表题行：本函数曾把整行
+    #    「表3-1 临时用地土地利用现状地类表」的表号也换掉，第3章那张表就
+    #    不再被判为「地类表」而漏渲染（2026-11-12 回归）。
+    if not re.search(r'见\s*表\s*3\s*[-—]\s*1', md):
+        return md, 0
     if land_caption:
-        out, k = re.subn(r'表\s*3\s*[-—]\s*1', land_caption, md)
+        out, k = re.subn(r'见\s*表\s*3\s*[-—]\s*1', f"见{land_caption}", md)
         return out, k
-    out, k = re.subn(r'[，,；;]?\s*见表\s*3\s*[-—]\s*1[。；]?', '。', md)
+    out, k = re.subn(r'[，,；;]?\s*见\s*表\s*3\s*[-—]\s*1[。；]?', '。', md)
     return out, k
 
 
@@ -290,6 +491,430 @@ def drop_missing_table_refs(md: str) -> Tuple[str, int]:
     return out, n
 
 
+# ── 表题/表引用/缺表补齐 ─────────────────────────────────────
+# 表题行：容忍 markdown 加粗（`**表7-4 其他费用估算表**`——模型常这么写）
+_CAP_LINE = re.compile(
+    r'^(\s*)\*{0,3}\s*(表|图)\s*(\d+)\s*[-—－]\s*(\d+)\s*(.*?)\s*\*{0,3}\s*$')
+_REF_LINE = re.compile(r'见\s*((?:下)?表)\s*(\d+)\s*[-—－]\s*(\d+)')
+_HEADING_LINE = re.compile(r'^#*\s*(\d+)\.(\d+)(?:\.(\d+))?\s')
+
+
+def _table_bounds(lines: List[str], cap_i: int):
+    """表题行之后的表格块 (start, end)；没有表格返回 None。"""
+    j = cap_i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    if j >= len(lines) or not lines[j].lstrip().startswith("|"):
+        return None
+    start = j
+    while j < len(lines) and lines[j].lstrip().startswith("|"):
+        j += 1
+    return start, j
+
+
+def _put_table(lines: List[str], cap_i: int, table: List[str]) -> List[str]:
+    """把表放在表题行之后：已有表就整块换掉，没有就插进去。"""
+    b = _table_bounds(lines, cap_i)
+    if b:
+        return lines[:b[0]] + table + lines[b[1]:]
+    j = cap_i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    return lines[:j] + [""] + table + [""] + lines[j:]
+
+
+def _next_heading(lines: List[str], i: int) -> int:
+    for j in range(i + 1, len(lines)):
+        if _HEADING_LINE.match(lines[j]) or lines[j].lstrip().startswith("#"):
+            return j
+    return len(lines)
+
+
+def _rejoin(lines: List[str], orig: str) -> str:
+    """拼回 markdown，**保留原末尾换行**。
+
+    🔴 装配器的表题捕获靠「行尾空行」触发 flush（见 `strip_md_tables_by_caption`
+    的注释）。这里用 `splitlines()/join` 会把末尾 `\\n` 吃掉，第6章「表6-1」于是
+    不再被识别成系统表、模型那张 999.9 反而印出来（2026-11-12 回归实测）。
+    """
+    s = "\n".join(lines)
+    if str(orig).endswith("\n") and not s.endswith("\n"):
+        s += "\n"
+    return s
+
+
+# 表题语义 → 系统表（markdown 里已删掉系统表，正文引用要靠它落号）
+_REF_TOPICS = (
+    ("土地利用现状", "土地利用现状"),
+    ("各地类", "土地利用现状"),
+    ("地类面积", "土地利用现状"),
+    ("权属", "权属"),
+    ("复垦方向", "复垦方向"),
+    ("损毁", "损毁"),
+    ("表土", "表土"),
+    ("水资源", "水资源"),
+    ("结构对比", "结构对比"),
+    ("复垦前后", "结构对比"),
+)
+
+
+def _known_for_line(line: str, known_captions: Tuple[str, ...]) -> str:
+    """按句子里的话题找系统表（返回「表4-3」这种号，找不到返回空）。"""
+    for kw, capkw in _REF_TOPICS:
+        if kw not in line:
+            continue
+        for cap in known_captions or ():
+            m = _CAP_LINE.match(str(cap).strip())
+            if m and m.group(4).isdigit() and capkw in m.group(5):
+                return f"表{m.group(3)}-{m.group(4)}"
+    return ""
+
+
+def fix_table_refs(md: str, chapter: int,
+                   known_captions: Tuple[str, ...] = ()) -> Tuple[str, int]:
+    """正文「见表4-2」指错表 —— 按**本章实际表题**重定向。
+
+    批注 2026-11-12：4.1「拟损毁情况见表4-2」实际那张表是表4-1；
+    4.2「各地类面积见表4-6」实际是表4-3。模型写表号是凭感觉，表题是照顺序排的，
+    所以以**同一小节内最近的一张表**为准：
+      ① 引用的表号本章存在、且离引用句不远 → 不动；
+      ② 否则取引用句之后、下一个小节标题之前的第一张表；
+      ③ 再否则取引用句之前最近的一张表；
+      ④ 一张表都没有 → 删掉「见表X-Y」，不留悬空编号。
+    """
+    lines = str(md or "").splitlines()
+    caps: List[Tuple[int, int]] = []
+    for i, ln in enumerate(lines):
+        m = _CAP_LINE.match(ln.strip())
+        if m and int(m.group(3)) == int(chapter):
+            caps.append((i, int(m.group(4))))
+    if not caps and not known_captions:
+        return md, 0
+    n = 0
+    for i, ln in enumerate(lines):
+        if not _REF_LINE.search(ln):
+            continue
+        new = ln
+        for m in list(_REF_LINE.finditer(ln)):
+            if int(m.group(2)) != int(chapter):
+                continue
+            want = int(m.group(3))
+            near = [idx for idx, no in caps if no == want and abs(idx - i) <= 60]
+            if near:
+                continue
+            # 系统表（表4-x 损毁/土地利用现状/复垦方向）不在 markdown 里 ——
+            # 按句子话题取装配器传入的最终表号。
+            _known = _known_for_line(ln, known_captions)
+            if _known:
+                new = re.sub(rf'见\s*{m.group(1)}\s*{chapter}\s*[-—－]\s*{want}',
+                             f"见{_known}", new, count=1)
+                continue
+            # 本章有系统表、又认不出话题 → 原样保留。系统表编号根本不在 markdown 里，
+            # 拿残留的模型表题去猜（「见表4-9」→下一张 4-14）只会越改越错。
+            if known_captions:
+                continue
+            _h = _next_heading(lines, i)
+            nxt = [(idx, no) for idx, no in caps if i < idx < _h]
+            prv = [(idx, no) for idx, no in caps if idx < i]
+            pick = nxt[0][1] if nxt else (prv[-1][1] if prv else None)
+            if pick is None:
+                # 本章有系统表（编号不在 markdown 里）却匹配不上话题时**保留原引用**，
+                # 不能因为认不出话题就把「见表4-8」删掉（表其实会渲染出来）。
+                if known_captions:
+                    continue
+                new = re.sub(rf'[，,；;]?\s*见\s*{m.group(1)}\s*{chapter}\s*[-—－]\s*{want}[。；]?',
+                             "。", new)
+            else:
+                new = re.sub(rf'见\s*{m.group(1)}\s*{chapter}\s*[-—－]\s*{want}',
+                             f"见{m.group(1)}{chapter}-{pick}", new, count=1)
+        if new != ln:
+            lines[i] = new
+            n += 1
+    return _rejoin(lines, md), n
+
+
+def fix_dangling_table_phrases(md: str, chapter: int,
+                               known_captions: Tuple[str, ...] = ()) -> Tuple[str, int]:
+    """「各评价单元复垦方向如下表所示」下面却没有表 —— 批注 2026-11-12：「缺少表」。
+
+    后面确实没有表块时，改指本章前面最近的一张表；本章一张表都没有才删掉半句。
+    🔴 系统表（表4-x 复垦方向/损毁情况）在 markdown 里已被 `strip_md_tables_by_caption`
+       删掉，`known_captions` 由装配器传入它们的**最终编号**，否则这里找不到可指的表。
+    """
+    lines = str(md or "").splitlines()
+    caps = [(i, int(m.group(4))) for i, ln in enumerate(lines)
+            for m in [_CAP_LINE.match(ln.strip())]
+            if m and int(m.group(3)) == int(chapter)]
+    n = 0
+    for i, ln in enumerate(lines):
+        if not re.search(r'如下表所示|见下表|详见下表', ln):
+            continue
+        # 后面紧跟表块 → 不用改
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and lines[j].lstrip().startswith("|"):
+            continue
+        prev = [no for idx, no in caps if idx < i]
+        if prev:
+            lines[i] = re.sub(r'如下表所示|详见下表|见下表',
+                              f"见表{chapter}-{prev[-1]}", ln)
+        else:
+            # 系统表的编号不在 markdown 里 —— 按句子里的小节名匹配
+            hit = ""
+            for cap in known_captions or ():
+                _m = _CAP_LINE.match(str(cap).strip())
+                if not _m or not _m.group(4).isdigit():
+                    continue
+                title = _m.group(5)
+                if ("复垦方向" in ln and "复垦方向" in title) or \
+                        ("损毁" in ln and "损毁" in title) or \
+                        ("土地利用现状" in ln and "土地利用现状" in title):
+                    hit = f"表{_m.group(3)}-{_m.group(4)}"
+                    break
+            if not hit and known_captions:
+                _m = _CAP_LINE.match(str(known_captions[-1]).strip())
+                if _m and _m.group(4).isdigit():
+                    hit = f"表{_m.group(3)}-{_m.group(4)}"
+            if hit:
+                lines[i] = re.sub(r'如下表所示|详见下表|见下表', f"见{hit}", ln)
+            else:
+                lines[i] = re.sub(r'[，,]?\s*(?:如下表所示|详见下表|见下表)[。；]?',
+                                  "。", ln)
+        n += 1
+    return _rejoin(lines, md), n
+
+
+def fill_area_table(md: str, filled: Dict[str, Any], chapter: int = 4,
+                    known_captions: Tuple[str, ...] = ()) -> Tuple[str, int]:
+    """只有表题、没有表身的「面积统计表」—— 批注 2026-11-12：「空白」。
+
+    按基础资料《土地分类面积》补「复垦前/复垦后/增减」三列（恢复原地类，前后一致）。
+    🔴 表号若与系统表（第4章 表4-14 结构对比）撞号，顺延到本章下一个空号 ——
+       否则成稿里会出现两个「表4-14」。
+    """
+    known_nums = set()
+    for cap in known_captions or ():
+        _m = _CAP_LINE.match(str(cap).strip())
+        if _m and _m.group(4).isdigit():
+            known_nums.add(int(_m.group(4)))
+    used = set(known_nums)
+    lines = str(md or "").splitlines()
+    for ln in lines:
+        m = _CAP_LINE.match(ln.strip())
+        if m and int(m.group(3)) == int(chapter) and m.group(4).isdigit():
+            used.add(int(m.group(4)))
+    for i, ln in enumerate(lines):
+        m = _CAP_LINE.match(ln.strip())
+        if not (m and int(m.group(3)) == int(chapter)):
+            continue
+        _title = m.group(5).strip()
+        if "面积统计表" not in _title:
+            # 裸表题「表4-14」：装配器事后会按表头补名「面积统计表」，
+            # 修补阶段只能看前面的引出句判断（批注 6 就是这张空表）。
+            if _title:
+                continue
+            _ctx = " ".join(x for x in lines[max(0, i - 6):i] if x.strip())
+            if not ("面积" in _ctx and ("下表" in _ctx or "统计" in _ctx)):
+                continue
+        if _table_bounds(lines, i):
+            return md, 0
+        _names, _area, per = _land_targets(filled)
+        if not per:
+            return md, 0
+        no = int(m.group(4)) if m.group(4).isdigit() else 0
+        if no and no in known_nums:
+            no = max(used) + 1
+        if not _title:
+            lines[i] = f"{m.group(1)}表{chapter}-{no} 面积统计表"
+        elif no != int(m.group(4)):
+            lines[i] = f"{m.group(1)}表{chapter}-{no} {_title}"
+        table = ["| 地类 | 复垦前面积（公顷） | 复垦后面积（公顷） | 增减（公顷） |",
+                 "|---|---|---|---|"]
+        tot = 0.0
+        for name, a in per.items():
+            tot += a
+            table.append(f"| {name} | {a:.4f} | {a:.4f} | 0.0000 |")
+        table.append(f"| 合计 | {tot:.4f} | {tot:.4f} | 0.0000 |")
+        lines = _put_table(lines, i, table)
+        return _rejoin(lines, md), 1
+    return md, 0
+
+
+def _fmt_wan(x: float) -> str:
+    return f"{x:.2f}"
+
+
+def add_other_cost_table(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """7.2.3「计算结果见表7-2」但全文没有其他费用表 —— 批注 2026-11-12：「缺少表」。
+
+    其他费用总额以投资估算结果为准，四项按方案自述费率反算，差额列「拆迁补偿费」
+    （方案 7.1.2 明确其他费用含拆迁补偿费）。已有「其他费用估算表」则不重复加。
+    """
+    est = filled.get("_budget_estimate") or {}
+    other = float(est.get("other") or 0)
+    construction = float(est.get("construction") or 0)
+    equipment = float(est.get("equipment") or 0)
+    if other <= 0 or construction <= 0:
+        return md, 0
+    base = construction + equipment
+    pre = base * 0.056          # 0.2+1+0.5+2.4+0.7+0.8（%）
+    sup = base * 0.02           # 工程监理费 2%
+    fin = base * 0.047          # 1.5+1.2+1.2+0.6+0.2（%）
+    own = (construction + pre + fin + sup) * 0.028
+    mov = round(other - (pre + sup + fin + own), 2)
+    if mov < 0:
+        return md, 0
+    rows = [("1", "前期工作费", "工程施工费×5.6%", pre),
+            ("2", "工程监理费", "工程施工费×2.0%", sup),
+            ("3", "竣工验收费", "工程施工费×4.7%", fin),
+            ("4", "业主管理费", "（工程施工费+前期+监理+竣工）×2.8%", own)]
+    if mov >= 0.005:
+        rows.append(("5", "拆迁补偿费", "按其他费用总额平衡计列", mov))
+    table = ["| 序号 | 费用名称 | 计算式 | 金额（万元） |", "|---|---|---|---|"]
+    for no, name, formula, amt in rows:
+        table.append(f"| {no} | {name} | {formula} | {_fmt_wan(amt)} |")
+    table.append(f"| 合计 | — | — | {_fmt_wan(other)} |")
+
+    lines = str(md or "").splitlines()
+    # ① 模型已经写了「其他费用估算表」表题（常带 `**`、且没有表身）→ 就地把表补上
+    for i, ln in enumerate(lines):
+        m = _CAP_LINE.match(ln.strip())
+        if m and "其他费用" in m.group(5):
+            if _table_bounds(lines, i):
+                return md, 0
+            lines = _put_table(lines, i, table)
+            return _rejoin(lines, md), 1
+    # ② 没有表题：在 7.2.3 的引出句（「其他费用…见表7-x」）后面补表题 + 表
+    anchor = next((i for i, ln in enumerate(lines)
+                   if "其他费用" in ln and re.search(r'见\s*表\s*\d+', ln)), None)
+    if anchor is None:
+        anchor = next((i for i, ln in enumerate(lines)
+                       if re.match(r'^#*\s*7\.2\.3\s', ln)), None)
+    if anchor is None:
+        return md, 0
+    lines.insert(anchor + 1, "")
+    lines.insert(anchor + 2, "表7-2 其他费用估算表")
+    lines[anchor + 3:anchor + 3] = [""] + table + [""]
+    return _rejoin(lines, md), 1
+
+
+def _add_months(ym: str, n: int) -> str:
+    m = re.match(r'(\d{4})\s*[-/.年]\s*(\d{1,2})', str(ym or ""))
+    if not m:
+        return ""
+    idx = int(m.group(1)) * 12 + (int(m.group(2)) - 1) + n
+    y, mo = divmod(idx, 12)
+    return f"{y}年{mo + 1}月"
+
+
+def _schedule_from_estimate(filled: Dict[str, Any]):
+    """按「阶段工程费 + 按比例分摊其他费/预备费」算四期费用（与表8-1 口径一致）。
+
+    第 7 章各分项与第 8 章四期必须勾稽：管护费只认 7.2.4 的 0.60 万元（1 人×6 月
+    ×1000 元），模型自己编的 1.26 万元与第 7 章打架（批注 2026-11-12：「和下表中数据不对呀」）。
+    """
+    est = filled.get("_budget_estimate") or {}
+    construction = float(est.get("construction") or 0)
+    if construction <= 0:
+        return None
+    start = str(filled.get("land_use_start") or "")
+    end = str(filled.get("land_use_end") or "")
+    if not start or not end:
+        return None
+    try:
+        reclaim_m = int(float(str(filled.get("reclaim_period_months") or 0)))
+        care_m = int(float(str(filled.get("care_period_months") or 0)))
+    except (TypeError, ValueError):
+        return None
+    if reclaim_m <= 0 or care_m <= 0:
+        return None
+    eng1 = 0.0
+    for it in est.get("items") or []:
+        if "剥离" in str(it.get("section") or "") or "剥离" in str(it.get("name") or ""):
+            eng1 += float(it.get("amount_wan") or 0)
+    eng1 = min(eng1, construction)
+    eng3 = construction - eng1
+    shared = (float(est.get("other") or 0) + float(est.get("equipment") or 0)
+              + float(est.get("basic_reserve") or 0)
+              + float(est.get("price_reserve") or 0)
+              + float(est.get("risk") or 0))
+    p1 = eng1 + shared * (eng1 / construction if construction else 0)
+    p2 = float(est.get("monitor") or 0)
+    p3 = eng3 + shared * (eng3 / construction if construction else 0) \
+        + float(est.get("acceptance") or 0)
+    p4 = float(est.get("care") or 0)
+    total = float(est.get("dynamic_total") or 0) or (p1 + p2 + p3 + p4)
+    p3 += total - (p1 + p2 + p3 + p4)          # 尾差并入复垦施工期
+    labels = [
+        (_add_months(start, 0), p1, "表土剥离、堆存及临时防护"),
+        (_add_months(start, 1) + "至" + _add_months(end, 0), p2,
+         "土地损毁监测、表土堆体维护"),
+        (f"{_add_months(end, 1)}至{_add_months(end, reclaim_m)}", p3,
+         "垫层清理、垃圾外运、表土回填、沟渠疏通、土地翻耕、田面平整、土壤培肥，"
+         "完成后组织复垦验收"),
+        (f"{_add_months(end, reclaim_m + 1)}至{_add_months(end, reclaim_m + care_m)}",
+         p4, "管护期田间管理、沟渠清淤"),
+    ]
+    return {"labels": labels, "total": total, "p": [p1, p2, p3, p4]}
+
+
+def fix_phase_schedule(md: str, filled: Dict[str, Any], chapter: int = 8) -> Tuple[str, int]:
+    """第8章「各阶段费用安排」正文与表8-1 对齐（批注 2026-11-12）。"""
+    sch = _schedule_from_estimate(filled)
+    if not sch:
+        return md, 0
+    p1, p2, p3, p4 = sch["p"]
+    n = 0
+    out = md
+    for pat, val in (
+            (r'(表土剥离期安排费用)\s*[\d.]+\s*万元', p1),
+            (r'(用地监测期安排费用)\s*[\d.]+\s*万元', p2),
+            (r'(复垦施工期安排费用)\s*[\d.]+\s*万元', p3),
+            (r'(管护期安排费用)\s*[\d.]+\s*万元', p4),
+            (r'(各阶段费用合计)\s*[\d.]+\s*万元', sch["total"])):
+        out, k = re.subn(pat, rf'\g<1>{val:.2f}万元', out)
+        n += k
+    lines = out.splitlines()
+    for i, ln in enumerate(lines):
+        m = _CAP_LINE.match(ln.strip())
+        if not (m and int(m.group(3)) == int(chapter)
+                and ("费用安排" in m.group(5) or "费用计划" in m.group(5)
+                     or "统计表" in m.group(5))):
+            continue
+        table = ["| 复垦时间 | 动态总投资（万元） | 复垦工作 |", "|---|---|---|"]
+        for label, amt, work in sch["labels"]:
+            table.append(f"| {label} | {amt:.2f} | {work} |")
+        table.append(f"| 合计 | {sch['total']:.2f} | — |")
+        lines[i] = f"表{chapter}-{m.group(4)} 土地复垦费用安排表"
+        lines = _put_table(lines, i, table)
+        n += 1
+        break
+    return _rejoin(lines, md), n
+
+
+def fix_submit_date(filled: Dict[str, Any]) -> int:
+    """送审时间要早于临时用地起始月 —— 批注 2026-11-12：「最好2027.1月前」。
+
+    报告是**用地开始前**报审的；送审时间落在用地区间里，逻辑上不成立。
+    没有值/无法解析时不动。
+    """
+    d = str(filled.get("submit_date") or "").strip()
+    start = str(filled.get("land_use_start") or "").strip()
+    ms = re.match(r'(\d{4})\s*[-/.年]\s*(\d{1,2})', start)
+    md_ = re.match(r'(\d{4})\s*[-/.年]\s*(\d{1,2})(?:\s*[-/.月]\s*(\d{1,2}))?', d)
+    if not (ms and md_):
+        return 0
+    s_idx = int(ms.group(1)) * 12 + int(ms.group(2)) - 1
+    d_idx = int(md_.group(1)) * 12 + int(md_.group(2)) - 1
+    if d_idx < s_idx:
+        return 0
+    y, mo = divmod(s_idx - 1, 12)
+    day = int(md_.group(3) or 1)
+    filled["submit_date"] = f"{y}-{mo + 1:02d}-{min(day, 28):02d}"
+    return 1
+
+
 # ── 硬化面积来源 ─────────────────────────────────────────────
 def explain_hard_area(md: str) -> Tuple[str, int]:
     """硬化面积首次出现时注明出处（批注：1.1000 从哪里来的、计算过程）。
@@ -311,12 +936,13 @@ def explain_hard_area(md: str) -> Tuple[str, int]:
 
 # ── 表/图编号 ───────────────────────────────────────────────
 def renumber_captions(md: str, chapter: int) -> Tuple[str, int]:
-    lines = md.splitlines()
+    """章内表/图按出现顺序重排号，引用同步改（只动本章，不串章）。"""
+    lines = str(md or "").splitlines()
     mapping: Dict[str, str] = {}
     seen: Dict[str, int] = {}
     counters = {"表": 0, "图": 0}
     for i, ln in enumerate(lines):
-        m = _CAPTION.match(ln)
+        m = _CAP_LINE.match(ln.strip())
         if not m:
             continue
         indent, kind, ch, old, title = m.groups()
@@ -332,7 +958,7 @@ def renumber_captions(md: str, chapter: int) -> Tuple[str, int]:
             mapping[old_key] = f"{kind}{ch}-{new_no}"
             seen[old_key] = 1
         lines[i] = f"{indent}{kind}{ch}-{new_no} {title}".rstrip()
-    out = "\n".join(lines)
+    out = _rejoin(lines, md)
     n = len(mapping)
     # 同步引用：先占位再落号，避免「6-3→6-2 又被 6-2→6-1 再改一次」
     for i, (old, new) in enumerate(mapping.items()):
@@ -346,23 +972,34 @@ def renumber_captions(md: str, chapter: int) -> Tuple[str, int]:
 
 # ── 入口 ────────────────────────────────────────────────────
 def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
-                                filled: Dict[str, Any]) -> List[str]:
+                                filled: Dict[str, Any],
+                                land_table_caption: str = "",
+                                known_captions: Dict[int, Tuple[str, ...]] = None) -> List[str]:
+    """复垦章装配前的统一修补。`land_table_caption` 由装配器按本次系统表实际
+    编号传入（第3章「见表3-1」要指向它）；`known_captions` 是各章**系统表**
+    的最终表题（markdown 里已被删掉，悬空表句要靠它指回去）。"""
     logs: List[str] = []
     # 找第4章的「土地利用现状」表号，供第3章「见表3-1」改指向
-    _land_caption = ""
-    for _ch in (chapters or {}).values():
-        if not isinstance(_ch, dict):
-            continue
-        m = re.search(r'(表\s*\d+\s*[-—]\s*\d+)[^\n]*土地利用现状', str(_ch.get("markdown") or ""))
-        if m:
-            _land_caption = re.sub(r'\s+', '', m.group(1))
-            break
+    _land_caption = re.sub(r'\s+', '', str(land_table_caption or ""))
+    if not _land_caption:
+        for _ch in (chapters or {}).values():
+            if not isinstance(_ch, dict):
+                continue
+            m = re.search(r'(表\s*\d+\s*[-—]\s*\d+)[^\n]*土地利用现状',
+                          str(_ch.get("markdown") or ""))
+            if m:
+                _land_caption = re.sub(r'\s+', '', m.group(1))
+                break
     for key, ch in list(chapters.items()):
         if not isinstance(ch, dict):
             continue
         md = str(ch.get("markdown") or "")
         if not md:
             continue
+        try:
+            _no = int(str(key).strip())
+        except (TypeError, ValueError):
+            _no = 0
         orig = md
         from app.services.report_content_repairs import fix_truncated_paragraphs
         md, n_tr = fix_truncated_paragraphs(md)
@@ -370,23 +1007,38 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_d = dedupe_sections(md)
         md, n_s = fix_service_period(md, filled or {})
         md, n_ue = fix_use_period_end(md, filled or {})
+        md, n_tl = fix_topsoil_land_types(md, filled or {})
         md, n_r = fix_restoration(md, filled or {})
         md, n_t = fix_strip_depth(md, filled or {})
         md, n_c = fix_cost_numbers(md, filled or {})
         md, n_a = fix_land_table_ref(md, _land_caption)
         md, n_dr = drop_missing_table_refs(md)
         md, n_e = explain_hard_area(md)
+        md, n_area = fill_area_table(
+            md, filled or {}, _no, (known_captions or {}).get(_no, ())) if _no == 4 else (md, 0)
+        md, n_other = add_other_cost_table(md, filled or {}) if _no == 7 else (md, 0)
+        md, n_sch = fix_phase_schedule(md, filled or {}, _no) if _no == 8 else (md, 0)
+        md, n_dangle = fix_dangling_table_phrases(
+            md, _no, (known_captions or {}).get(_no, ())) if _no else (md, 0)
+        # 🔴 表引用重定向放在最后：前面可能刚补了表/改了表题，要以最终表号为准
+        md, n_ref = fix_table_refs(
+            md, _no, (known_captions or {}).get(_no, ())) if _no else (md, 0)
         if md != orig:
             ch["markdown"] = md
-            bits = []
-            for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
-                             ("服务年限", n_s), ("使用期起止", n_ue),
-                             ("复垦方向/面积", n_r),
-                             ("剥离厚度", n_t), ("费用数字", n_c),
-                             ("表3-1指向", n_a), ("删无效表号", n_dr),
-                             ("硬化面积来源", n_e)):
-                if k:
-                    bits.append(f"{label}{k}")
-            if bits:
-                logs.append(f"第{key}章：" + "、".join(bits))
+        bits = []
+        for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
+                         ("服务年限", n_s), ("使用期起止", n_ue),
+                         ("剥离地类", n_tl), ("复垦方向/面积", n_r),
+                         ("剥离厚度", n_t), ("费用数字", n_c),
+                         ("表3-1指向", n_a), ("删无效表号", n_dr),
+                         ("硬化面积来源", n_e), ("补面积统计表", n_area),
+                         ("补其他费用表", n_other), ("阶段费用对齐", n_sch),
+                         ("悬空表句", n_dangle), ("表引用重定向", n_ref)):
+            if k:
+                bits.append(f"{label}{k}")
+        if bits:
+            logs.append(f"第{key}章：" + "、".join(bits))
+    n_date = fix_submit_date(filled or {})
+    if n_date:
+        logs.append(f"送审时间改为 {filled.get('submit_date')}")
     return logs

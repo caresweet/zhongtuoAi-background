@@ -761,6 +761,7 @@ class ReportAssembler:
         if self._domain == "reclamation":
             _strip_titles = ("临时用地土地利用现状统计表",
                              "评价单元土地损毁情况表", "评价单元复垦方向表")
+            _built4 = []
             try:
                 from app.services.reclamation_ch4_tables import build_ch4_tables
                 _built4 = build_ch4_tables(
@@ -797,7 +798,19 @@ class ReportAssembler:
             try:
                 from app.services.reclamation_content_repairs import (
                     repair_reclamation_chapters)
-                _rlogs = repair_reclamation_chapters(chapters or {}, filled or {})
+                # 「土地利用现状」系统表的本次实际编号 —— 第3章「见表3-1」要指到它
+                _land_cap = ""
+                try:
+                    _land_cap = next(
+                        (re.sub(r'\s+', '', str((t or {}).get("caption") or ""))
+                         for _, t in (_built4 or [])
+                         if "土地利用现状" in str((t or {}).get("caption") or "")), "")
+                except Exception:
+                    _land_cap = ""
+                _rlogs = repair_reclamation_chapters(
+                    chapters or {}, filled or {}, land_table_caption=_land_cap,
+                    known_captions={4: tuple(
+                        str((t or {}).get("caption") or "") for _, t in (_built4 or []))})
                 if _rlogs:
                     logger.info("[复垦修补] %s", "；".join(_rlogs))
             except Exception as _re:
@@ -1736,14 +1749,35 @@ class ReportAssembler:
                             pass  # Keep, might be between heading transitions
 
     def _normalize_caption_order(self, doc):
-        """复垦：表/图号按**正文出现顺序**重排成 1,2,3…，不跳号、不重号。
+        """复垦：表/图号按**正文出现顺序**重排成 1,2,3…，不跳号、不重号，
+        并把正文引用改成**它下面那张表**的号。
 
-        业主 2026-11-11：「表格编号要按数字顺序排列，不能跳数字，也不能让
-        表4-6 出现在 4-5 内容前面」。旧逻辑给系统表保留样本表号（4-8/4-11…），
-        LLM 表在空隙里跳号，于是出现「表4-2 在表4-1 前」「表4-5 缺失」。
-        这里不再区分系统表/模型表，一律按出现顺序编号，并同步改正文引用。
+        业主 2026-11-12（第二次强调）：「所有的表格上文说见表x-x那下文的表格
+        就是x-x，不要出现与上文对应不上的情况，也不要出现排序混乱」。
+
+        旧实现按「旧号→新号」映射改引用：旧号重复（两个表4-2）或引用本身写错
+        （见表4-6 指着表4-3）时，改出来的号仍然对不上。这里改成**按位置**：
+          ① 表题按出现顺序编号（不区分系统表/模型表）；
+          ② 「见表X-Y」「如下表所示」一律改成它**后面第一张表**的实际编号。
+        非「见…」的提法（如「与表4-2 对比」）仍按旧号→新号映射改（唯一时才改）。
         """
         cap = re.compile(r'^((?:表|图)\s*)(\d+)\s*[-—－]\s*(\d+)(.*)$')
+        ref = re.compile(r'见\s*(表|图)\s*(\d+)\s*[-—－]\s*(\d+)(?:\s*[-—－]\s*\d+)?')
+        ref_word = re.compile(r'(如下表所示|详见下表|见下表|如下表|详见下图|见下图)')
+        # 句子话题 → 表题关键词：优先落到「讲的是同一件事」的那张表。
+        # 只靠「下一张」会把「各评价单元复垦方向见表X」指到后面的表土平衡表上。
+        _TOPICS = (
+            ("临时用地土地利用现状", "临时用地土地利用现状"),
+            ("主体项目用地", "主体项目用地"),
+            ("土地利用现状", "土地利用现状"), ("土地权属", "权属"), ("权属", "权属"),
+            ("复垦方向", "复垦方向"), ("适宜性分值", "适宜性分值"), ("适宜性", "适宜性"),
+            ("土地质量等级", "质量等级"), ("表土资源", "表土"), ("表土", "表土"),
+            ("水资源", "水资源"), ("结构对比", "结构对比"),
+            ("拟损毁", "拟损毁"), ("损毁时序", "损毁时序"), ("损毁", "损毁"),
+            ("评价单元", "评价单元"), ("面积统计", "面积统计"),
+            ("其他费用", "其他费用"), ("工程施工费", "工程施工费"),
+            ("投资估算", "投资估算"),
+        )
 
         def _rewrite(p, text):
             if not p.runs:
@@ -1753,41 +1787,133 @@ class ReportAssembler:
             for r in p.runs[1:]:
                 r.text = ""
 
-        counters = {}
-        mapping = {}
+        paras = list(doc.paragraphs)
+        par_ch: List[int] = []
         cur_ch = 0
-        for p in doc.paragraphs:
+        for p in paras:
             t = p.text.strip()
-            if not t:
-                continue
-            c = chapter_no_of_text(self._domain, t)
+            c = chapter_no_of_text(self._domain, t) if t else 0
             if c:
                 cur_ch = c
+            par_ch.append(cur_ch)
+
+        # ① 表题按出现顺序编号（章号取**它在文档里的实际章**，不认模型写的章号）
+        counters: Dict[Any, int] = {}
+        caps: List[tuple] = []            # (段落序号, kind, ch, 表题剩余部分, 新号)
+        cap_idx: set = set()
+        for i, p in enumerate(paras):
+            t = p.text.strip()
             m = cap.match(t)
-            if not m or not cur_ch:
+            if not m or not par_ch[i]:
                 continue
-            kind, ch, old = m.group(1).strip(), int(m.group(2)), int(m.group(3))
-            if ch != cur_ch:
-                continue
-            _rest = m.group(4) or ""
-            if "。" in _rest or len(t) > 60:
+            rest = m.group(4) or ""
+            if "。" in rest or len(t) > 80:
                 continue          # 「图4-1 反映了…。施工场站…」是正文，不是图题
+            ch = par_ch[i]
+            kind = m.group(1).strip()
             key = (kind, ch)
             counters[key] = counters.get(key, 0) + 1
-            new = counters[key]
-            mapping.setdefault((kind, ch, old), new)
-            newt = f"{kind}{ch}-{new}{m.group(4)}"
-            if newt != t:
-                _rewrite(p, newt)
+            caps.append((i, kind, ch, rest, counters[key]))
+            cap_idx.add(i)
 
-        for p in doc.paragraphs:
-            t = p.text.strip()
-            if not t or cap.match(t):
+        # 旧号→新号（只给非「见…」的提法兜底；同号多张时不改，避免改错）
+        old_map: Dict[tuple, List[int]] = {}
+        for i, kind, ch, _rest, new in caps:
+            m = cap.match(paras[i].text.strip())
+            old_map.setdefault((kind, ch, int(m.group(3))), []).append(new)
+
+        def _next_no(idx: int, kind: str, ch: int):
+            for ci, _ck, cch, _rest, new in caps:
+                if ci > idx and cch == ch and _ck == kind:
+                    return new
+            return None
+
+        def _norm_title(s: str) -> str:
+            return re.sub(r'\s+', '', str(s or ""))
+
+        def _topic_no(idx: int, line: str, kind: str, ch: int, pos: int = 0):
+            """按句子话题找**最近**的同题表。
+
+            · 只看「见」所在的这一句（前面那句里的「适宜性」不能拿来定表）；
+            · 话题词按**离见字最近的词尾**取（「临时用地土地利用现状」胜过
+              包含它的「土地利用现状」；「表土资源平衡」胜过句首的「土地利用现状」）；
+            · 再按段落距离取最近的同题表。
+            """
+            _p = pos or len(line)
+            _seg_start = max(line.rfind("。", 0, _p), line.rfind("；", 0, _p),
+                             line.rfind("！", 0, _p), line.rfind("？", 0, _p)) + 1
+            seg = line[_seg_start:_p]
+            best = None
+            for kw, capkw in _TOPICS:
+                q = seg.rfind(kw)
+                if q < 0:
+                    continue
+                # 词尾越靠近「见」越好；同词尾取更长的词（更具体）
+                score = (abs(len(seg) - (q + len(kw))), -len(kw))
+                if best is None or score < best[0]:
+                    best = (score, capkw)
+            if best is None:
+                return None
+            topic = best[1]
+            cand = [(abs(ci - idx), 0 if ci > idx else 1, new)
+                    for ci, _k, cch, rest, new in caps
+                    if cch == ch and _k == kind and topic in _norm_title(rest)]
+            if not cand:
+                return None
+            return min(cand)[2]
+
+        for i, kind, ch, rest, new in caps:
+            t = paras[i].text.strip()
+            newt = f"{kind}{ch}-{new}{rest}"
+            if newt != t:
+                _rewrite(paras[i], newt)
+
+        for i, p in enumerate(paras):
+            if i in cap_idx:
                 continue
-            nt = t
-            for (kind, ch, old), new in mapping.items():
-                nt = re.sub(rf'{kind}{ch}\s*[-—－]\s*{old}(?!\d)',
-                            f"{kind}{ch}-{new}", nt)
+            t = p.text
+            if not t.strip():
+                continue
+            ch = par_ch[i]
+            if not ch:
+                continue
+
+            def _rep_ref(m):
+                kind = m.group(1)
+                # 跨章引用（第5章「见表6-1」）不在本次重排范围内 —— 各章各自编号，
+                # 按「下一张表」改会把别的章号改坏。
+                if int(m.group(2)) != ch:
+                    return m.group(0)
+                nxt = _topic_no(i, t, kind, ch, m.start())
+                if nxt is None:
+                    nxt = _next_no(i, kind, ch)
+                if nxt is None:
+                    _cand = old_map.get((kind, ch, int(m.group(3))) or ())
+                    if len(_cand) == 1:
+                        nxt = _cand[0]
+                    else:
+                        return m.group(0)
+                return f"见{kind}{ch}-{nxt}"
+
+            nt = ref.sub(_rep_ref, t)
+
+            # 畸形的三级表号（「表4-34-2」）——模型生造的编号，没有任何表能对上，
+            # 整句删掉，别让它出现在成稿里（业主：不要出现对不上的表号）。
+            nt = re.sub(
+                r'[^。；\n]*见\s*表\s*\d+\s*[-—－]\s*\d+\s*[-—－]\s*\d+[^。；\n]*[。；]?',
+                '', nt)
+
+            def _rep_word(m):
+                word = m.group(1)
+                kind = "图" if "图" in word else "表"
+                nxt = _topic_no(i, t, kind, ch, m.start())
+                if nxt is None:
+                    nxt = _next_no(i, kind, ch)
+                if nxt is None:
+                    return word
+                return f"见{kind}{ch}-{nxt}"
+
+            nt = ref_word.sub(_rep_word, nt)
             if nt != t:
                 _rewrite(p, nt)
 
@@ -3581,7 +3707,15 @@ class ReportAssembler:
                 if not in_table:
                     table_buf = []
                 # Split malformed single-line tables: rows separated by " | — |" or " |---"
-                if ' | — |' in s or ' |---' in s:
+                # 🔴 只在「这一行的格子数明显多于表头」时才拆 —— 正常行本身就可能
+                #    含 `| — |`（如 `| 合计 | — | — | 3.97 |`，2026-11-12 实测被
+                #    拆成「| 合计 |」+「| — | 3.97 |」，合计金额跑到费用名称列）。
+                _ncol_hdr = _ncol_cur = 0
+                if in_table and table_buf:
+                    _ncol_hdr = len([c for c in table_buf[0].strip().strip('|').split('|')])
+                _ncol_cur = len([c for c in s.strip().strip('|').split('|')])
+                _multiline = (not in_table) or (_ncol_hdr and _ncol_cur > _ncol_hdr)
+                if (_multiline and (' | — |' in s or ' |---' in s)):
                     import re as _re_tbl
                     rows = _re_tbl.split(r'\s*\|\s*[-—]+\s*\|', s)
                     for row in rows:
@@ -4139,6 +4273,24 @@ class ReportAssembler:
                 continue
             _kept.append(_r)
         rows = _kept
+
+        # ②-1 地类表「合计」行少一格：表头前两列同为「地类名称及编码」（等价于合并），
+        #      模型常写成 `| 合计 | 5.4000 | 100 |`（3 格），渲染时「—」补到末尾，
+        #      看起来合计面积跑到地类列。按制式补成 `| 合计 | 合计 | 5.4000 | 100 |`。
+        if len(rows) > 1 and len(rows[0]) >= 3 \
+                and rows[0][0].strip() == rows[0][1].strip() and "地类" in rows[0][0]:
+            _fixed = [rows[0]]
+            for _r in rows[1:]:
+                _tail = [str(c) for c in _r[1:] if str(c).strip() not in _PH]
+                if _r and str(_r[0]).strip() in _TOTALS and _tail \
+                        and str(_r[1] if len(_r) > 1 else "").strip() not in _TOTALS:
+                    # 补回第 2 格「合计」；末格空/占位不要（否则又串到下一列）
+                    _r = [str(_r[0]).strip(), str(_r[0]).strip()] + _tail
+                    while len(_r) < len(rows[0]):
+                        _r.append("—")
+                    _r = _r[:len(rows[0])]
+                _fixed.append(_r)
+            rows = _fixed
 
         # ③ **列错位修复**：模型把「测评项目」写到了第一列，后面用 `—` 补位。
         #    实测表4-2：`| 内容是否符合… | 0 | 全部符合… | 0 | — | 0 |` ——

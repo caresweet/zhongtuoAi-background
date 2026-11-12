@@ -536,20 +536,26 @@ def table_4_12(filled: dict) -> Optional[dict]:
         _num(r.get("面积_m2")) for r in rows_in
         if _class_name(r.get("一级地类")) in _STRIP_TOP_CLASSES)
     _dirs: List[str] = []
+
+    def _add_dirs(value: str) -> None:
+        # 🔴 分区表里每个单元的方向本身就是「旱地、果园」这种串，整串去重会得到
+        #    「旱地、果园、旱地、果园、沟渠…」——实测 2026-11-12 城东污水厂表4-13
+        #    复垦方向栏就是这么串起来的。要按顿号/逗号拆开逐类去重。
+        for _part in re.split(r'[、,，/；;\s]+', str(value or "")):
+            _part = _part.strip()
+            if _part and _part not in _dirs:
+                _dirs.append(_part)
+
     try:
         from app.services.reclamation_zones import zones_from_filled
         for _z in zones_from_filled(filled) or []:
-            _d = str((_z or {}).get("reclaim_direction") or "").strip()
-            if _d and _d not in _dirs:
-                _dirs.append(_d)
+            _add_dirs((_z or {}).get("reclaim_direction") or "")
     except Exception:
         pass
     if not _dirs:
         for r in rows_in:
             if _class_name(r.get("一级地类")) == "耕地":
-                _d = _class_name(r.get("二级地类"))
-                if _d and _d not in _dirs:
-                    _dirs.append(_d)
+                _add_dirs(_class_name(r.get("二级地类")))
     return {
         "caption": "表4-12 临时用地水资源分析表",
         "headers": ["类型", "面积（公顷）", "可复垦耕地面积（公顷）",
@@ -612,6 +618,9 @@ _SECTION_OF: Dict[str, str] = {
 }
 
 # 表前的引导语（样本惯例：表前必有一句引出语，禁止表格「悬空」）。
+# 🔴 表4-11 的引出语里「剥离表土的地类」**不能写死**：城东项目只有耕地和园地，
+#    写「耕地和林地」就是专家 2026-11-12 批注的那处。按本项目土地分类面积现算，
+#    见 `_lead_for()`。
 _LEAD_IN: Dict[str, str] = {
     "表4-2": "本项目临时用地范围内各地类的面积及占总面积比例见表4-2。",
     "表4-7": "本项目临时用地各评价单元的损毁方式、损毁面积与损毁程度见表4-7。",
@@ -621,7 +630,7 @@ _LEAD_IN: Dict[str, str] = {
              "按复垦适宜性评价常用权重加权计算各单元土地适宜性分值，见表4-9。",
     "表4-10": "根据适宜性评价结果，本项目各评价单元按恢复原地类确定复垦方向，"
               "复垦方向与主要复垦措施见表4-10。",
-    "表4-11": "根据项目区土地利用现状，需剥离表土的地类主要为耕地和林地，"
+    "表4-11": "根据项目区土地利用现状，需剥离表土的地类主要为{classes}，"
               "剥离后的表土集中堆存并全部回覆于复垦单元。临时用地表土资源平衡"
               "分析见表4-11。",
     "表4-12": "复垦后耕地的用水问题主要表现在水源与地块间的输送，项目涉及地块"
@@ -634,6 +643,43 @@ _LEAD_IN: Dict[str, str] = {
     "表4-P": "本项目主体项目用地土地利用现状见表4-3。",
     "表4-D": "本项目临时用地拟损毁情况见表4-2。",
 }
+
+
+def _agri_phrase(filled: dict) -> str:
+    """本项目**实际**参与表土剥离的地类名（按土地分类面积表推）。
+
+    只有一个地类时用二级名（旱地/水田/果园…），多类时用一级名（耕地、园地…）——
+    业主 2026-11-12：「是旱地还是耕地还是园地，要从实际项目识别」。
+    """
+    lc = ((filled or {}).get("land_classification") or {})
+    rows = lc.get("rows") or []
+    _top_of = {"旱地": "耕地", "水田": "耕地", "水浇地": "耕地",
+               "果园": "园地", "茶园": "园地", "其他园地": "园地",
+               "乔木林地": "林地", "灌木林地": "林地"}
+    agri: List[Tuple[str, str]] = []
+    for r in rows:
+        second = str((r or {}).get("二级地类") or "").strip()
+        top = str((r or {}).get("一级地类") or "").strip() or _top_of.get(second, second)
+        if top in ("耕地", "园地", "林地", "草地", "其他农用地") and second:
+            agri.append((top, second))
+    if not agri:
+        return "耕地和园地"
+    if len(agri) == 1:
+        return agri[0][1]
+    names: List[str] = []
+    for top, _s in agri:
+        if top not in names:
+            names.append(top)
+    if len(names) == 1:
+        return names[0]
+    return "、".join(names[:-1]) + "和" + names[-1]
+
+
+def _lead_for(key: str, filled: dict) -> str:
+    lead = _LEAD_IN.get(key, "")
+    if "{classes}" in lead:
+        lead = lead.replace("{classes}", _agri_phrase(filled))
+    return lead
 
 
 _PLAN_KEYWORDS: Dict[str, Tuple[str, ...]] = {
@@ -728,7 +774,7 @@ def build_ch4_tables(filled: dict, title: str = "",
                 logger.info(f"[表4-x] {key} 模板第四章没有这张表，跳过：{tbl.get('caption')}")
                 continue
             tbl["caption"] = f"表4-{hit['no']} {_clean_plan_title(hit.get('title'))}".strip()
-        _lead = _LEAD_IN.get(key, "")
+        _lead = _lead_for(key, filled)
         if plan is not None and tbl.get("caption"):
             _m = re.match(r'表4-(\d+)', str(tbl["caption"]))
             if _m:

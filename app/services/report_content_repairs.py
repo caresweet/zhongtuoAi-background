@@ -488,7 +488,8 @@ def drop_missing_survey_refs(chapters: Dict[Any, Dict[str, Any]],
             changed += 1
             continue
         _is_pub = ("个人问卷" in s) or ("群众问卷" in s)
-        _is_dept = ("单位问卷" in s) or ("部门问卷" in s)
+        _is_dept = (("单位问卷" in s) or ("部门问卷" in s)
+                    or ("单位（部门）" in s) or ("单位(部门)" in s))
         # 「xx问卷统计汇总情况如下表所示：」——对应表出不来就整句删掉
         if "如下表所示" in s and ((_is_pub and not _has_pub) or
                                   (_is_dept and not _has_dept)):

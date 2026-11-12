@@ -51,6 +51,7 @@ _BASE_FIELDS = [
     ("土地用途", "land_use", "text", "如：工业用地"),
     ("涉及户数", "household_count", "number", "被征收农户数"),
     ("补偿安置方案文号", "compensation_doc", "text", ""),
+    ("公告/批复文号", "doc_reference", "text", "如：XX拟征告〔2026〕X号"),
     ("资金筹措单位", "funding", "text", "如：区财政统筹"),
     ("界址范围描述", "boundary_desc", "text", "东至…南至…西至…北至…"),
 ]

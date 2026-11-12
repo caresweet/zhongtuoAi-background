@@ -390,6 +390,41 @@ def fix_topsoil_land_types(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
 
 
 # ── 剥离厚度 ─────────────────────────────────────────────────
+def fix_zone_plot_counts(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """各功能区的「地块数」按基础资料统计，正文不得与表4-1 冲突。
+
+    批注/业主 2026-11-12：「上下文数据要统一」——城东这版表4-1 写管道开挖带 3 个
+    地块、表土堆放区 2 个，正文却都写「1 个地块」。以 `_land_use_zones` 的
+    `plot_count` 为准（它同时供表1-1、表4-1 出数），逐区改正文。
+    """
+    try:
+        from app.services.reclamation_zones import zones_from_filled
+        zones = zones_from_filled(filled or {})
+    except Exception:
+        return md, 0
+    if not zones:
+        return md, 0
+    n = 0
+    out = md
+    total = 0
+    for z in zones:
+        name = str(z.get("name") or "").strip()
+        cnt = int(_num(z.get("plot_count")) or 0)
+        if not name or cnt <= 0:
+            continue
+        total += cnt
+        pat = rf'({re.escape(name)}\s*(?:为|共|有)?\s*)\d+\s*个地块'
+        out, k = re.subn(pat, rf'\g<1>{cnt}个地块', out)
+        n += k
+    if total:
+        # 「共 N 个地块」「涉及 N 个地块」——按各区合计（表4-1 的合计口径）。
+        # 城东这版写「涉及4个地块」（其实是 4 个功能区），而表4-1 按地块数是 8。
+        out, k = re.subn(r'((?:共|合计|共计|涉及|分为|划分为)\s*)\d+\s*个地块',
+                         rf'\g<1>{total}个地块', out)
+        n += k
+    return out, n
+
+
 def fix_strip_depth(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     depth = _num(filled.get("topsoil_thickness") or filled.get("strip_depth_cm")) or 30.0
     n = 0
@@ -685,6 +720,17 @@ def fix_dangling_table_phrases(md: str, chapter: int,
     return _rejoin(lines, md), n
 
 
+def _table_has_body(lines: List[str], cap_i: int) -> bool:
+    """表题下是否有**数据行**（只有表头/分隔行仍算空表）。"""
+    b = _table_bounds(lines, cap_i)
+    if not b:
+        return False
+    data = [ln for ln in lines[b[0]:b[1]]
+            if ln.strip().startswith("|")
+            and not re.match(r'^\|[\s\-:|—]+\|$', ln.strip())]
+    return len(data) > 1          # 第一行是表头，≥2 才算有数据
+
+
 def fill_area_table(md: str, filled: Dict[str, Any], chapter: int = 4,
                     known_captions: Tuple[str, ...] = ()) -> Tuple[str, int]:
     """只有表题、没有表身的「面积统计表」—— 批注 2026-11-12：「空白」。
@@ -709,15 +755,18 @@ def fill_area_table(md: str, filled: Dict[str, Any], chapter: int = 4,
         if not (m and int(m.group(3)) == int(chapter)):
             continue
         _title = m.group(5).strip()
+        _no_old = int(m.group(4)) if m.group(4).isdigit() else 0
         if "面积统计表" not in _title:
             # 裸表题「表4-14」：装配器事后会按表头补名「面积统计表」，
             # 修补阶段只能看前面的引出句判断（批注 6 就是这张空表）。
             if _title:
                 continue
             _ctx = " ".join(x for x in lines[max(0, i - 6):i] if x.strip())
-            if not ("面积" in _ctx and ("下表" in _ctx or "统计" in _ctx)):
+            _cited = bool(re.search(
+                rf'见\s*表\s*{chapter}\s*[-—－]\s*{_no_old}', _ctx)) if _no_old else False
+            if not ("面积" in _ctx and ("下表" in _ctx or "统计" in _ctx or _cited)):
                 continue
-        if _table_bounds(lines, i):
+        if _table_has_body(lines, i):
             return md, 0
         _names, _area, per = _land_targets(filled)
         if not per:
@@ -781,7 +830,7 @@ def add_other_cost_table(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     for i, ln in enumerate(lines):
         m = _CAP_LINE.match(ln.strip())
         if m and "其他费用" in m.group(5):
-            if _table_bounds(lines, i):
+            if _table_has_body(lines, i):
                 return md, 0
             lines = _put_table(lines, i, table)
             return _rejoin(lines, md), 1
@@ -1009,6 +1058,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_ue = fix_use_period_end(md, filled or {})
         md, n_tl = fix_topsoil_land_types(md, filled or {})
         md, n_r = fix_restoration(md, filled or {})
+        md, n_plot = fix_zone_plot_counts(md, filled or {})
         md, n_t = fix_strip_depth(md, filled or {})
         md, n_c = fix_cost_numbers(md, filled or {})
         md, n_a = fix_land_table_ref(md, _land_caption)
@@ -1029,6 +1079,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
                          ("服务年限", n_s), ("使用期起止", n_ue),
                          ("剥离地类", n_tl), ("复垦方向/面积", n_r),
+                         ("地块数", n_plot),
                          ("剥离厚度", n_t), ("费用数字", n_c),
                          ("表3-1指向", n_a), ("删无效表号", n_dr),
                          ("硬化面积来源", n_e), ("补面积统计表", n_area),

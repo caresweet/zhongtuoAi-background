@@ -217,6 +217,27 @@ def test_empty_area_table_with_bare_caption_is_filled():
     assert "| 合计 | 2.6800 | 2.6800 | 0.0000 |" in out
 
 
+def test_empty_area_table_with_bare_caption_cited_by_number():
+    """引出句写「面积见表4-14」而不是「见下表」时，空表同样要补。"""
+    md = ("## 4.6 复垦的目标任务\n本项目拟复垦土地面积2.6800hm²，"
+          "具体复垦前复垦后面积见表4-14。\n\n单位：hm²\n\n表4-14\n\n"
+          "复垦责任范围涉及旱地1.4000hm²。\n")
+    out, n = fill_area_table(md, _FILLED, 4)
+    assert n == 1
+    assert "表4-14 面积统计表" in out
+    assert "| 合计 | 2.6800 | 2.6800 | 0.0000 |" in out
+
+
+def test_empty_area_table_with_header_only_is_filled():
+    """只有表头的空表（渲染后被丢掉）同样要补数据行。"""
+    md = ("表4-14 面积统计表\n\n"
+          "| 地类 | 复垦前面积（公顷） | 复垦后面积（公顷） | 增减（公顷） |\n"
+          "|---|---|---|---|\n")
+    out, n = fill_area_table(md, _FILLED, 4)
+    assert n == 1
+    assert "| 合计 | 2.6800 | 2.6800 | 0.0000 |" in out
+
+
 def test_water_table_restoration_direction_is_deduped_by_class():
     """表4-12 复垦方向栏：分区方向按类别去重（原写法拼出「旱地、果园、旱地、果园…」）。"""
     from app.services.reclamation_ch4_tables import table_4_12
@@ -369,6 +390,103 @@ def test_stability_cross_chapter_table_ref_uses_old_to_new_mapping():
     texts = [p.text for p in doc.paragraphs]
     assert "本项目主要风险因素详见表6-2。" in texts
     assert "表6-2 土地利用现状表" in texts
+
+
+def test_risk_count_consistent_across_stability_chapters():
+    """上文 5 个风险点，后文不能写 6 个 / 六项（业主 2026-11-12：上下文必须统一）。"""
+    from app.services.report_content_repairs import fix_risk_count
+    ch11 = "\n\n".join(
+        f"**{i}. 第{i}类事项方面的风险**\n\n根据该事项风险因素的识别和风险等级的判断，"
+        f"该事项风险程度为{'较小' if i == 5 else '一般'}。" for i in range(1, 6))
+    chapters = {
+        11: {"markdown": ch11 + "\n\n本决策共5个方面主要风险因素。"},
+        12: {"markdown": "从上表可见，本项目共识别6项主要风险因素，"
+                         "初始评估中各项风险程度均为一般。"},
+        13: {"markdown": "上表所列措施与第11章识别的六项风险一一对应。"},
+    }
+    fix_risk_count(chapters)
+    assert "共5项主要风险因素" in chapters[12]["markdown"]
+    assert "4项为一般风险、1项为较小风险" in chapters[12]["markdown"]
+    assert "第11章识别的5项风险" in chapters[13]["markdown"]
+
+
+def test_reclamation_zone_plot_counts_match_table():
+    """表4-1 写管道开挖带 3 个地块、表土堆放区 2 个，正文不能都写 1 个。"""
+    from app.services.reclamation_content_repairs import fix_zone_plot_counts
+    filled = {"_land_use_zones": [
+        {"name": "施工场站", "area_m2": 9800, "plot_count": 2},
+        {"name": "管道开挖带", "area_m2": 9200, "plot_count": 3},
+        {"name": "施工便道", "area_m2": 4800, "plot_count": 1},
+        {"name": "表土堆放区", "area_m2": 3000, "plot_count": 2},
+    ]}
+    md = ("施工场站2个地块。管道开挖带1个地块。"
+          "施工便道为1个地块。表土堆放区1个地块。涉及4个地块。")
+    out, n = fix_zone_plot_counts(md, filled)
+    assert n >= 3
+    assert "管道开挖带3个地块" in out
+    assert "表土堆放区2个地块" in out
+    assert "施工场站2个地块" in out
+    assert "涉及8个地块" in out
+
+
+def test_two_level_land_table_total_keeps_alignment(tmp_path):
+    """表头是「地类名称及编码 | 二级地类」时，合计行少一格要补「—」，面积不能串列。"""
+    import docx
+    from app.services.report_assembler import ReportAssembler
+    md = ("# 4 土地复垦方向可行性分析\n\n## 4.2 复垦区土地利用状况\n\n"
+          "表4-5 主体项目用地土地利用现状统计表\n\n"
+          "| 地类名称及编码 | 二级地类 | 面积（hm²） | 占比（%） |\n"
+          "|---|---|---|---|\n"
+          "| 工业仓储用地（06） | 工业用地（0601） | 5.4000 | 100.00 |\n"
+          "| 合计 | 5.4000 | 100.00 |\n")
+    a = ReportAssembler(storage_dir=tmp_path)
+    out = a.assemble({"session_id": "t", "_domain": "reclamation",
+                      "chapters": {4: {"markdown": md}},
+                      "filled_data": {"project_name": "X"}})
+    d = docx.Document(str(tmp_path / "generated" / out.split("/")[-1]))
+    for t in d.tables:
+        if "二级地类" in " ".join(c.text for c in t.rows[0].cells):
+            last = [c.text.strip() for c in t.rows[-1].cells]
+            assert last == ["合计", "—", "5.4000", "100.00"], last
+            break
+
+
+def test_non_jian_table_ref_uses_sentence_topic():
+    """「依据表4-9 的分级标准」——分级标准是表4-6 指标体系，不能留在 4-9。"""
+    from docx import Document
+    from app.services.report_assembler import ReportAssembler
+    doc = Document()
+    for t in ("4 土地复垦方向可行性分析",
+              "表4-6 土地适宜性评价指标体系",
+              "表4-7 土地适宜性分值",
+              "依据表4-9 的分级标准，结合各评价单元复垦后的实际条件逐项赋分，见表4-7。"):
+        doc.add_paragraph(t)
+    a = ReportAssembler()
+    a._domain = "reclamation"
+    a._normalize_caption_order(doc)
+    texts = [p.text for p in doc.paragraphs]
+    assert any("依据表4-1 的分级标准" in t for t in texts)
+
+
+def test_missing_area_table_filled_at_assembly(tmp_path):
+    """表题下真的没有表（模板/裸表题来源）—— 成稿层兜底补一张。"""
+    import docx
+    from docx.oxml.ns import qn
+    from app.services.report_assembler import ReportAssembler
+    md = ("# 4 土地复垦方向可行性分析\n\n## 4.6 复垦的目标任务\n\n"
+          "具体复垦前复垦后面积见表4-14。\n\n表4-14 面积统计表\n\n后续说明文字。\n")
+    a = ReportAssembler(storage_dir=tmp_path)
+    out = a.assemble({"session_id": "t", "_domain": "reclamation",
+                      "chapters": {4: {"markdown": md}}, "filled_data": _FILLED})
+    d = docx.Document(str(tmp_path / "generated" / out.split("/")[-1]))
+    p = next(p for p in d.paragraphs if "面积统计表" in p.text)
+    nxt = p._element.getnext()
+    while nxt is not None and nxt.tag == qn('w:p') and not "".join(nxt.itertext()).strip():
+        nxt = nxt.getnext()
+    assert nxt is not None and nxt.tag == qn('w:tbl')
+    from docx.table import Table
+    tb = Table(nxt, d)
+    assert "增减" in " ".join(c.text for c in tb.rows[0].cells)
 
 
 def test_repair_keeps_trailing_newline():

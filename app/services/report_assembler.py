@@ -1255,6 +1255,7 @@ class ReportAssembler:
         if self._domain == "reclamation":
             self._normalize_section_numbers(doc)
             self._fix_reclamation_cost_sentences(doc)
+            self._fill_missing_area_table(doc)
         if self._domain == "stability":
             self._fix_stability_area(doc)
             self._fix_stability_score_table(doc)
@@ -1763,6 +1764,7 @@ class ReportAssembler:
         """
         cap = re.compile(r'^((?:表|图)\s*)(\d+)\s*[-—－]\s*(\d+)(.*)$')
         ref = re.compile(r'见\s*(表|图)\s*(\d+)\s*[-—－]\s*(\d+)(?:\s*[-—－]\s*\d+)?')
+        ref_by = re.compile(r'((?:依据|按照|按|根据|如)\s*)(表|图)\s*(\d+)\s*[-—－]\s*(\d+)')
         ref_word = re.compile(r'(如下表所示|详见下表|见下表|如下表|详见下图|见下图)')
         # 句子话题 → 表题关键词：优先落到「讲的是同一件事」的那张表。
         # 只靠「下一张」会把「各评价单元复垦方向见表X」指到后面的表土平衡表上。
@@ -1771,7 +1773,9 @@ class ReportAssembler:
             ("主体项目用地", "主体项目用地"),
             ("土地利用现状", "土地利用现状"), ("土地权属", "权属"), ("权属", "权属"),
             ("复垦方向", "复垦方向"), ("适宜性分值", "适宜性分值"), ("适宜性", "适宜性"),
-            ("土地质量等级", "质量等级"), ("表土资源", "表土"), ("表土", "表土"),
+            ("土地质量等级", "质量等级"), ("分级标准", "指标体系"),
+            ("指标体系", "指标体系"), ("限制因素", "指标体系"),
+            ("表土资源", "表土"), ("表土", "表土"),
             ("水资源", "水资源"), ("结构对比", "结构对比"),
             ("拟损毁", "拟损毁"), ("损毁时序", "损毁时序"), ("损毁", "损毁"),
             ("评价单元", "评价单元"), ("面积统计", "面积统计"),
@@ -1831,7 +1835,8 @@ class ReportAssembler:
         def _norm_title(s: str) -> str:
             return re.sub(r'\s+', '', str(s or ""))
 
-        def _topic_no(idx: int, line: str, kind: str, ch: int, pos: int = 0):
+        def _topic_no(idx: int, line: str, kind: str, ch: int, pos: int = 0,
+                      whole: bool = False):
             """按句子话题找**最近**的同题表。
 
             · 只看「见」所在的这一句（前面那句里的「适宜性」不能拿来定表）；
@@ -1842,14 +1847,15 @@ class ReportAssembler:
             _p = pos or len(line)
             _seg_start = max(line.rfind("。", 0, _p), line.rfind("；", 0, _p),
                              line.rfind("！", 0, _p), line.rfind("？", 0, _p)) + 1
-            seg = line[_seg_start:_p]
+            seg = line if whole else line[_seg_start:_p]
+            _anchor = pos if whole else len(seg)
             best = None
             for kw, capkw in _TOPICS:
                 q = seg.rfind(kw)
                 if q < 0:
                     continue
-                # 词尾越靠近「见」越好；同词尾取更长的词（更具体）
-                score = (abs(len(seg) - (q + len(kw))), -len(kw))
+                # 词尾离引用位置越近越好；同词尾取更长的词（更具体）
+                score = (abs(_anchor - (q + len(kw))), -len(kw))
                 if best is None or score < best[0]:
                     best = (score, capkw)
             if best is None:
@@ -1901,6 +1907,18 @@ class ReportAssembler:
                 return f"见{kind}{ch}-{nxt}"
 
             nt = ref.sub(_rep_ref, t)
+
+            # 「依据表4-9 的分级标准」这类非「见」引用：话题词常在表号**后面**，
+            # 按整句话题找同题表（找不到就原样保留）。
+            def _rep_by(m):
+                if int(m.group(3)) != ch:
+                    return m.group(0)
+                nxt = _topic_no(i, t, m.group(2), ch, m.start(), whole=True)
+                if nxt is None:
+                    return m.group(0)
+                return f"{m.group(1)}{m.group(2)}{ch}-{nxt}"
+
+            nt = ref_by.sub(_rep_by, nt)
 
             # 畸形的三级表号（「表4-34-2」）——模型生造的编号，没有任何表能对上，
             # 整句删掉，别让它出现在成稿里（业主：不要出现对不上的表号）。
@@ -2014,6 +2032,47 @@ class ReportAssembler:
                              f"动态投资 {monitor:.2f} 万元", nt)
             if nt != t:
                 _rewrite(p, nt)
+
+    def _fill_missing_area_table(self, doc):
+        """「表X-X 面积统计表」只有表题、下面没有表 → 按土地分类面积补表。
+
+        批注 2026-11-12「空白」。这张表可能来自模型 markdown、模板或裸表题
+        （装配器事后补名），前面的 markdown 层修补覆盖不全，这里在**成稿层**兜底：
+        只要表题下有数据就跳过；没有就按「复垦前/复垦后/增减」补一张。
+        """
+        if getattr(self, "_domain", None) != "reclamation":
+            return
+        filled = getattr(self, "_filled", None) or {}
+        try:
+            from app.services.reclamation_content_repairs import _land_targets
+            _names, _area, per = _land_targets(filled)
+        except Exception:
+            return
+        if not per:
+            return
+        from docx.oxml.ns import qn as _qn
+        for p in list(doc.paragraphs):
+            t = p.text.strip()
+            if not re.match(r'^表\s*\d+\s*[-—－]\s*\d+\s*面积统计表', t):
+                continue
+            nxt = p._element.getnext()
+            while (nxt is not None and nxt.tag == _qn('w:p')
+                   and not "".join(nxt.itertext()).strip()):
+                nxt = nxt.getnext()
+            if nxt is not None and nxt.tag == _qn('w:tbl'):
+                continue
+            rows = [[name, f"{a:.4f}", f"{a:.4f}", "0.0000"] for name, a in per.items()]
+            tot = sum(per.values())
+            rows.append(["合计", f"{tot:.4f}", f"{tot:.4f}", "0.0000"])
+            self._render_table_from_dict(
+                doc, {"headers": ["地类", "复垦前面积（公顷）",
+                                  "复垦后面积（公顷）", "增减（公顷）"],
+                      "rows": rows}, caption="")
+            _new = doc.tables[-1]._element
+            p._element.addnext(_new)
+            _sp = doc.add_paragraph()
+            _new.addnext(_sp._element)
+            logger.info("[面积统计表] 表题下缺表，已按土地分类面积补一张")
 
     def _fix_stability_area(self, doc):
         """以表6-1 的「合计」行为准，改写正文「总面积/地类构成」句。
@@ -4282,15 +4341,20 @@ class ReportAssembler:
         # ②-1 地类表「合计」行少一格：表头前两列同为「地类名称及编码」（等价于合并），
         #      模型常写成 `| 合计 | 5.4000 | 100 |`（3 格），渲染时「—」补到末尾，
         #      看起来合计面积跑到地类列。按制式补成 `| 合计 | 合计 | 5.4000 | 100 |`。
-        if len(rows) > 1 and len(rows[0]) >= 3 \
-                and rows[0][0].strip() == rows[0][1].strip() and "地类" in rows[0][0]:
+        _h0 = rows[0][0].strip() if rows else ""
+        _h1 = rows[0][1].strip() if rows and len(rows[0]) > 1 else ""
+        _dup_first = bool("地类" in _h0 and _h0 == _h1)          # 地类名称及编码 ×2
+        _two_level = bool(_h0.startswith("地类") and "二级地类" in _h1)  # 一级/二级两列
+        if len(rows) > 1 and len(rows[0]) >= 3 and (_dup_first or _two_level):
             _fixed = [rows[0]]
             for _r in rows[1:]:
                 _tail = [str(c) for c in _r[1:] if str(c).strip() not in _PH]
                 if _r and str(_r[0]).strip() in _TOTALS and _tail \
                         and str(_r[1] if len(_r) > 1 else "").strip() not in _TOTALS:
-                    # 补回第 2 格「合计」；末格空/占位不要（否则又串到下一列）
-                    _r = [str(_r[0]).strip(), str(_r[0]).strip()] + _tail
+                    # 补回被省掉的地类格（合并列写「合计」，一级/二级两列写「—」），
+                    # 末格空/占位不要（否则又串到下一列）
+                    _r = [str(_r[0]).strip(),
+                          str(_r[0]).strip() if _dup_first else "—"] + _tail
                     while len(_r) < len(rows[0]):
                         _r.append("—")
                     _r = _r[:len(rows[0])]

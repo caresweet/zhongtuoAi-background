@@ -204,8 +204,27 @@ def fix_risk_count(chapters: Dict[Any, Dict[str, Any]]) -> int:
             r'共(?:梳理出|识别出|识别|列出|确定|包括|包含)'
             r'[^。]{0,80}?(?:[一二三四五六七八九十]+|\d+)\s*项主要风险因素',
             f"共识别{count}项主要风险因素", out)
-        if k1 or k2 or k3 or k4:
-            n += k1 + k2 + k3 + k4
+        # 中文数字的说法（「六项风险」「四项主要风险因素」）——业主 2026-11-12：
+        # 上文 5 个风险点、下文不能变成六项。
+        _CN = '一二三四五六七八九十'
+        out, k5 = re.subn(
+            rf'共\s*(?:识别|梳理出|识别出|列出|确定|包括|包含)?\s*[{_CN}]+\s*'
+            rf'(项风险|项主要风险因素|个方面主要风险因素)',
+            lambda m: f"共{count}{m.group(1)}", out)
+        out, k6 = re.subn(
+            rf'(第11章(?:识别的|所列的)?)\s*[{_CN}]+\s*项风险',
+            rf'\g<1>{count}项风险', out)
+        out, k7 = re.subn(
+            rf'(?<![0-9{_CN}])[{_CN}]+\s*项风险(?=一一对应|对应)',
+            f"{count}项风险", out)
+        # 「初始评估中各项风险程度均为较小」——第11章实际是 4 项一般 + 1 项较小，
+        # 第12章概述不能一律写成「均为较小」（2026-11-12 实测）。
+        k8 = 0
+        if _lv_pairs:
+            _dp = "、".join(f"{v}项为{k}风险" for k, v in _lv_pairs)
+            out, k8 = re.subn(r'各项风险程度均为[^，。；\n]{2,6}', _dp, out)
+        if k1 or k2 or k3 or k4 or k5 or k6 or k7 or k8:
+            n += k1 + k2 + k3 + k4 + k5 + k6 + k7 + k8
             ch["markdown"] = out
     return n
 

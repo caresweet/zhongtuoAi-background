@@ -574,8 +574,18 @@ def fill_participant_signatures(chapters: Dict[Any, Dict[str, Any]],
     names = [str(x).strip() for x in (state.get("selected_personnel")
              or f.get("_selected_personnel") or []) if str(x).strip()]
     leader = str(f.get("leader") or "").strip()
-    if leader and leader not in names:
-        names = [leader] + names
+    if names:
+        if leader and leader not in names:
+            names = [leader] + names
+    else:
+        # 没勾选人员时用**签名库**里有人签字的那几位（与签字图一一对应）
+        try:
+            from app.services.personnel_signature import load_index
+            names = list(load_index().keys())
+        except Exception:
+            names = []
+        if not names and leader:
+            names = [leader]
     lines = md.split("\n")
     start = next((i for i, ln in enumerate(lines)
                   if ln.strip().lstrip("#").strip().startswith("（五）参与人员签字")), None)

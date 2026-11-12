@@ -1224,6 +1224,11 @@ class ReportAssembler:
         # ── Post-generation review: fix common issues ──
         self._pre_assembly_review(doc, filled)
         self._post_generation_fix(doc, filled)
+        # 参与人员签字：用签名库里的手写签名图（没有图的留空手签）
+        try:
+            self._fill_signature_images(doc, filled)
+        except Exception as _sge:
+            logger.warning(f"[签名] 签字区渲染失败（保留文字）：{_sge}")
         self._drop_duplicate_sections(doc)
         self._dedup_headings(doc)
         self._drop_duplicate_system_tables(doc)
@@ -2254,6 +2259,83 @@ class ReportAssembler:
             f"Pre-assembly review complete: {len(doc.paragraphs)} paras, "
             f"{len(doc.tables)} tables"
         )
+
+    def _fill_signature_images(self, doc, filled=None):
+        """第4章「参与人员签字」：在标签下插入签名库的手写签名图。"""
+        from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+        from docx.shared import Cm as _Cm, Pt as _Pt
+        from app.services.personnel_signature import load_index, signature_for
+
+        filled = filled or {}
+        names = list(getattr(self, "_selected_personnel", None)
+                     or filled.get("_selected_personnel") or [])
+        if not names:
+            names = list(load_index().keys())
+        if not names:
+            return
+        target = None
+        for p in doc.paragraphs:
+            if p.text.strip().startswith("参与人员签字"):
+                target = p
+                break
+        if target is None:
+            return
+        # 标签里的下划线去掉，改由签名图/空格位承担
+        for r in target.runs:
+            r.text = r.text.replace("_", "").replace("　", " ")
+        # 每行最多 6 人
+        rows = [names[i:i + 4] for i in range(0, len(names), 4)]
+        anchor = target._p
+        for chunk in rows:
+            t = doc.add_table(rows=2, cols=len(chunk))
+            t.alignment = WD_TABLE_ALIGNMENT.CENTER
+            t.autofit = True
+            try:
+                from docx.oxml.ns import qn as _qn0
+                t._tbl.tblPr.set(_qn0("w:tblCaption"), "_signature")
+            except Exception:
+                pass
+            # 🔴 签名区不能画表格线：去掉全部边框与单元格边距，看起来就是手写签名
+            try:
+                from docx.oxml import OxmlElement as _OE
+                from docx.oxml.ns import qn as _qn
+                _tblPr = t._tbl.tblPr
+                _bd = _OE("w:tblBorders")
+                for _edge in ("top", "left", "bottom", "right",
+                              "insideH", "insideV"):
+                    _e = _OE("w:" + _edge)
+                    _e.set(_qn("w:val"), "none")
+                    _bd.append(_e)
+                _tblPr.append(_bd)
+                _mar = _OE("w:tblCellMar")
+                for _side in ("top", "left", "bottom", "right"):
+                    _m = _OE("w:" + _side)
+                    _m.set(_qn("w:w"), "0"); _m.set(_qn("w:type"), "dxa")
+                    _mar.append(_m)
+                _tblPr.append(_mar)
+            except Exception:
+                pass
+            for ci, nm in enumerate(chunk):
+                c0 = t.cell(0, ci); c1 = t.cell(1, ci)
+                for c in (c0, c1):
+                    c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                p0 = c0.paragraphs[0]; p0.alignment = 1
+                r0 = p0.add_run(str(nm))
+                r0.font.name = FONT_SONGTI
+                r0._element.rPr.rFonts.set(qn("w:eastAsia"), FONT_SONGTI)
+                r0.font.size = _Pt(10.5)
+                p1 = c1.paragraphs[0]; p1.alignment = 1
+                sig = signature_for(str(nm))
+                if sig:
+                    try:
+                        p1.add_run().add_picture(sig, height=_Cm(1.0))
+                    except Exception as _e:
+                        logger.warning(f"[签名] {nm} 插入失败: {_e}")
+            anchor.addnext(t._tbl)
+            anchor = t._tbl
+        # 表格后补一个空段，避免与下一节文字贴在一起
+        from docx.oxml import OxmlElement as _OE
+        anchor.addnext(_OE("w:p"))
 
     def _post_generation_fix(self, doc, filled=None):
         """Post-generation: fix formatting, fonts, spacing, and AI artifacts."""
@@ -7360,6 +7442,9 @@ class ReportAssembler:
         for t in doc.tables:
             tblPr = t._tbl.tblPr
             if tblPr is None:
+                continue
+            # 🔴 参与人员签名表**不画边框**（它不是表格，是签名位）
+            if tblPr.get(qn('w:tblCaption')) == "_signature":
                 continue
             for old in tblPr.findall(qn('w:tblBorders')):
                 tblPr.remove(old)

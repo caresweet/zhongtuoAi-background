@@ -102,10 +102,47 @@ def signature_or_placeholder(name: str) -> Optional[str]:
 
 
 def signature_for(name: str) -> Optional[str]:
-    """取某人的签名图路径；没有则返回 None（留空供手签）。"""
+    """取某人的签名图路径；没有则返回 None（留空供手签）。
+
+    查找顺序：本地签名库（模板抽取）→ 数据库 `asset_images`（业主上传的
+    「XX签名」图片，base64 存库）→ 无。
+    """
+    global _cache
     nm = str(name or "").strip()
     if not nm:
         return None
     e = load_index().get(nm) or {}
     p = str(e.get("path") or "")
-    return p if p and Path(p).exists() else None
+    if p and Path(p).exists():
+        return p
+    # ── 数据库兜底：asset_images 里名字带「签名」的图 ──
+    try:
+        import base64
+        import sqlite3
+        from app.config import settings
+        db = settings.DATA_DIR / "knowledge_base.db"
+        if db.exists():
+            con = sqlite3.connect(str(db))
+            row = con.execute(
+                "select image_name, image_data, mime_type from asset_images "
+                "where is_active=1 and (image_name like ? or image_name like ? "
+                "or category like '%签名%') order by id limit 1",
+                (f"%{nm}%签名%", f"%签名%{nm}%")).fetchone()
+            if not row:
+                row = con.execute(
+                    "select image_name, image_data, mime_type from asset_images "
+                    "where is_active=1 and image_name like ? "
+                    "and (image_name like '%签名%' or image_name like '%签字%') "
+                    "order by id limit 1", (f"%{nm}%",)).fetchone()
+            con.close()
+            if row and row[1]:
+                ext = ".png" if "png" in str(row[2] or "").lower() else ".jpg"
+                fp = _SIG_DIR / f"{nm}_db{ext}"
+                fp.write_bytes(base64.b64decode(row[1]))
+                idx = load_index()
+                idx[nm] = {"path": str(fp), "source": "asset_images", "image_name": row[0]}
+                _cache = idx
+                return str(fp)
+    except Exception as e2:
+        logger.warning(f"[签名库] 数据库签名读取失败 {nm}: {e2}")
+    return None

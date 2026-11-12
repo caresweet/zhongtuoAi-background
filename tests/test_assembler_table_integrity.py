@@ -532,3 +532,23 @@ def test_missing_image_leaves_no_body_placeholder():
     a._add_image(d, "/tmp/__no_such_image__.jpg", "现场照片")
     assert all("图片待插入" not in p.text for p in d.paragraphs)
     assert a._missing_images
+
+
+def test_signature_section_uses_signature_images():
+    """参与人员签字用签名库里的手写签名图（无边框表格）。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from app.services.report_assembler import ReportAssembler
+    from app.services.personnel_signature import signature_for
+
+    assert signature_for("陈春")
+    d = Document()
+    d.add_paragraph("（五）参与人员签字")
+    d.add_paragraph("参与人员签字：____________________")
+    a = ReportAssembler()
+    a._selected_personnel = ["陈春"]
+    a._fill_signature_images(d, {"_selected_personnel": ["陈春"]})
+    assert d.tables
+    t = d.tables[0]
+    assert t._tbl.tblPr.get(qn("w:tblCaption")) == "_signature"
+    assert t._tbl.findall(".//" + qn("wp:inline"))

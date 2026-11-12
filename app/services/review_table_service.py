@@ -575,7 +575,10 @@ def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict
         # 实施单位的联系人/联系方式同样**问用户**；材料里没有 → 留占位
         "impl_contact": resolve(filled_data, "impl_contact"),
         "impl_phone": resolve(filled_data, "impl_phone"),
-        "fill_date": _g("fill_date", "review_date", default=datetime.now().strftime("%Y年%m月%d日")),
+        # 🔴 评审表是**评审后**填的：优先 review_end_date，其次 review_date。
+        #    只取 review_date（评审开始）会让填表日期早于评审结束，专家批注过。
+        "fill_date": _g("fill_date", "review_end_date", "review_date",
+                        default=datetime.now().strftime("%Y年%m月%d日")),
         "overview": overview,
         "legal_basis": legal_basis,
         "stakeholders": stakeholders,

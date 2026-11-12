@@ -461,3 +461,20 @@ def test_long_text_cells_stay_left_aligned():
     assert tb.cell(1, 1).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.LEFT
     # 垂直仍居中
     assert tb.cell(1, 1).vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+
+def test_review_risk_factors_exclude_method_sections():
+    """第11章用「结构小节 + 节内编号风险」写法时，评审表不能把结构小节当风险。"""
+    from app.services.review_table_service import _build_review_data
+
+    md = ("## 11 分析预测风险源\n\n### （一）决策风险因素分析预测\n\n"
+          "**1.土地征收补偿方案方面的风险**\n正文甲。风险程度为一般。\n\n"
+          "**2.征收决策实施方面的风险**\n正文乙。风险程度为一般。\n\n"
+          "**3.征地社保名额确定方面的风险**\n正文丙。风险程度为较小。\n\n"
+          "### （二）风险估计方法\n方法说明。\n\n"
+          "### （三）主要风险因素初始风险等级\n汇总说明。\n")
+    d = _build_review_data({}, {11: {"markdown": md}}, {})
+    lines = d["risk_factors"].splitlines()
+    assert len(lines) == 3
+    assert lines[0].endswith("土地征收补偿方案方面的风险")
+    assert not any("风险估计方法" in x or "初始风险等级" in x for x in lines)

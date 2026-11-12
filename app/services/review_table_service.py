@@ -207,10 +207,37 @@ def _subsections(md: str):
     return items
 
 
-def _numbered_subheads(md: str, limit: int = 12) -> str:
-    """小节标题 → `1.xxx` 清单（「主要风险因素」栏用）。"""
-    items = _subsections(md)
-    return "\n".join(f"{i}.{t}" for i, (t, _) in enumerate(items[:limit], 1))
+# 第11章里**不是风险因素**的结构小节（评审表「主要风险因素」栏必须剔除）
+_RISK_NON_ITEMS = ("风险估计方法", "风险分析方法", "主要风险因素初始风险等级",
+                   "决策风险因素分析预测", "风险因素分析预测")
+
+
+def _risk_factor_lines(md: str, limit: int = 12) -> str:
+    """「主要风险因素」栏 = **只列风险条目**，不列方法/等级表等结构小节。
+
+    第11章有两种写法：
+      ① 风险写成小节 `### （一）××方面的风险`（新旧提示词都可能）；
+      ② 结构小节 `### （一）决策风险因素分析预测`，节内 `**1.××风险**`。
+    旧实现把（一）（二）（三）三个结构小节当风险，评审表于是印出
+    「决策风险因素分析预测 / 风险估计方法 / 主要风险因素初始风险等级」
+    （专家批注「具体风险」，2026-11-11）。这里两种写法都按风险条目取。
+    """
+    names = [t for t, _ in _subsections(md)
+             if t.strip().endswith("风险")
+             and not any(k in t for k in _RISK_NON_ITEMS)]
+    if not names:
+        try:
+            from app.validation.content_guardrails import _ch11_items
+            names = [n for n, _lv in _ch11_items(md)]
+        except Exception:
+            names = []
+    # 去重保序
+    seen, out = set(), []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return "\n".join(f"{i}.{t}" for i, t in enumerate(out[:limit], 1))
 
 
 def _measure_items(md: str, limit: int = 8, para_chars: int = 160) -> str:
@@ -473,7 +500,7 @@ def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict
                    or _section_text(_ch9, '单位', '部门', limit=300)) or "【待填写】"
     # 🔴 参照件里「主要风险因素」是 **1./2./3. 的风险名称清单**（不是整段描述），
     #    「降低风险措施」是 **1.措施名 + 具体做法**。按小节标题结构化取，别再整段摘录。
-    risk_factors = (_numbered_subheads(_ch11)
+    risk_factors = (_risk_factor_lines(_ch11)
                     or _section_text(_ch11, '风险', limit=300, body_fallback=True)
                     or "【待填写：可从报告第11章「分析预测风险源」摘录】")
     risk_measures = (_measure_items(_ch13)

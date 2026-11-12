@@ -355,6 +355,22 @@ def test_malformed_three_level_table_ref_is_dropped():
     assert not any("表4-24-2" in t for t in texts)
 
 
+def test_stability_cross_chapter_table_ref_uses_old_to_new_mapping():
+    """稳评共用同一套编号逻辑：第五章「见表6-3」要跟第六章重排后的 6-2 对上。"""
+    from docx import Document
+    from app.services.report_assembler import ReportAssembler
+    doc = Document()
+    for t in ("第五章 风险分析", "本项目主要风险因素详见表6-3。",
+              "第六章 项目概况", "表6-1 项目基本情况表", "表6-3 土地利用现状表"):
+        doc.add_paragraph(t)
+    a = ReportAssembler()
+    a._domain = "stability"
+    a._normalize_caption_order(doc)
+    texts = [p.text for p in doc.paragraphs]
+    assert "本项目主要风险因素详见表6-2。" in texts
+    assert "表6-2 土地利用现状表" in texts
+
+
 def test_repair_keeps_trailing_newline():
     """装配器靠行尾空行触发表题 flush —— 修补不能把末尾换行吃掉。"""
     md = "## 6.2 工程量测算\n\n各项工程量见表6-1。\n\n" \

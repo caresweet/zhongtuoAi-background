@@ -1880,15 +1880,20 @@ class ReportAssembler:
 
             def _rep_ref(m):
                 kind = m.group(1)
-                # 跨章引用（第5章「见表6-1」）不在本次重排范围内 —— 各章各自编号，
-                # 按「下一张表」改会把别的章号改坏。
-                if int(m.group(2)) != ch:
+                _ref_ch = int(m.group(2))
+                # 跨章引用（第5章「见表6-1」）：不能按「本章下一张表」改，
+                # 只按第6章表号的**旧→新映射**改；映射不唯一就原样保留。
+                # （稳评大量跨章引表，这条不能省。）
+                if _ref_ch != ch:
+                    _cand = old_map.get((kind, _ref_ch, int(m.group(3)))) or ()
+                    if len(_cand) == 1:
+                        return f"见{kind}{_ref_ch}-{_cand[0]}"
                     return m.group(0)
                 nxt = _topic_no(i, t, kind, ch, m.start())
                 if nxt is None:
                     nxt = _next_no(i, kind, ch)
                 if nxt is None:
-                    _cand = old_map.get((kind, ch, int(m.group(3))) or ())
+                    _cand = old_map.get((kind, ch, int(m.group(3)))) or ()
                     if len(_cand) == 1:
                         nxt = _cand[0]
                     else:

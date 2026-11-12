@@ -337,3 +337,19 @@ def test_drop_missing_sys_table_refs():
     assert "[SYS_TABLE" not in out and "如下表所示" not in out
     assert not out.strip().startswith("从上表可见")
     assert "以勘测定界成果为准" in out
+
+
+def test_fill_participant_signatures():
+    """第4章「参与人员签字」不能只有三个空标签。"""
+    from app.services.report_content_repairs import fill_participant_signatures
+
+    md = ("## 第4章\n\n### （五）参与人员签字\n\n评估专业人员：\n\n评估助理：\n\n"
+          "资料员：\n\n## 第5章\n")
+    chapters = {4: {"markdown": md}}
+    st = {"filled_data": {"leader": "王海涛"},
+          "selected_personnel": ["徐作诚", "郝怡佳"]}
+    assert fill_participant_signatures(chapters, st) == 1
+    out = chapters[4]["markdown"]
+    assert "王海涛" in out and "徐作诚" in out
+    assert "____" in out
+    assert "第5章" in out

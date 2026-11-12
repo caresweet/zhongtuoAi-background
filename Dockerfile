@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# 网络舆情：无头 Chromium 打开必应检索页截图（无账号方案）
+RUN playwright install --with-deps chromium
 
 COPY . .
 

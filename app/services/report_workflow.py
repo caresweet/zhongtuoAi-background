@@ -1078,12 +1078,18 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
                         filled["online_opinion"] = _wr.get("summary") or ""
                     # 生成「网络舆情检索记录」图（无需浏览器），随图片目录进第9章
                     try:
-                        from app.services.web_opinion import render_opinion_record
+                        from app.services.web_opinion import (
+                            render_opinion_record, capture_search_screenshot)
                         from app.config import settings as _st
                         import hashlib as _hl
                         _h = _hl.md5((_wr.get("query") or "").encode("utf-8")).hexdigest()[:8]
-                        _img = _st.STORAGE_DIR / "images" / f"网络舆情检索记录_{_h}.png"
-                        if render_opinion_record(_wr, str(_img)):
+                        _img = _st.STORAGE_DIR / "images" / f"网络舆情搜索截图_{_h}.png"
+                        _ok = await capture_search_screenshot(
+                            _wr.get("query") or "", str(_img))
+                        if not _ok:
+                            _img = _st.STORAGE_DIR / "images" / f"网络舆情检索记录_{_h}.png"
+                            _ok = render_opinion_record(_wr, str(_img))
+                        if _ok:
                             state.setdefault("_uploaded_files", []).append(
                                 {"path": str(_img),
                                  "original_name": "网络舆情检索记录.png"})

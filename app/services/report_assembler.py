@@ -5745,6 +5745,13 @@ class ReportAssembler:
                     target_h = _cap_h
                     target_w = target_h * aspect
 
+            # 🔴 图片与图注必须同页：图片顶到页底时，图注会被挤到下一页，
+            #    读者看到「上一页一张图、下一页一行图名」（2026-11-12 实测）。
+            try:
+                p_img.paragraph_format.keep_with_next = True
+                p_img.paragraph_format.keep_together = True
+            except Exception:
+                pass
             run_img = p_img.add_run()
             run_img.add_picture(use_path, width=target_w, height=target_h)
             try:
@@ -7243,6 +7250,12 @@ class ReportAssembler:
             _merged = _labels[0] if _labels and len(set(_labels)) == 1 and _labels[0] else ""
             _imgp = doc.add_paragraph()
             _imgp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # 🔴 图片与图注不能分页（图上、图名在下一页）
+            try:
+                _imgp.paragraph_format.keep_with_next = True
+                _imgp.paragraph_format.keep_together = True
+            except Exception:
+                pass
             _capp = doc.add_paragraph()
             _capp.alignment = WD_ALIGN_PARAGRAPH.CENTER
             if len(row) > 1 and not _merged:

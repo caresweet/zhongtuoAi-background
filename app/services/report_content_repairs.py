@@ -552,6 +552,56 @@ def drop_missing_sys_table_refs(chapters: Dict[Any, Dict[str, Any]],
         ch6["markdown"] = "\n".join(out)
     return changed
 
+
+# ── ⑩ 第4章「（五）参与人员签字」不能只有三个空标签 ──────────
+def fill_participant_signatures(chapters: Dict[Any, Dict[str, Any]],
+                                state: Optional[Dict[str, Any]] = None) -> int:
+    """把评估人员姓名与手写签字线补进第4章「参与人员签字」。
+
+    专家批注 2026-11-12：该节只有「评估专业人员/评估助理/资料员」三个标签，
+    没有姓名也没有签字线。姓名取用户勾选的报告人员（或事实卡组长），
+    其余角色留手写空位。
+    """
+    if not isinstance(state, dict):
+        return 0
+    ch4 = chapters.get(4) or chapters.get("4")
+    if not isinstance(ch4, dict):
+        return 0
+    md = str(ch4.get("markdown") or "")
+    if "参与人员签字" not in md:
+        return 0
+    f = state.get("filled_data") or {}
+    names = [str(x).strip() for x in (state.get("selected_personnel")
+             or f.get("_selected_personnel") or []) if str(x).strip()]
+    leader = str(f.get("leader") or "").strip()
+    if leader and leader not in names:
+        names = [leader] + names
+    lines = md.split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip().lstrip("#").strip().startswith("（五）参与人员签字")), None)
+    if start is None:
+        return 0
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].strip().startswith("#")), len(lines))
+    body = "\n".join(lines[start + 1:end])
+    if "____" in body or any(n in body for n in names):
+        return 0
+    new_body = [
+        "",
+        "评估专业人员：" + ("、".join(names) if names
+                          else "____________________"),
+        "",
+        "评估助理：____________________",
+        "",
+        "资料员：____________________",
+        "",
+        # 🔴 不能单独一行全是下划线：Markdown 会把它当分隔线（---/___）整行吃掉
+        "参与人员签字：____________________　　____________________　　____________________",
+        "",
+    ]
+    ch4["markdown"] = "\n".join(lines[:start + 1] + new_body + lines[end:])
+    return 1
+
 # ── 入口 ────────────────────────────────────────────────────
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                               state: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -602,4 +652,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
     n_t6 = drop_missing_sys_table_refs(chapters, state)
     if n_t6:
         logs.append(f"第6章删除缺失地类表的引用 {n_t6} 处")
+    n_sig = fill_participant_signatures(chapters, state)
+    if n_sig:
+        logs.append("第4章参与人员签字已补姓名与签字线")
     return logs

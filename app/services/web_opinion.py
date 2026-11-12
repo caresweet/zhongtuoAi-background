@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 def _query(project_name: str, location: str, doc_reference: str = "") -> str:
     parts = [str(x or "").strip() for x in (project_name, location, doc_reference)]
-    base = " ".join(p for p in parts if p)[:120]
-    return f"{base} 舆情 投诉 负面 征地"
+    # 🔴 关键词必须保留：先截项目名，再接检索词（否则长项目名把「舆情」挤掉，
+    #    搜出来全是地区百科，截图看不出是在查舆情）。
+    base = " ".join(p for p in parts if p)[:80]
+    return f"{base} 舆情 投诉 上访 负面 征地"
 
 
 async def search_opinion(project_name: str = "", location: str = "",
@@ -130,6 +132,40 @@ async def _bing_free(query: str):
             items.append({"title": title, "link": link, "snippet": snippet})
     return items
 
+
+
+async def capture_search_screenshot(query: str, out_path: str) -> str:
+    """用无头 Chromium 打开必应检索页并截图（真正的「网站搜索截图」）。
+
+    服务器未安装 Playwright/Chromium 时返回空串，调用方回退到系统生成的
+    检索记录图。安装：
+        pip install playwright && playwright install chromium
+    """
+    if (os.getenv("WEB_OPINION_SCREENSHOT") or "1").strip() in ("0", "false", "no"):
+        return ""
+    try:
+        from playwright.async_api import async_playwright
+    except Exception:
+        logger.info("[舆情] Playwright 未安装，跳过网页截图")
+        return ""
+    from urllib.parse import quote
+    url = f"https://cn.bing.com/search?q={quote(query)}&count=10&setlang=zh-CN"
+    try:
+        from pathlib import Path as _Path
+        _Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            page = await browser.new_page(
+                viewport={"width": 1400, "height": 1100}, locale="zh-CN")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2500)
+            await page.screenshot(path=out_path, full_page=False)
+            await browser.close()
+        return out_path
+    except Exception as e:
+        logger.warning(f"[舆情] 网页截图失败（回退记录图）: {e}")
+        return ""
 
 def render_opinion_record(result: Dict[str, Any], out_path: str) -> str:
     """把检索结果画成一张「网络舆情检索记录」PNG（无需浏览器/截图服务）。

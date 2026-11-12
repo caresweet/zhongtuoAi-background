@@ -2562,9 +2562,14 @@ class ReportAssembler:
             _filler_parts.append(re.escape(kw) + r'[^。\n]{0,80}[。]?')
         filler_pattern = re.compile('|'.join(_filler_parts))
 
+        # 🔴 只删「纯套话」：「依据有关法律法规」后面如果接了**实际动作/成果**
+        #    （制定本预案 / 开展评估 / 建立台账 / 编制方案…），那是正文，不能删。
+        #    实测 2026-11-12：这条正则把第5章「依据有关法律法规，制定本预案。」
+        #    整句吃掉，1.编制目的 只剩前半句、内容像丢了一样。
         ai_boilerplate_pattern = re.compile(
             r'(?:严格按照|根据|依据|按照)\s*(?:相关|有关)'
             r'(?:法律法规|规定|政策|文件|程序|流程|步骤|要求|标准|规范)'
+            r'(?![^。\n]{0,80}(?:制定|编制|开展|建立|实施|签订|办理|执行|落实))'
             r'[^。\n]{0,80}[。]?'
         )
         report_boilerplate = re.compile(
@@ -6795,6 +6800,11 @@ class ReportAssembler:
                 continue
             content.remove(_p)
         for _p in field_ps:
+            # 🔴 标题段在模板里可能也带域管道（fldChar），会被当成 field_para；
+            #    对它清 run 会把「目  录」两个字一起删掉（业主 2026-11-12：
+            #    「目录标题俩个字没了」）。标题只保留原样，不清 run。
+            if _p is title_p:
+                continue
             self._toc_strip_entry_runs(_p, _q)
         end_p = next((p for p in field_ps if self._toc_has_fld_end(p, _q)), None)
         if end_p is not None:

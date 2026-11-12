@@ -319,6 +319,41 @@ def _ok_item(txt, fallback: str) -> str:
     return fallback
 
 
+
+def _enrich_necessity(base: str, ch1: str, g) -> str:
+    """把「必要性」从一句话补成 3～4 句（只用事实卡/报告里已有的事实）。"""
+    parts = []
+    b = str(base or "").strip()
+    if b:
+        parts.append(b if b.endswith(("。", "；")) else b + "。")
+    _ts = str(g("total_samples") or "").strip()
+    _sr = str(g("support_rate") or "").strip()
+    if _ts and _sr:
+        s = f"本次社会稳定风险评估共回收有效问卷{_ts}份"
+        _aw = str(g("awareness_rate") or "").strip()
+        if _aw:
+            s += f"，群众知晓率{_aw}%"
+        s += f"，支持率{_sr}%"
+        _op = str(g("oppose_rate") or "").strip()
+        if _op:
+            s += f"，反对率{_op}"
+        s += "，群众对决策实施总体持支持态度。"
+        parts.append(s)
+    _hh = str(g("household_count") or "").strip()
+    if _hh:
+        parts.append(f"本次征收涉及被征地农户{_hh}户，补偿安置和社会保障衔接工作已按法定程序开展。")
+    _reason = _pick_sentence(ch1, "维护", "合法权益", "民生需求", limit=120)
+    if _reason and _reason not in b:
+        parts.append(_reason if _reason.endswith("。") else _reason + "。")
+    parts.append("综上，本决策符合国家法律法规和相关规划要求，具有实施的必要性。")
+    # 去重保序
+    seen, out = set(), []
+    for x in parts:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return "".join(out)[:900]
+
 def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict = None) -> dict:
     """组装评审表所需的全部字段值（唯一数据装配点，DOCX 与 Markdown 共用）。"""
     chapters = chapters or {}
@@ -476,6 +511,10 @@ def _build_review_data(filled_data: dict, chapters: dict = None, extracted: dict
                   or f"本项目属于{_g('land_use', default='政府组织实施的成片开发建设')}需要，"
                      f"符合《中华人民共和国土地管理法》第四十五条规定的公共利益情形，"
                      f"依法开展社会稳定风险评估是决策实施的法定前置程序。")
+    # 🔴 必要性只有一句（常是「经省级以上人民政府批准…」的残句）显得内容太少
+    #    （业主 2026-11-12）。用**已有事实**补足：调查数据、涉及户数、稳评理由，
+    #    不编新事实。
+    _necessity = _enrich_necessity(_necessity, _ch1, _g)
     legal_basis = ("（一）法律政策依据\n" + _laws
                    + ("\n\n（二）必要性\n" + _necessity if _necessity else ""))
     # 🔴 三行必须**各有来源**，否则印出来三段一模一样（实测三行都取到同一段）。

@@ -95,9 +95,22 @@ def _strip_fill_marks(rpr):
             rpr.remove(_e)
     return rpr
 
-def _set_cell(cell, text: str) -> None:
-    """把单元格内容换成 `text`（支持换行），字体字号沿用它原有的格式。"""
+def _set_cell(cell, text: str, *, bold: bool = False) -> None:
+    """把单元格内容换成 `text`（支持换行），字体字号沿用它原有的格式。
+
+    🔴 模板里内容单元格的第一个 run 往往是加粗的小标题，照抄 rPr 会让
+       **整格正文都变粗**（业主 2026-11-12：「法规内容/降低风险措施字体还是
+       加粗了」）。这里复制 rPr 时去掉 w:b/w:bCs，只有标签列（bold=True）再加粗。
+    """
     rpr = _strip_fill_marks(_first_rpr(cell))
+    if rpr is not None:
+        rpr = deepcopy(rpr)
+        for _tag in ('w:b', 'w:bCs'):
+            for _e in rpr.findall(qn(_tag)):
+                rpr.remove(_e)
+        if bold:
+            from docx.oxml import OxmlElement as _OE
+            rpr.append(_OE('w:b'))
     paras = cell.paragraphs
     if not paras:
         return
@@ -354,7 +367,7 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
         v = val
         if isinstance(v, (list, tuple)):
             v = "\n".join(str(x) for x in v)
-        _set_cell(cell, str(v or ""))
+        _set_cell(cell, str(v or ""), bold=(c == 0))
 
     for r, (c, key) in _ROW_MAP.items():
         if r < len(tbl.rows):

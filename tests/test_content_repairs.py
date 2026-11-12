@@ -323,3 +323,17 @@ def test_drop_missing_survey_refs(monkeypatch):
     assert "全部为本地居民" not in out
     assert "[TABLE:" not in out
     assert "正文保留" in out
+
+
+def test_drop_missing_sys_table_refs():
+    """没有勘测定界地类数据时，第6章不能引用不存在的表6-1。"""
+    from app.services.report_content_repairs import drop_missing_sys_table_refs
+
+    md = ("根据勘测定界成果，总面积112333平方米。项目用地基本情况如下表所示。\n\n"
+          "[SYS_TABLE:6-1]\n\n从上表可见，地块权属清晰。\n")
+    chapters = {6: {"markdown": md}}
+    assert drop_missing_sys_table_refs(chapters, {"filled_data": {}}) == 3
+    out = chapters[6]["markdown"]
+    assert "[SYS_TABLE" not in out and "如下表所示" not in out
+    assert not out.strip().startswith("从上表可见")
+    assert "以勘测定界成果为准" in out

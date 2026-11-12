@@ -177,6 +177,27 @@ async def main():
         return
     only = [int(x) for x in args.chapters.split(",") if x.strip()] if args.chapters else None
 
+    # 🔴 缺硬性资料先给提示（业主 2026-11-12）：界面生成会逐章弹窗，
+    #    脚本不弹窗，但必须把「缺什么」明确打出来，不能悄悄编。
+    try:
+        from app.services.report_workflow import (
+            CHAPTER_REQUIRED_FIELDS, review_table_fields_for)
+        _filled0 = state.get("filled_data") or {}
+        _miss = []
+        for _ch, _fields in CHAPTER_REQUIRED_FIELDS.items():
+            for _f in _fields:
+                if not str(_filled0.get(_f[0]) or "").strip():
+                    _miss.append(f"第{_ch}章 {_f[1]}({_f[0]})")
+        for _f in review_table_fields_for("stability"):
+            if not str(_filled0.get(_f[0]) or "").strip():
+                _miss.append(f"评审表 {_f[1]}({_f[0]})")
+        if _miss:
+            print("⚠️ 缺少硬性资料 %d 项（界面生成会弹窗询问；脚本将按规范话术生成）：" % len(_miss))
+            for _m in _miss[:20]:
+                print("   ·", _m)
+    except Exception as _me:
+        print("⚠️ 缺资料预检跳过:", _me)
+
     # 🔴 用户勾选的报告人员 → 前置「稳评工作组人员及分工」+ 培训证书取图
     if args.personnel.strip():
         _sel = [x.strip() for x in args.personnel.split(",") if x.strip()]

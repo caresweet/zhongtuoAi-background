@@ -513,6 +513,45 @@ def drop_missing_survey_refs(chapters: Dict[Any, Dict[str, Any]],
     return changed
 
 
+
+# ── ⑨ 表6-1 渲染不出来时，正文不能引用 ──────────────────────
+def drop_missing_sys_table_refs(chapters: Dict[Any, Dict[str, Any]],
+                                state: Optional[Dict[str, Any]] = None) -> int:
+    """没有勘测定界/地类数据时，第6章删掉 [SYS_TABLE:6-1] 与「如下表所示」。
+
+    业主 2026-11-12：「可选资料没有就不要写在正文里」。地类表渲染不出来时，
+    正文却写「项目用地基本情况如下表所示」「从上表可见」，读者会找不到表。
+    """
+    if not isinstance(state, dict):
+        return 0
+    ch6 = chapters.get(6) or chapters.get("6")
+    if not isinstance(ch6, dict):
+        return 0
+    md = str(ch6.get("markdown") or "")
+    if "[SYS_TABLE:6-1]" not in md:
+        return 0
+    f = state.get("filled_data") or {}
+    if (f.get("_extracted_tables") or f.get("land_classification")
+            or f.get("_land_by_category")):
+        return 0
+    out, changed = [], 0
+    for line in md.split("\n"):
+        s = line.strip()
+        if s == "[SYS_TABLE:6-1]":
+            changed += 1
+            continue
+        if "如下表所示" in s:
+            line = (line.replace("项目用地基本情况如下表所示。", "项目用地情况以勘测定界成果为准。")
+                        .replace("如下表所示。", "以勘测定界成果为准。"))
+            changed += 1
+        if s.startswith("从上表可见"):
+            line = re.sub(r'^(\s*)从上表可见[，,]?', r'\1', line)
+            changed += 1
+        out.append(line)
+    if changed:
+        ch6["markdown"] = "\n".join(out)
+    return changed
+
 # ── 入口 ────────────────────────────────────────────────────
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                               state: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -560,4 +599,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
     n_sv = drop_missing_survey_refs(chapters, state)
     if n_sv:
         logs.append(f"第9章删除缺失问卷表的引用 {n_sv} 处")
+    n_t6 = drop_missing_sys_table_refs(chapters, state)
+    if n_t6:
+        logs.append(f"第6章删除缺失地类表的引用 {n_t6} 处")
     return logs

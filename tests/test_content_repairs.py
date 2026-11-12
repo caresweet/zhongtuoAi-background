@@ -286,3 +286,20 @@ def test_risk_measures_table_follows_ch11():
     out = chapters[13]["markdown"]
     assert "征收程序方面的风险" not in out
     assert "| 3 | 舆情风险 |" in out and "| 2 | 资金风险 | 专户存储" in out
+
+
+def test_ch4_four_natures_deduped():
+    """第4章（二）四性分析只留结论，正文指向第十章（专家批注：与第10章重复）。"""
+    from app.services.report_content_repairs import dedupe_ch4_four_natures
+
+    body = "本次征收符合法律法规要求。" * 40
+    md = ("## 第四章 社会稳定风险评估工作报告\n\n### （二）四性分析\n\n"
+          "#### 1.合法性评估\n" + body + "\n\n"
+          "#### 2.合理性评估\n" + body + "\n\n"
+          "### （三）不稳定风险因素\n风险内容。\n")
+    chapters = {4: {"markdown": md}}
+    assert dedupe_ch4_four_natures(chapters) == 1
+    out = chapters[4]["markdown"]
+    assert "详见第十章" in out
+    assert "本次征收符合法律法规要求" not in out
+    assert "（三）不稳定风险因素" in out

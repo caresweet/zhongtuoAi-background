@@ -418,6 +418,39 @@ def fix_truncated_paragraphs(md: str) -> Tuple[str, int]:
     return "\n\n".join(out), n
 
 
+# ── ⑦ 第4章「四性分析」与第10章重复 ───────────────────────
+def dedupe_ch4_four_natures(chapters: Dict[Any, Dict[str, Any]]) -> int:
+    """第4章（评估工作报告）的（二）四性分析只保留结论，详细分析指向第十章。
+
+    专家批注 2026-11-11：「（二）四性分析 —— 和第10章重复」。
+    第10章本身就是「合法性、合理性、可行性、可控性分析」，第4章再展开一遍
+    就是同文两处。这里把第4章该节压成一句结论 + 交叉引用。
+    """
+    import re as _re
+    ch4 = chapters.get(4) or chapters.get("4")
+    if not isinstance(ch4, dict):
+        return 0
+    md = str(ch4.get("markdown") or "")
+    if not md:
+        return 0
+    lines = md.split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if _re.match(r'^#{2,4}\s*[（(]二[）)]\s*四性分析\s*$',
+                               ln.strip())), None)
+    if start is None:
+        return 0
+    end = next((i for i in range(start + 1, len(lines))
+                if _re.match(r'^#{2,4}\s*[（(][一二三四五六七八九十]+[）)]',
+                             lines[i].strip())), len(lines))
+    body_len = len("\n".join(lines[start + 1:end]).strip())
+    if body_len <= 400:
+        return 0            # 本来就只是摘要，不动
+    summary = ("经分析，本决策在合法性、合理性、可行性、可控性四个方面均符合要求，"
+               "社会稳定风险可控。具体分析详见第十章。")
+    ch4["markdown"] = "\n".join(lines[:start + 1] + ["", summary, ""] + lines[end:])
+    return 1
+
+
 # ── 入口 ────────────────────────────────────────────────────
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
     logs: List[str] = []
@@ -458,4 +491,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
     n_score = fix_score_mentions(chapters)
     if n_score:
         logs.append(f"第12章得分与评分表对齐 {n_score} 处")
+    n_dup = dedupe_ch4_four_natures(chapters)
+    if n_dup:
+        logs.append("第4章四性分析改为结论+指向第十章")
     return logs

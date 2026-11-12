@@ -675,6 +675,7 @@ class ReportAssembler:
     def assemble(self, state: dict) -> str:
         """Build the final report DOCX from session state."""
         self._inserted_images = set()  # 🔴 Reset per call — avoid cross-report dedup
+        self._missing_images = []      # 资料里缺失的图片（只记缺口，不印占位）
         self._chapter_image_counter = {}  # 🔴 图号统一计数器：章 → 已插入图数
         self._session_state = state  # 🔴 供系统标准表（表3-1/表3-3）渲染读取 survey_analysis
         self._system_rendered_tables = set()  # 🔴 系统渲染的标准表，_fill_table_data 不得覆盖
@@ -1303,6 +1304,15 @@ class ReportAssembler:
             _ch_md = {n: (c or {}).get("markdown", "")
                       for n, c in (chapters or {}).items() if isinstance(c, dict)}
             _gaps = collect_gaps(state, _ch_md)
+            # 🔴 资料里少的图片也进缺口清单（只提示，不写正文占位）
+            for _mi in getattr(self, "_missing_images", []):
+                _ch = int(_mi.get("chapter") or 0)
+                _gaps.setdefault(_ch, []).append({
+                    "reason": "missing_image",
+                    "detail": f"缺少图片：{_mi.get('caption') or _mi.get('ref')}",
+                    "severity": "warning",
+                    "sentence": "",
+                })
             state["_chapter_gaps"] = _gaps
             _gn = sum(len(v) for v in _gaps.values())
             if _gn:
@@ -5658,9 +5668,18 @@ class ReportAssembler:
                     img_path = fallback
                     break
         if not img_path.exists():
-                print(f"[IMG_FAIL] _add_image failed: ref={image_ref}, caption={caption}", flush=True, file=__import__('sys').stderr)
-                self._add_para(doc, f'【图片待插入：{caption}】', indent=False)
-                return
+            # 🔴 资料里少一张图也要能出报告：正文**不写**「【图片待插入：…】」
+            #    这种占位符（业主硬约束：交付稿不许有占位）。缺图记进
+            #    `_missing_images`，由缺口清单提示，正文不引用。
+            print(f"[IMG_FAIL] _add_image failed: ref={image_ref}, caption={caption}",
+                  flush=True, file=__import__('sys').stderr)
+            try:
+                self._missing_images.append({
+                    "ref": str(image_ref), "caption": str(caption or ""),
+                    "chapter": int(getattr(self, "_current_chapter", 0) or 0)})
+            except Exception:
+                pass
+            return
 
         # 🔴 图注规范化 + 图号统一（治「图号跳号/重复」）：
         #   忽略 LLM 手写的图号，按章内出现顺序由系统自动重编号「图X-N」。

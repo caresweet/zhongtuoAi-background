@@ -3762,10 +3762,14 @@ async def generate_report_direct(session_id: str, user: User = Depends(get_curre
     # Launch subprocess in background (with error logging)
     # __file__ = app/routers/report.py → 3 levels up = backend/
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    script = os.path.join(backend_dir, "scripts", "generate_report.py")
+    # 🔴 线上「直接生成」必须与本地测试脚本走**同一条生成逻辑**
+    #    （业主 2026-11-12）。旧实现跑 `generate_report.py`（另一套老管线），
+    #    与 `gen_full_report.py`（本地测试用的那套）产出的报告不一致。
+    script = os.path.join(backend_dir, "scripts", "gen_full_report.py")
     log_file = open(f"/tmp/report_gen_{session_id}.log", "w")
     proc = subprocess.Popen(
-        [sys.executable, script, session_id],
+        [sys.executable, script, "--session", session_id,
+         "--api", f"http://127.0.0.1:{settings.PORT}"],
         cwd=backend_dir,
         stdout=log_file,
         stderr=log_file,

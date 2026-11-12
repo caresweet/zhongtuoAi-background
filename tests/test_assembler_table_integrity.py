@@ -518,3 +518,17 @@ def test_necessity_is_enriched():
     assert len(out) > 120
     assert "46份" in out and "支持率100%" in out
     assert "维护人民群众" in out and "具有实施的必要性" in out
+
+
+def test_missing_image_leaves_no_body_placeholder():
+    """少一张图也要能出报告：正文不许出现「【图片待插入：…】」。"""
+    from docx import Document
+    from app.services.report_assembler import ReportAssembler
+
+    d = Document()
+    a = ReportAssembler()
+    a._current_chapter = 1
+    a._missing_images = []
+    a._add_image(d, "/tmp/__no_such_image__.jpg", "现场照片")
+    assert all("图片待插入" not in p.text for p in d.paragraphs)
+    assert a._missing_images

@@ -64,10 +64,12 @@ async def generate_all(state: dict, only: list = None):
                   "key_points": ch.get("need_spec_tags", []),
                   "data_needed": deps, "depends_on": ch.get("depends_on", []),
                   "argument_note": ch.get("argument_note", "")}
+        # 🔴 与线上 `node_chapter_generate` 保持同一套参数（业主 2026-11-12：
+        #    「线上使用的要跟我们本地测试生成出来的保持一样的生成逻辑」）
         prompt = build_chapter_prompt(ch_def, filled,
                                       previous_chapters=state.get("chapters", {}),
                                       outline_context=state.get("_outline", {}),
-                                      state=state)
+                                      state=state, domain="stability")
         agent_state = {
             "session_id": state.get("session_id", ""),
             "report_title": filled.get("project_name", ""),
@@ -81,6 +83,8 @@ async def generate_all(state: dict, only: list = None):
             "_custom_prompt": prompt, "_use_custom_prompt": True,
             "_uploaded_files": state.get("_uploaded_files", []),
             "_img_catalog": state.get("_img_catalog", {}),
+            "template_path": state.get("template_path") or "",
+            "_selected_personnel": state.get("selected_personnel") or [],
             "_extracted_tables": filled.get("_extracted_tables", []),
         }
         q: asyncio.Queue = asyncio.Queue()
@@ -292,6 +296,23 @@ async def main():
             print(f"🖊 签到表识别：{_k} {len(_sr['names'])} 人 — {'、'.join(_sr['names'][:6])}")
     except Exception as e:
         print(f"⚠️ 签到表解析跳过: {e}")
+
+    # 🔴 图片目录与线上一致：上传图片先分类（正文按章取图、附件去重都靠它）
+    try:
+        from app.services.image_catalog import build_image_catalog
+        _items = []
+        for _f in (state.get("_uploaded_files") or []):
+            if isinstance(_f, dict) and _f.get("path"):
+                _items.append({"path": _f["path"],
+                               "original_name": _f.get("original_name")
+                                                or str(_f["path"]).split("/")[-1]})
+            elif isinstance(_f, str):
+                _items.append(_f)
+        state["_img_catalog"] = build_image_catalog(
+            _items, ai_classifications=state.get("_classified_images"),
+            domain="stability")
+    except Exception as _ie:
+        print("⚠️ 图片目录构建跳过:", _ie)
 
     state = await generate_all(state, only)
     # 🔴 这份 pkl 已**降级为「离线兜底」**：只有在没传 `--session` 时才会被读到。

@@ -47,6 +47,10 @@ async def main() -> int:
     company = await load_company(args.company_id) or {}
     if company.get("implement_unit") and not filled.get("implement_unit"):
         filled["implement_unit"] = company["implement_unit"]
+    # 评审表「实施单位负责人/职务」优先取公司档案（法人），别在交付稿里印【待填写】
+    if company.get("leader_name") and not filled.get("impl_leader"):
+        filled["impl_leader"] = company["leader_name"]
+        filled["impl_leader_title"] = company.get("leader_title") or ""
     title = str(filled.get("project_name") or "社会稳定风险评估报告")
     state = {
         "session_id": args.session,

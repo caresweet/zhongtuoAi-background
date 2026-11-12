@@ -802,7 +802,8 @@ class ReportAssembler:
                 # 专家批注中的硬伤统一修补（面积分项、风险条数、日期先后、
                 # 伪造法规名、错位句、得分公式、附件指向）
                 from app.services.report_content_repairs import repair_stability_chapters
-                _repairs = repair_stability_chapters(chapters)
+                _repairs = repair_stability_chapters(
+                    chapters, state=getattr(self, "_session_state", None))
                 if _repairs:
                     logger.info("[内容修补] %s", "；".join(_repairs))
                 from app.validation.content_guardrails import (

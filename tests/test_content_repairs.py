@@ -303,3 +303,23 @@ def test_ch4_four_natures_deduped():
     assert "详见第十章" in out
     assert "本次征收符合法律法规要求" not in out
     assert "（三）不稳定风险因素" in out
+
+
+def test_drop_missing_survey_refs(monkeypatch):
+    """没有逐题人数时，第9章不能引用不存在的问卷统计表。"""
+    from app.services import table_generation_service as tgs
+    from app.services.report_content_repairs import drop_missing_survey_refs
+
+    monkeypatch.setattr(tgs.TableGenerationService, "generate_table_3_1",
+                        staticmethod(lambda state: {"rows": []}))
+    monkeypatch.setattr(tgs.TableGenerationService, "generate_table_3_3",
+                        staticmethod(lambda state: {"rows": []}))
+    md = ("个人问卷统计汇总情况如下表所示：\n\n[TABLE:ch9_public_survey]\n\n"
+          "从上表可见，被调查对象全部为本地居民。\n\n正文保留。\n")
+    chapters = {9: {"markdown": md}}
+    assert drop_missing_survey_refs(chapters, {"filled_data": {}}) == 3
+    out = chapters[9]["markdown"]
+    assert "如下表所示" not in out
+    assert "全部为本地居民" not in out
+    assert "[TABLE:" not in out
+    assert "正文保留" in out

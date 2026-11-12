@@ -276,6 +276,9 @@ CHAPTER_REQUIRED_FIELDS = {
     9: [
         ("total_samples",  "问卷份数",        "number", r'^\d+$',         6,  "50"),
         ("support_rate",   "群众支持率（%）", "number", r'^\d+(\.\d+)?$', 5,  "100"),
+        # 🔴 问卷日期是硬性资料：没有它，第9章无法写「于X月X日开展问卷调查」。
+        #    业主 2026-11-12：「硬性资料没提供或没识别出来，要给用户提示」。
+        ("questionnaire_date", "问卷调查日期", "date", None, 10, "2026-08-08"),
         ("notice_date",    "现场公示时间",    "date",   None,             10, "2026-06-02"),
         ("survey_date",    "实地勘察时间",    "date",   None,             10, "2026-06-03"),
         ("symposium_date", "座谈会时间",      "date",   None,             10, "2026-06-03"),

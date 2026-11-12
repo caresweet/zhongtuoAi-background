@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -451,8 +451,70 @@ def dedupe_ch4_four_natures(chapters: Dict[Any, Dict[str, Any]]) -> int:
     return 1
 
 
+# ── ⑧ 缺问卷逐题数据时，正文不能引用不存在的表 ──────────────
+def drop_missing_survey_refs(chapters: Dict[Any, Dict[str, Any]],
+                             state: Optional[Dict[str, Any]] = None) -> int:
+    """没有逐题清点数据时，删掉「如下表所示」「从上表可见」和 [TABLE:] 标记。
+
+    业主 2026-11-12：「可选资料没有就不要在正文里提；硬性资料没提供要提示」。
+    问卷逐题人数属于**可选**（原件在附件里就能评）；但正文不能指着一张
+    渲染不出来的表说「如下表所示」，更不能编造「全部为本地居民」这类结论。
+    """
+    if not isinstance(state, dict):
+        return 0
+    ch9 = chapters.get(9) or chapters.get("9")
+    if not isinstance(ch9, dict):
+        return 0
+    md = str(ch9.get("markdown") or "")
+    if not md:
+        return 0
+    try:
+        from app.services.table_generation_service import TableGenerationService
+        from app.services.report_assembler import ReportAssembler
+        _has_pub = ReportAssembler._survey_rows_have_counts(
+            (TableGenerationService.generate_table_3_1(state) or {}).get("rows"))
+        _has_dept = ReportAssembler._survey_rows_have_counts(
+            (TableGenerationService.generate_table_3_3(state) or {}).get("rows"))
+    except Exception:
+        return 0
+    if _has_pub and _has_dept:
+        return 0
+    lines = md.split("\n")
+    out = []
+    changed = 0
+    for ln in lines:
+        s = ln.strip()
+        if s in ("[TABLE:ch9_public_survey]", "[TABLE:ch9_dept_survey]"):
+            changed += 1
+            continue
+        _is_pub = ("个人问卷" in s) or ("群众问卷" in s)
+        _is_dept = ("单位问卷" in s) or ("部门问卷" in s)
+        # 「xx问卷统计汇总情况如下表所示：」——对应表出不来就整句删掉
+        if "如下表所示" in s and ((_is_pub and not _has_pub) or
+                                  (_is_dept and not _has_dept)):
+            changed += 1
+            continue
+        # 「从上表可见…」是对缺失表的解读，删掉（往往还带着编造的构成结论）
+        if s.startswith("从上表可见") or s.startswith("由表9-"):
+            if _is_pub and not _has_pub:
+                changed += 1
+                continue
+            if _is_dept and not _has_dept:
+                changed += 1
+                continue
+            # 没点名是个人还是单位：两张表都没数据就删
+            if not _has_pub and not _has_dept:
+                changed += 1
+                continue
+        out.append(ln)
+    if changed:
+        ch9["markdown"] = "\n".join(out)
+    return changed
+
+
 # ── 入口 ────────────────────────────────────────────────────
-def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
+def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
+                              state: Optional[Dict[str, Any]] = None) -> List[str]:
     logs: List[str] = []
     for key, ch in list(chapters.items()):
         if not isinstance(ch, dict):
@@ -494,4 +556,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]]) -> List[str]:
     n_dup = dedupe_ch4_four_natures(chapters)
     if n_dup:
         logs.append("第4章四性分析改为结论+指向第十章")
+    n_sv = drop_missing_survey_refs(chapters, state)
+    if n_sv:
+        logs.append(f"第9章删除缺失问卷表的引用 {n_sv} 处")
     return logs

@@ -251,6 +251,12 @@ def sanitize_fields(filled: Dict[str, Any], *, verbose: bool = False,
                 filled[key] = cleaned
                 cleared.append(f"{key}(去位置括注)")
         if is_junk(filled.get(key)):
+            # 🔴 有正式 project_name 时**不要**再给 project_title 拼「用途+项目」的
+            #    派生标题：封面优先 project_title，实测会把「淮阴区马头镇运河里
+            #    一号地块土地征收决策」印成「城镇住宅用地（安置房）项目」
+            #    （2026-11-12）。
+            if key == "project_title" and not is_junk(filled.get("project_name")):
+                continue
             derived = _safe_project_name(state, filled)
             if derived:
                 filled[key] = derived

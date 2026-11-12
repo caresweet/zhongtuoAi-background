@@ -63,6 +63,7 @@ _TIME_FIELDS = [
     ("稳评公示开始日期", "publicity_start_date", "date", "公示期一般 7 天，结束日系统推算"),
     ("现场公示开始日期", "notice_date", "date", ""),
     ("现场公示结束日期", "notice_end_date", "date", ""),
+    ("问卷日期", "questionnaire_date", "date", "问卷/调查表上的日期"),
     ("实地勘察日期", "survey_date", "date", ""),
     ("座谈会日期", "symposium_date", "date", ""),
     ("座谈会地点", "symposium_location", "text", ""),
@@ -224,7 +225,8 @@ def _pairs(ws, fields) -> Dict[str, str]:
             continue
         key, kind = label_to_key[label]
         val = _convert(kind, ws.cell(row=r, column=2).value)
-        if val:
+        # 🔴 0 是有效值（反对率 0%、支持率 0%）：旧写法 `if val` 把 0 当空值丢了
+        if val is not None and val != "":
             out[key] = val
     return out
 

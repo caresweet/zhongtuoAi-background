@@ -2295,7 +2295,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, f"本授权书于{today}起生效，特此声明。", size=12, align="justify",
            name="仿宋")
         _p(doc, "", size=12, indent=False, name="仿宋")
-        _p(doc, "代理人（被授权人）：___________________________", size=12,
+        _p(doc, f"代理人（被授权人）：{af['agent']}", size=12,
            indent=False, name="仿宋")
         _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
         _p(doc, "", size=12, indent=False, name="仿宋")
@@ -2439,7 +2439,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         (af["agent"], True), ("(姓名)代表我方", False), (co_name, True),
         ("（投标人名称），全权处理本次项目投标的有关事宜。", False),
     ])
-    _p(doc, "据此函，签字人兹宣布同意如下：", align="justify")
+    _p(doc, f"据此函，{af['agent']}签字人兹宣布同意如下：", align="justify")
     for _ln in (
         "1. 按招标文件规定的各项要求，向买方提供所需货物与服务。",
         "2. 我们完全理解贵方不一定将合同授予最低报价的投标人。",
@@ -2472,6 +2472,12 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     # ── 四、开标一览表 ──
     _hp = _h(doc, t_open, 1)
     _hp.paragraph_format.page_break_before = True
+    # 招标文件原格式：先「填写说明」，再表格，最后盖章/签字/日期
+    _p(doc, "填写说明：", size=10.5, indent=False)
+    _p(doc, "开标一览表不得填报选择性报价，否则将作为无效投标；",
+       size=10.5, indent=False)
+    _p(doc, "开标一览表中报价与投标报价清单中不符时，以开标一览表为准。",
+       size=10.5, indent=False)
     _table(doc, ["项目", "内容"], [
         ["项目名称", project],
         ["项目投标报价", f"人民币（大写）{big}（￥{total_yuan}.00 元）"],
@@ -2480,11 +2486,10 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         ["是否为小微企业", "是"],
     ], widths=[4.2, 10.8], font_size=12,
         aligns=["center", "left"])
-    _p(doc, "注：开标一览表不得填报选择性报价，否则将作为无效投标；"
-            "开标一览表中报价与投标报价清单中不符时，以开标一览表为准。",
-       size=10.5, indent=False)
-    _p_two(doc, f"投标人（盖章）：{co_name}", f"日期：{today}", size=12,
-           indent=0.0)
+    _p(doc, f"投标人（盖章）：{co_name}", size=12, indent=False)
+    _p(doc, f"法定代表人或授权代表（签字或盖章）：{af['agent']}", size=12,
+       indent=False)
+    _p(doc, f"日期：{today}", size=12, indent=False)
 
     # ── 五、报价清单（横排）──
     _new_section(doc, True)

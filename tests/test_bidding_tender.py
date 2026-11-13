@@ -489,3 +489,20 @@ async def test_build_xunbi_bid_follows_chapter_six(tmp_path):
     # 不含稳评/简式八件套的条目
     assert "评审表" not in text
     assert "资格性和符合性检查响应对照表" not in text
+
+
+def test_price_advice_from_max_price_and_rule():
+    """建议报价：基准价满分/最低价法/默认三种口径，金额从招标限价算，不写死。"""
+    from app.routers.bidding_bid import _price_advice
+
+    p, hint = _price_advice({"max_price_wan": "55", "price_rule": "benchmark_full"})
+    assert p == 52.0 and "55" in hint and "基准价" in hint
+
+    p2, _ = _price_advice({"max_price_wan": "100", "bid_format": "compact"})
+    assert p2 == 90.0
+
+    p3, _ = _price_advice({"budget_wan": "37.0"})
+    assert p3 == 35.0
+
+    p4, hint4 = _price_advice({})
+    assert p4 is None and "未" in hint4

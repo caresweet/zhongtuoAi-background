@@ -437,6 +437,13 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     batch_numbers = list(dict.fromkeys(re.findall(
         r'[一-龥]{2,6}[〔\[【(（]\d{4}[〕\]】)）]\d{2,4}号', blob)))
 
+    # 报价评分口径（建议报价用：基准价满分 / 最低价法 / 其他综合评分）
+    price_rule = ""
+    if "低于等于评标基准价" in blob or "低于等于基准价" in blob:
+        price_rule = "benchmark_full"
+    elif "最低评标价法" in blob or "最低投标价法" in blob:
+        price_rule = "lowest"
+
     return {
         "source": str(path),
         "project_name": project_name,
@@ -462,6 +469,7 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "budget_yuan": budget_yuan,
         "max_price_yuan": max_yuan,
         "bid_format": bid_format,
+        "price_rule": price_rule,
         "format_titles": format_titles,
         "households": households,
         "unit_price": unit_price,

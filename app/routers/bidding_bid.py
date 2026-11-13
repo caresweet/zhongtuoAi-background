@@ -80,6 +80,7 @@ async def analyze_tender(
         pass
 
     max_price = req.get("max_price_wan") or req.get("budget_wan") or ""
+    suggested, price_hint = _price_advice(req)
     return ApiResponse(
         message="招标文件解析完成",
         data={
@@ -88,6 +89,7 @@ async def analyze_tender(
             "requirements": req,
             "personnel": people,
             "company_id": company_id,
+            "company_name": str(company.get("name") or ""),
             # 授权代表：前端弹窗询问（可改）
             "agent_name": af.get("agent") or "",
             "legal_name": af.get("legal") or "",
@@ -97,11 +99,40 @@ async def analyze_tender(
             # 报价交互：前端据此弹窗询问
             "need_price": True,
             "max_price_wan": max_price,
-            "price_prompt": (
+            # 报价参考：招标金额 + 建议报价（前端弹窗里直接展示）
+            "suggested_price_wan": suggested,
+            "price_hint": price_hint,
+            "price_prompt": price_hint or (
                 f"本项目预算/最高限价为 {max_price} 万元，请输入本次投标报价（万元）。"
                 if max_price else "未在招标文件中识别到预算/最高限价，请输入本次投标报价（万元）。"),
         },
     )
+
+
+def _price_advice(req: Dict[str, Any]):
+    """按招标限价与评标办法给出建议报价（万元）和说明。
+
+    口径：
+      · 最低评标价法：价格是主要竞争因素，建议下浮 10% 左右；
+      · 报价评分「低于等于基准价得满分」（基准价=平均价）：建议限价的 95%；
+      · 其余综合评分法：建议限价的 95%，留出利润空间。
+    取到 0.5 万元整数，不写死数值。
+    """
+    try:
+        maxp = float(str(req.get("max_price_wan") or req.get("budget_wan") or 0)
+                     .replace(",", ""))
+    except (TypeError, ValueError):
+        maxp = 0.0
+    if maxp <= 0:
+        return None, "未在招标文件中识别到预算/最高限价，请结合成本自行确定报价。"
+    ratio, note = 0.95, "在最高限价基础上下浮 5% 左右，既有竞争力又留出利润空间"
+    if req.get("price_rule") == "lowest" or req.get("bid_format") == "compact":
+        ratio, note = 0.90, "本项目为最低评标价法，价格是主要竞争因素，建议下浮 10% 左右"
+    if req.get("price_rule") == "benchmark_full":
+        ratio, note = 0.95, "报价评分以平均价为基准价、低于等于基准价即得满分，建议报限价的 95% 左右"
+    price = round(maxp * ratio * 2) / 2        # 取 0.5 万元整数
+    return price, (f"招标文件最高限价（含税）{maxp:g} 万元；"
+                   f"建议报价 {price:g} 万元——{note}。")
 
 
 class BidGenerateRequest(BaseModel):

@@ -2200,11 +2200,17 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
             ("7", "投标人资质证书"),
             ("8", "招标文件中规定要求提供的证明材料和投标人认为需要提供的其他材料"),
         ]
+    # 文件1 的显示名按业主口径只写「营业执照」；页码锚点/占位必须用同一个名字，
+    # 否则 {{…}} 填不上、检查表会退回章节首页（2026-11-13 实测印成 2）。
+    def _disp_txt(no, txt):
+        return "营业执照" if str(no) == "1" else str(txt)
+
     # 资格性和符合性检查表：**逐件对应文件1~N**（人工稿即 N 行 + 其他实质性要求），
     # 页码用 {{文件N …}} 占位，装配后按真实分页填（原来所有行都指章节首页，全部印成 3/37）。
     _rows = []
     for _i, (_no, _txt) in enumerate(_file_items, 1):
-        _rows.append([str(_i), _txt, "是", "{{" + _no + "." + _txt + "}}"])
+        _rows.append([str(_i), _txt, "是",
+                      "{{" + _no + "." + _disp_txt(_no, _txt) + "}}"])
     _rows.append([str(len(_rows) + 1), "招标文件中的其他实质性要求", "是", "全文"])
     _ck = style.get("checklist") or {}
     _table(doc, ["序号", "资格性和符合性检查响应内容",
@@ -2331,18 +2337,12 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     def _file_assets(text: str):
         t = str(text)
         if any(k in t for k in ("营业执照", "身份证明")):
-            # 招标要求：营业执照等证明文件 **+ 自然人的身份证明**。
-            # 2026-11-13 业主：只放一张营业执照不行，法定代表人身份证要跟在后面；
-            # 扫描件写明是「副本」，图题也按实际文件改。
-            _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照（副本）",
+            # 业主 2026-11-13：这一件就叫「营业执照」——只放营业执照，
+            # 法定代表人身份证已在文件6 授权书里贴过，不重复。
+            _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照",
                          width_cm=_imgw["license_cm"],
                          rotate90=bool(_imgw.get("rotate_license", True)),
                          break_after=False)
-            if af.get("legal") and _asset_images(f"{af['legal']} 身份证", limit=1):
-                _lbl = _p(doc, "法定代表人身份证：", size=12, indent=False, name="仿宋")
-                # 营业执照是整页旋转图，身份证另起一页（图题与图片不分家）
-                _lbl.paragraph_format.page_break_before = True
-                _id_pair(af["legal"])
             return
         if "财务" in t:
             # 「上一年度财务报表」= 上一年度审计报告 + 其后的资产负债表/利润表/
@@ -2422,7 +2422,9 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     for _no, _txt in _file_items:
         # 每个「文件N」另起一页（业主：图片必须紧跟在名称之后，不能标题在一页、
         # 图片在另一页），标题用二级标题体例（宋体 15 加粗居中）。
-        _hp = _h(doc, f"{_no}.{_txt}", 2)
+        # 文件1 的名称按业主口径只写「营业执照」（招标原文那串太长，截图里像重复）。
+        _head_txt = _disp_txt(_no, _txt)
+        _hp = _h(doc, f"{_no}.{_head_txt}", 2)
         _hp.paragraph_format.page_break_before = True
         _file_assets(_txt)
 
@@ -2673,7 +2675,7 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     doc.save(str(out))
     try:
         if _stamp_toc(out, titles=titles,
-                  anchors=tuple(f"{_no}.{_txt}" for _no, _txt in _file_items),
+                  anchors=tuple(f"{_no}.{_disp_txt(_no, _txt)}" for _no, _txt in _file_items),
                   style=style):
             logger.info("[投标文件] 目录已写入真实页码")
     except Exception as e:

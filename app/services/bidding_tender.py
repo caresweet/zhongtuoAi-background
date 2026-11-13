@@ -88,9 +88,11 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
             if ln and ("项目" in ln and len(ln) > 8 and "编号" not in ln):
                 project_name = ln
                 break
-    project_no = grab(r'项目编号[:：]\s*([^\s，,]+)')
-    # 采购人/代理的标签各家不同（采购人：/采购人名称：/采购单位：/招标代理机构：/招标代理：）
+    project_no = (grab(r'项目编号[:：]\s*([^\s，,]+)')
+                  or grab(r'询比编号[:：]\s*([^\s，,]+)'))
+    # 采购人/代理的标签各家不同（采购人：/采购人名称：/采购单位：/询比人：/招标代理机构：）
     purchaser = (grab(r'采\s*购\s*人(?:名称)?[:：]\s*(.+)')
+                 or grab(r'询\s*比\s*人[:：]\s*(.+)')
                  or grab(r'采购单位[:：]\s*(.+)'))
     agency = (grab(r'采购代理机构[:：]\s*(.+)')
               or grab(r'招标代理(?:机构)?[:：]\s*(.+)'))
@@ -151,15 +153,20 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
             if 6 <= len(ln) <= 200 and ln not in scoring:
                 scoring.append(ln)
 
-    # ── 投标文件格式：定位「投标文件格式」所在的章（跳过目录行）──
+    # ── 投标/投选文件格式：定位格式所在的那一章（跳过目录行）──
     fmt_chapter, fmt_start = "", -1
     for i, ln in enumerate(lines):
-        if re.search(r'投标文件格式|响应文件格式', ln):
-            # 目录行带页码（- 49 -）的不是正文位置
-            if re.search(r'-\s*\d+\s*-$', ln) or "目\s*录" in ln:
+        if re.search(r'投标文件格式|响应文件格式|投选文件格式', ln):
+            # 目录行带页码（「- 49 -」或「… 91」）的不是正文位置
+            if (re.search(r'-\s*\d+\s*-$', ln) or re.search(r'[ \t]\d+$', ln)
+                    or "目\s*录" in ln):
                 continue
             _nxt = " ".join(lines[i + 1:i + 4])
-            if ("投标文件" in _nxt or "响应文件" in _nxt or "（一）" in _nxt
+            # 正文里「应符合第七章“投选文件格式”要求」这类引用句不是章标题
+            if ln.endswith("。") or len(ln) > 40:
+                continue
+            if ("投标文件" in _nxt or "响应文件" in _nxt or "投选文件" in _nxt
+                    or "（一）" in _nxt
                     or ln.startswith("第六章") or ln.startswith("第")):
                 fmt_chapter, fmt_start = ln, i
                 break
@@ -216,6 +223,12 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
                 piece = _clean(it.split("\n")[0])[:160]
                 if piece and piece not in qualifications:
                     qualifications.append(piece)
+    # 询比公告写法：「3.1企业资质要求：…」「3.2企业业绩要求：…」
+    if not qualifications:
+        for m in re.finditer(r'^3\.(\d)\s*([^\n]{4,200})', blob, re.M):
+            piece = _clean(m.group(2))[:200]
+            if piece and piece not in qualifications:
+                qualifications.append(piece)
 
     # ── 投标文件格式目录（有的写「投标主要文件目录」+ 一、二、三…）──
     format_titles: List[str] = []
@@ -234,11 +247,33 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
                 continue          # 后面的同名章标题（二、…要求 / 三、…格式）不再重复收
             _seen_no.add(no)
             format_titles.append(t)
-    # 只有「最低评标价法」的招标文件走简式八件套；其余沿用综合评分法的全量版
+    # 只有「最低评标价法」的招标文件走简式八件套；询比项目（「投选人」「投选文件
+    # 格式」「附件1：封面」）走询比件；其余沿用综合评分法的全量版
     if "最低评标价法" in blob or "最低投标价法" in blob:
         bid_format = "compact"
+    elif "投选文件格式" in blob or ("询比文件" in blob and "投选人" in blob):
+        bid_format = "xunbi"
     else:
         bid_format = "full"
+
+    # ── 询比件的工期（「合同签订之日起至复垦验收完成（12个月）」）──
+    duration_months = 0
+    _dm = re.search(r'[（(]\s*(\d{1,2})\s*个月\s*[）)]', blob)
+    if _dm:
+        duration_months = int(_dm.group(1))
+
+    # ── 询比件的服务内容清单（第五章 服务内容表：编号/名称/工作描述）──
+    #    从**未清洗**的原文里按制表符切列（`lines` 已把 \t 折成空格）
+    work_items: List[Dict[str, str]] = []
+    for ln in text.splitlines():
+        _wm = re.match(r'^(\d+(?:\.\d+)?)\t([^\t]{2,40})\t(.*)$', ln.strip())
+        if not _wm:
+            continue
+        no, name, desc = (_wm.group(1), _clean(_wm.group(2)),
+                          _clean(_wm.group(3)))
+        if desc == name or not desc:
+            continue          # 分组行（1  XXX  1）不是末级工作项
+        work_items.append({"no": no, "name": name, "desc": desc})
 
     # ── 户数 / 单价（村庄测绘这类按户计价）──
     households = ""
@@ -312,10 +347,18 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
 
     _clause("投标有效期", r'投标有效期为\s*(\d+)\s*天',
             lambda m: f"自开标之日起 {m.group(1)} 天")
+    if not commerce.get("投标有效期"):
+        # 询比件写法：「投选有效期 | 为（从投选截止之日算起）：90日历天」
+        _clause("投标有效期", r'投选有效期为?\s*[（(]?[^）)\n]{0,20}[）)]?\s*[:：]?\s*(\d+)\s*日历天',
+                lambda m: f"自投选截止之日起 {m.group(1)} 日历天")
     _clause("履约保证金", r'履约保证金[（(]合同金额的[^）)]{1,8}[）)][^。]{0,30}')
+    if not commerce.get("履约保证金"):
+        _clause("履约保证金", r'履约保证金[\t ]+不(?:提交|收取)[^\n]{0,20}')
     _clause("招标代理费", r'招标代理费合计\s*([\d,]+)\s*元[^。]{0,40}',
             lambda m: f"招标代理费合计 {m.group(1)} 元，由中标人支付")
     _clause("投标保证金", r'本项目不收取投标保证金')
+    if not commerce.get("投标保证金"):
+        _clause("投标保证金", r'投(?:标|选)保证金[^\n]{0,40}')
     if not commerce.get("投标保证金"):
         _clause("投标保证金", r'投标保证金[^。]{0,30}')
     _clause("投标文件份数",
@@ -387,12 +430,21 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     si_months = grab(r'(?:近|最近)\s*([一二三四五六七八九十\d]{1,3})\s*个月'
                      r'[^。；\n]{0,12}' + _si_kw)
 
+    # 服务实施地点（前附表「服务实施地点」行）
+    service_address = grab(r'服务实施地点[\t ]+([^\t\n]{2,40})')
+
+    # 临时用地批文号（询比：淮资规临地复【2025】0043号 这类）
+    batch_numbers = list(dict.fromkeys(re.findall(
+        r'[一-龥]{2,6}[〔\[【(（]\d{4}[〕\]】)）]\d{2,4}号', blob)))
+
     return {
         "source": str(path),
         "project_name": project_name,
         "project_no": project_no,
         "purchaser": purchaser,
         "agency": agency,
+        "service_address": service_address,
+        "batch_numbers": batch_numbers,
         "budget_wan": budget,
         "max_price_wan": max_price,
         "qualifications": qualifications,
@@ -404,6 +456,8 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "no_consortium": no_consortium,
         "sme_required": sme_required,
         "duration_days": duration_days,
+        "duration_months": duration_months,
+        "work_items": work_items,
         "plots": plots,
         "budget_yuan": budget_yuan,
         "max_price_yuan": max_yuan,

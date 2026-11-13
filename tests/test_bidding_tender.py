@@ -425,3 +425,67 @@ def test_personnel_social_insurance_detection(tmp_path):
     p2 = tmp_path / "si2.docx"
     d2.save(str(p2))
     assert parse_tender(p2)["personnel_social_insurance"] is False
+
+
+def _make_xunbi_tender(tmp_path) -> Path:
+    """最小询比文件（只含解析/生成需要的要素）。"""
+    from docx import Document
+    d = Document()
+    for ln in (
+        "江苏测试能源有限公司",
+        "张兴矿区测试项目站外管线临时用地复垦技术服务",
+        "询比文件",
+        "询比编号：TEST-2026001",
+        "询比人：江苏测试能源有限公司",
+        "服务实施地点  江苏省淮安市淮安区",
+        "投选保证金  不提交",
+        "总价最高限价55万元（含税）",
+        "合同签订之日起至复垦验收完成（12个月）",
+        "2.1服务规模：淮资规临地复【2025】0043号、淮资规临地复【2025】0025号"
+        "临时用地土地复垦验收技术服务",
+        "第六章投选文件格式",
+        "一、投选人须按照下列内容、顺序、格式编制投选文件",
+    ):
+        d.add_paragraph(ln)
+    p = tmp_path / "询比文件.docx"
+    d.save(str(p))
+    return p
+
+
+def test_xunbi_tender_parsed(tmp_path):
+    from app.services.bidding_tender import parse_tender
+
+    t = parse_tender(_make_xunbi_tender(tmp_path))
+    assert t["bid_format"] == "xunbi"
+    assert t["project_no"] == "TEST-2026001"
+    assert t["purchaser"] == "江苏测试能源有限公司"
+    assert t["duration_months"] == 12
+    assert t["batch_numbers"] == ["淮资规临地复【2025】0043号",
+                                 "淮资规临地复【2025】0025号"]
+    assert "第六章" in t["format_chapter"]
+
+
+@pytest.mark.asyncio
+async def test_build_xunbi_bid_follows_chapter_six(tmp_path):
+    """按询比文件第六章出 1～7 部分（附件2～5 + 评审材料 + 其他）。"""
+    from docx import Document
+    from app.services.bidding_bid_builder import build_bid_document
+
+    tender = _make_xunbi_tender(tmp_path)
+    out = tmp_path / "投选文件.docx"
+    p = await build_bid_document(tender_path=tender, company_id=4, price_wan=52,
+                                 out_path=out, seed=2026, use_llm=False)
+    d = Document(str(p))
+    text = "\n".join([x.text for x in d.paragraphs]
+                     + [c.text for t in d.tables for r in t.rows for c in r.cells])
+    for sec in ("1. 投选函", "2. 投选人法定代表人身份证明书",
+                "3. 投选人法定代表人授权委托书", "4. 投选人承诺书",
+                "5. 相关情况说明", "6. 初步和详细评审条件证明材料", "7. 其他"):
+        assert sec in text, sec
+    assert "伍拾贰万元整" in text
+    assert "520000" in text
+    assert "淮资规临地复【2025】0043号" in text
+    assert "土地整治项目规划设计机构" in text
+    # 不含稳评/简式八件套的条目
+    assert "评审表" not in text
+    assert "资格性和符合性检查响应对照表" not in text

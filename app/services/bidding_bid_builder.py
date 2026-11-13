@@ -1585,6 +1585,12 @@ async def build_bid_document(*, tender_path: str | Path, company_id: int,
             tender_path=tender_path, company_id=company_id,
             price_wan=price_wan, out_path=out_path, seed=seed,
             personnel=personnel, use_llm=use_llm, agent_name=agent_name)
+    # 询比（投选）项目：《询比文件》第六章附件1～10，走询比件
+    if tender.get("bid_format") == "xunbi":
+        return await build_xunbi_bid_document(
+            tender_path=tender_path, company_id=company_id,
+            price_wan=price_wan, out_path=out_path, seed=seed,
+            personnel=personnel, use_llm=use_llm, agent_name=agent_name)
     co_name = company_name(company_id) or "投标人"
     # 人员配置对齐人工稿：1 名负责人 + 不少于 5 名组员（招标最低 1+3 只是底线；
     # 高级职称组员每个 2 分、最多 6 分，配足 5 名组员才能拿满人员分）
@@ -2688,6 +2694,708 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     logger.info(f"[投标文件] 已生成简式投标文件 {out}（{len(people)} 人，"
                 f"报价 {small} 万元）")
     return out
+
+
+# ═══════════════════════════════════════════════════════════════
+# 询比（投选）文件 —— 按《询比文件》第六章「投选文件格式」附件1～10 出
+# ═══════════════════════════════════════════════════════════════
+# 公司近年临时用地/复垦类业绩（取自众拓云 ERP 项目登记，金额为合同收入）
+_XUNBI_PERF: List[Tuple[str, str, str, str, str]] = [
+    ("张兴储气库项目4个井场复垦验收", "2026年6月", "518400",
+     "江苏国能石油天然气有限公司", "4个井场临时用地土地复垦验收"),
+    ("淮安盐穴压气储能发电项目井场复垦验收（5个井场）", "2026年4月", "527000",
+     "江苏国信苏盐储能发电有限公司", "井场临时用地土地复垦验收"),
+    ("井神一公司采卤车间新盐井建设项目临时用地", "2025年12月", "343000",
+     "江苏苏盐井神第一分公司", "临时用地手续办理及土地复垦技术服务"),
+    ("铁路工程土地复垦方案报告书（浦口）", "2024年12月", "370000",
+     "中铁", "土地复垦方案报告书编制"),
+    ("苏淮220千伏开关站新建工程临时用地复垦咨询服务", "2025年2月", "200000",
+     "国网江苏省电力有限公司淮安供电分公司", "临时用地复垦咨询服务"),
+    ("张兴矿区采输卤扩建项目站外卤水管线临时用地及林地技术服务", "2025年7月",
+     "200700", "江苏国能石油天然气有限公司", "临时用地手续及林地报批技术服务"),
+    ("江苏盐业井神张兴矿区ZX9、ZX10井施工便道临时用地土地复垦方案",
+     "2026年4月", "160000", "江苏国能石油天然气有限公司",
+     "施工便道临时用地土地复垦方案编制"),
+    ("金南变临时用地复垦方案编制及验收服务", "2025年12月", "138990",
+     "国网江苏省电力有限公司金湖县供电分公司", "复垦方案编制及验收服务"),
+]
+
+# 公司成立日期（营业执照/信用中国公示）
+_COMPANY_ESTABLISHED: Dict[str, str] = {
+    "江苏众拓测绘有限公司": "2010年4月8日",
+}
+
+# 分项报价权重（万元）；合计 52 万元，调用方报价不同时按比例折算
+_XUNBI_ITEM_PRICE: Dict[str, float] = {
+    "1.1": 6, "1.2": 7, "1.3": 9,
+    "2.1": 5.5, "2.2": 5.5,
+    "3.1": 2, "3.2": 1.5, "3.3": 7, "3.4": 4.5,
+    "4.1": 2, "5": 2,
+}
+
+
+async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
+                                   price_wan: float, out_path: str | Path,
+                                   seed: Optional[int] = None,
+                                   personnel: Optional[List[dict]] = None,
+                                   use_llm: bool = True,
+                                   agent_name: str = "") -> Path:
+    """询比（投选）项目的投选文件。
+
+    格式严格照询比文件第六章：封面（附件1）→ 目录 → 1 投选函（附件2）→
+    2 法定代表人身份证明书（附件3）→ 3 授权委托书（附件4）→ 4 投选人承诺书
+    （附件5）→ 5 相关情况说明 → 6 初步和详细评审条件证明材料（6.1～6.5）→
+    7 其他（附件6～10 表单 + 项目组织实施方案/质量保障措施/进度安排 + 报价表）。
+    """
+    from docx import Document
+    from docx.shared import Cm, Pt
+    from datetime import date as _date
+    from app.services.bidding_tender import parse_tender, select_bid_personnel
+    from app.services.bidding_style import load_bidding_style
+    from app.services.company_service import load_company
+    from app.config import settings as _settings
+
+    style = load_bidding_style(_settings.STORAGE_DIR)
+    company = await load_company(company_id) or {}
+    _ASSET_COMPANY.set(int(company_id))
+    tender = parse_tender(tender_path)
+    co_name = company_name(company_id) or "投标人"
+    project = tender.get("project_name") or ""
+    no = tender.get("project_no") or ""
+    purchaser = tender.get("purchaser") or ""
+    months = int(tender.get("duration_months") or 0)
+    work_items = tender.get("work_items") or []
+    person_si = True
+
+    people = personnel or select_bid_personnel(
+        company_id=company_id, seed=seed, members=5, require_insured=person_si)
+    # 被授权人默认选测绘/土地类高级职称的第一人（询比公告 3.4.1 要求项目负责人
+    # 具有测绘或土地相关专业中级及以上职称），并让他同时任项目负责人
+    _agent = (agent_name or "").strip()
+    if not _agent:
+        for _p0 in people:
+            if ("高级" in str(_p0.get("title") or "")
+                    and any(k in str(_p0.get("major") or "")
+                            for k in ("测绘", "土地"))):
+                _agent = str(_p0.get("name") or "")
+                break
+        if not _agent:
+            _agent = str((people[0] if people else {}).get("name") or "")
+    if _agent:
+        _hit = next((p for p in people if str(p.get("name")) == _agent), None)
+        if _hit is None:
+            try:
+                from app.services.personnel_store import personnel_for
+                _rec = (personnel_for([_agent], company_id) or [None])[0]
+            except Exception:
+                _rec = None
+            if _rec:
+                _hit = {
+                    "id": None, "name": _rec.get("姓名"),
+                    "gender": _rec.get("性别"), "age": _rec.get("年龄"),
+                    "education": _rec.get("学历"), "major": _rec.get("专业"),
+                    "title": _rec.get("职称/职务"),
+                    "certs": _rec.get("执业资格证书") or [], "cert_no": "",
+                    "id_no": "", "phone": "",
+                }
+        if _hit:
+            for _p0 in people:
+                _p0["role"] = "专业技术人员"
+            _hit["role"] = "项目负责人"
+            people = [_hit] + [p for p in people if p is not _hit]
+
+    texts = _asset_texts(co_name)
+    af = _auth_fields(texts, company=company, agent_name=_agent)
+    small, big = _price_text(price_wan)
+    total_yuan = int(round(float(price_wan) * 10000))
+    _d = _date.today()
+    today = f"{_d.year}年{_d.month}月{_d.day}日"
+    lead = str((people[0] if people else {}).get("name") or "")
+
+    doc = Document()
+    sec = doc.sections[0]
+    sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
+    pg = style["page"]
+    sec.left_margin, sec.right_margin = Cm(pg["margin_left_cm"]), Cm(pg["margin_right_cm"])
+    sec.top_margin, sec.bottom_margin = Cm(pg["margin_top_cm"]), Cm(pg["margin_bottom_cm"])
+
+    def _blank():
+        _p(doc, "", size=12, indent=False, space_after=0)
+
+    def _id_pair(name: str):
+        """身份证正反面并排（无边框两列表格）。"""
+        _imgs = _asset_images(f"{name} 身份证", limit=4)
+        if not _imgs:
+            _p(doc, "（身份证复印件见公司档案原件）", size=10.5, indent=False)
+            return
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.shared import Cm as _Cm
+        _t = doc.add_table(rows=1, cols=2)
+        _t.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _t.autofit = False
+        for _i, (_nm, _data) in enumerate(_imgs[:2]):
+            _cell = _t.cell(0, _i)
+            _cell.width = _Cm(style["images"]["id_card_cm"])
+            _cp = _cell.paragraphs[0]
+            _cp.alignment = 1
+            _cp.paragraph_format.space_after = 0
+            try:
+                _cp.add_run().add_picture(
+                    io.BytesIO(_data), width=_Cm(style["images"]["id_card_cm"]))
+            except Exception as _e:
+                logger.warning(f"[投选文件] 身份证图插入失败: {_e}")
+
+    # ── 封面（附件1：正/副本 + 询比人 + 项目 + 投选文件 + 落款）──
+    for _ in range(3):
+        _blank()
+    _p(doc, "（正本）", size=18, align="center", indent=False, name="宋体",
+       space_after=0)
+    _blank()
+    _p(doc, purchaser, size=22, align="center", indent=False, name="宋体",
+       space_after=0)
+    _blank()
+    _p(doc, project, size=19, align="center", indent=False, name="宋体",
+       space_after=0)
+    _blank()
+    for _ in range(2):
+        _blank()
+    _t = _p(doc, "投 选 文 件", size=44, bold=True, align="center", indent=False,
+            name="宋体", space_after=0)
+    _t.paragraph_format.space_before = Pt(40)
+    for _ in range(5):
+        _blank()
+    _p(doc, f"投选人：{co_name}（名称打印并加盖单位公章）", size=18,
+       indent=False, name="宋体", space_after=0)
+    _blank()
+    _p(doc, f"法定代表人或其委托代理人：{af['agent']}（签字或盖章）", size=18,
+       indent=False, name="宋体", space_after=0)
+    _blank()
+    _p(doc, today, size=18, align="center", indent=False, name="宋体",
+       space_after=0)
+    doc.add_page_break()
+
+    # ── 目录 ──
+    _add_toc(doc, style)
+    doc.add_page_break()
+
+    _TITLES = [
+        "1. 投选函",
+        "2. 投选人法定代表人身份证明书",
+        "3. 投选人法定代表人授权委托书",
+        "4. 投选人承诺书",
+        "5. 相关情况说明",
+        "6. 初步和详细评审条件证明材料",
+        "7. 其他",
+    ]
+
+    # ── 1. 投选函（附件2 原文格式，逐项填写）──
+    _h(doc, _TITLES[0], 1)
+    _p(doc, f"致：{purchaser}", indent=False)
+    _p(doc, f"根据贵公司的{project}项目货物及服务的询比（询比文件编号：{no}），"
+            f"我方经仔细研究，现决定参加报价。签字代表{af['agent']}"
+            f"（{co_name}、项目负责人）经正式授权并代表"
+            f"报价人{co_name}承诺如下：", align="justify")
+    _p(doc, "1. 我方愿意遵守询价文件的要求，提供询价所需货物及服务的全部/部分，"
+            "详见报价一览表及其附件和报价文件的其他内容。", align="justify")
+    _p(doc, "2. 我方报价文件的有效期为自开标之日起90日历日，在这期间，本报价文件"
+            "将始终对我方具有约束力，并可随时被接受。如果中标，在这以后直至买卖"
+            "合同开始生效止，本报价文件一直有效。", align="justify")
+    _p(doc, f"3. 我方报价愿意以下费用合计大写：{big}，¥：{total_yuan}.00 进行投标"
+            f"报价，具体费用明细见报价清单（其中，增值税税率为 6%）。",
+       align="justify")
+    _p(doc, "4. 我方愿意向询价人提供任何与本次询价有关的资料，并对其真实性、"
+            "合法性、有效性负责。", align="justify")
+    _p(doc, "5. 如果我方中标，在与需方签订买卖合同前，将按询比文件的要求，提供"
+            "银行基本账户开户许可证复印件。", align="justify")
+    _p(doc, "6. 我方承诺：", align="justify")
+    for _ln in ("（1）在中标通知书规定的期限内与你方签订合同。",
+                "（2）不论中标与否，5年内对招投标期间往来资料承担保密责任。",
+                "（3）已认真审查了我方编制的投标文件，投标文件真实、准确。若有"
+                "问题或错误，我方愿承担由此产生的一切后果。",
+                "（4）接受询比人中止询比的要求，并承诺不向询比人追责。"):
+        _p(doc, _ln, align="justify")
+    _p(doc, "7. 其他说明：无。", align="justify")
+    for _ in range(3):
+        _p(doc, "", indent=False)
+    _p(doc, f"报价人全称（盖章）：{co_name}", indent=False)
+    _p(doc, f"授权代表（签字）：{af['agent']}", indent=False)
+    _p(doc, f"日期：{today}", indent=False)
+
+    # ── 2. 法定代表人身份证明书（附件3）──
+    _hp = _h(doc, _TITLES[1], 1)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, f"单位名称：{co_name}", indent=False)
+    _p(doc, f"单位性质：有限责任公司", indent=False)
+    _p(doc, f"地　　址：{company.get('address') or af['address']}", indent=False)
+    _p(doc, f"成立时间：{_COMPANY_ESTABLISHED.get(co_name, '　　　　年　　月　　日')}", indent=False)
+    _p(doc, "经营期限：长期", indent=False)
+    _p(doc, f"姓名：{af['legal']}　　身份证号：{_legal_id(af, company_id)}　　"
+            f"系{co_name}的法定代表人。", align="justify")
+    _p(doc, "特此证明。", indent=False)
+    _p(doc, "", indent=False)
+    _p(doc, f"投选人：{co_name}（盖单位公章）", indent=False)
+    _p(doc, today, indent=False)
+    _p(doc, "", indent=False)
+    _p(doc, "附：法定代表人身份证复印件", indent=False)
+    _id_pair(af["legal"])
+
+    # ── 3. 授权委托书（附件4）──
+    _hp = _h(doc, _TITLES[2], 1)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, f"本人{af['legal']}（姓名）系{co_name}（投选人名称）的法定代表人，"
+            f"现委托{af['agent']}（姓名）为我方代理人。代理人根据授权，以我方名义"
+            f"处理{project}（询比服务名称）询比投选活动的以下事宜，其法律后果由"
+            "我方承担。", align="justify")
+    _p(doc, "（1）投选文件的签署、澄清、说明、补正、递交、撤回、修改；", indent=False)
+    _p(doc, "（2）参加开选会议；", indent=False)
+    _p(doc, "在此授权范围内，被授权人所实施的行为具有法律效力，我均承认。",
+       align="justify")
+    _p(doc, "委托期限：自本授权委托书签署之日起至本次询比投选活动结束止。",
+       indent=False)
+    _p(doc, "代理人无转委托权。", indent=False)
+    _p(doc, "", indent=False)
+    _p(doc, f"投选人：{co_name}（盖单位公章）", indent=False)
+    _p(doc, f"法定代表人：{af['legal']}（签字或盖章）", indent=False)
+    _p(doc, f"身份证号码：{_legal_id(af, company_id)}", indent=False)
+    _p(doc, f"委托代表人：{af['agent']}（签字或盖章）", indent=False)
+    _p(doc, f"身份证号码：{_agent_id(people, af)}", indent=False)
+    _p(doc, today, indent=False)
+    _p(doc, "", indent=False)
+    _p(doc, "附：委托代理人身份证复印件", indent=False)
+    if af.get("agent") and af["agent"] != af["legal"]:
+        _id_pair(af["agent"])
+
+    # ── 4. 投选人承诺书（附件5：逐条申明，如实填「是/否」）──
+    _hp = _h(doc, _TITLES[3], 1)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, "说明：投选人必须如实填报，否则视为弄虚作假。审查委员会、询比人可登录"
+            "国家及地方政府部门的网站查询，如发现不实填报，将取消其投选、中选资格。",
+       size=11, align="justify")
+    _p(doc, f"投选人名称：{co_name}（盖单位公章）", indent=False)
+    _DECL = [
+        ("是否为询比人不具有独立法人资格的附属机构（单位）", "否"),
+        ("是否为本服务代建人或与本服务的代建人同为一个法定代表人、相互控股或"
+         "参股、相互任职或工作的", "否"),
+        ("是否被责令停业", "否"),
+        ("是否投标资格被暂停或取消", "否"),
+        ("是否财产被接管或冻结、破产", "否"),
+        ("是否存在弄虚作假、行贿或者其他违法违规行为", "否"),
+        ("是否存在近三年骗取中标和严重违约情况", "否"),
+        ("近三年是否有重大服务质量问题", "否"),
+        ("是否存在单位负责人为同一人或者存在控股、管理关系的不同单位，参加本服务"
+         "投标的情形", "否"),
+        ("企业是否存在因拖欠工人工资或者因发生质量安全事故被有关部门限制在招选"
+         "服务所在地承接工程的", "否"),
+        ("是否对进入拟参加本工程现场的相关人员均进行参加投保，购买人身意外伤害"
+         "保险和安责险", "是"),
+    ]
+    _table(doc, ["序号", "申明的情形", "承诺（是/否）", "备注"],
+           [[str(i), q, a, "无"] for i, (q, a) in enumerate(_DECL, 1)],
+           widths=[1.4, 10.4, 2.6, 1.4], font_size=11,
+           aligns=["center", "left", "center", "center"])
+    _p(doc, f"法定代表人或其委托代理人：{af['agent']}（签字或盖章）", indent=False)
+    _p(doc, today, indent=False)
+
+    # ── 5. 相关情况说明（5.1 / 5.2）──
+    _hp = _h(doc, _TITLES[4], 1)
+    _hp.paragraph_format.page_break_before = True
+    _rel = _related_companies(company_id, str(af.get("legal") or "")) or "无"
+    _p(doc, "5.1 与本单位负责人为同一人的其他企业", bold=True, indent=False)
+    _p(doc, f"经自查，我公司与本单位负责人为同一人的其他企业：{_rel}。",
+       align="justify")
+    _p(doc, "5.2 与本单位存在控股或管理关系的其他企业", bold=True, indent=False)
+    _p(doc, f"经自查，与我公司存在控股或管理关系的其他企业：{_rel}。",
+       align="justify")
+    _p(doc, "我公司参加本次询比不存在与其他投选人单位负责人为同一人或者存在控股、"
+            "管理关系的情形，不存在围标串标、弄虚作假行为。以上情况真实，如有不实，"
+            "愿承担相应法律责任。", align="justify")
+    _p(doc, f"投选人：{co_name}（盖单位公章）", indent=False)
+    _p(doc, f"日期：{today}", indent=False)
+
+    # ── 6. 初步和详细评审条件证明材料 ──
+    _hp = _h(doc, _TITLES[5], 1)
+    _hp.paragraph_format.page_break_before = True
+
+    _h(doc, "6.1 企业资质", 2)
+    _p(doc, f"投选人名称：{co_name}（加盖公章）", indent=False)
+    _q_text = str(company.get("qualification_text") or "").strip()
+    _q_lv = str(company.get("qualification_level") or "").strip()
+    _q_no = str(company.get("qualification_no") or "").strip()
+    _q_auth = str(company.get("qualification_authority") or "").strip()
+    _p(doc, "（1）营业执照：统一社会信用代码 "
+            f"{company.get('business_license_no') or '—'}，"
+            f"企业名称 {co_name}。", align="justify")
+    if _q_text:
+        _p(doc, "（2）土地整治项目规划设计机构资质："
+                f"{_q_text}（{_q_lv or '等级见证书'}），证书编号 {_q_no or '见证书'}，"
+                f"{_q_auth or '发证机关见证书'}颁发，满足询比文件「土地整治项目规划"
+                "设计机构评价推荐证书三级及以上」的要求。", align="justify")
+    _p(doc, "（3）测绘资质：公司持有甲级测绘资质证书，业务范围覆盖工程测量、"
+            "不动产测绘及地理信息系统工程。", align="justify")
+    _asset_block(doc, "营业执照", [("1.营业执照",)],
+                 caption="营业执照", width_cm=style["images"]["license_cm"],
+                 rotate90=bool(style["images"].get("rotate_license", True)),
+                 break_after=False, break_before_first=True)
+    _asset_block(doc, "测绘资质", [("资质证书-甲级测绘资质",
+                                 "9.供应商具有有效期内的测绘资质乙级及以上资质证书")],
+                 caption="测绘资质证书", width_cm=style["images"]["cert_cm"],
+                 break_after=False, break_before_first=True)
+
+    _hp = _h(doc, "6.2 企业业绩", 2)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, "参加评审的企业业绩一览表", size=14, align="center", indent=False,
+       name="宋体")
+    _p(doc, f"投选人名称：{co_name}（加盖公章）　　单位：元", indent=False)
+    _table(doc, ["序号", "项目名称", "合同签订时间", "合同金额",
+                 "合同对应的发票累计金额", "合同内容"],
+           [[str(i), nm, dt, f"{amt}", "详见发票复印件", desc]
+            for i, (nm, dt, amt, _cli, desc) in enumerate(_XUNBI_PERF, 1)],
+           widths=[1.1, 5.4, 2.3, 2.2, 2.6, 3.2], font_size=9.5,
+           aligns=["center", "left", "center", "center", "center", "left"])
+    _p(doc, "注：上述业绩的合同主要页、验收证明及对应发票复印件另册装订，加盖单位"
+            "公章后随本投选文件一并提交。", size=10.5, indent=False)
+
+    _hp = _h(doc, "6.3 财务状况", 2)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, "我公司提供近三年（2023、2024、2025年度）经审计的财务会计报告及报表，"
+            "包括资产负债表、现金流量表、利润表复印件。公司财务状况良好，没有处于"
+            "被责令停业、财务被接管、冻结或破产状态。", align="justify")
+    _asset_block(doc, "财务", [("2024年度财务报告",), ("2025年度审计报告 第",)],
+                 caption="2024年度财务报告及2025年度审计报告",
+                 width_cm=style["images"]["financial_cm"], break_after=False)
+
+    _hp = _h(doc, "6.4 人员要求", 2)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, f"（1）拟派项目负责人：{lead}，"
+            f"{people[0].get('title') if people else ''}，"
+            f"{people[0].get('major') if people else ''}专业，"
+            f"{people[0].get('education') if people else ''}学历，"
+            "持有测绘专业高级工程师职称证书，为我公司正式员工，符合询比文件"
+            "「测绘或土地相关专业中级及以上技术职称」的要求。", align="justify")
+    _p(doc, "（2）项目组其余人员均与我公司签订劳动合同，并连续缴纳社会保险。"
+            "人员职称证书、劳动合同及社保参保证明复印件另附。", align="justify")
+    # 🔴 人员证书图必须与本人一致：公司档案里没有徐作诚的职称证书扫描件，
+    #    此前按「高级工程师——测绘」关键词取到的是**他人**（周建辉）的证书，
+    #    印在徐作诚名下属于材料不实 —— 这里不贴图，改为文字列明证书信息，
+    #    复印件由投标人随附。
+    _p(doc, f"（3）项目负责人证书信息：{people[0].get('title') if people else ''}"
+            f"（{people[0].get('major') if people else ''}），证书编号 "
+            f"{people[0].get('cert_no') or '见证书'}；职称证书及劳动合同、"
+            "社保参保证明复印件另附。", align="justify")
+    _si_imgs = _social_insurance_images(company_id)
+    if _si_imgs:
+        _p(doc, "拟派人员社会保险缴纳证明", bold=True, align="center", indent=False)
+        for _i2, (_nm2, _data2) in enumerate(_si_imgs):
+            _img(doc, _data2, style["images"]["screenshot_cm"],
+                 page_break_before=(_i2 > 0))
+    else:
+        _asset_block(doc, "社会保险权益记录单", [("江苏省社会保险权益记录单",)],
+                     caption="拟派人员社会保险缴纳证明",
+                     width_cm=style["images"]["financial_cm"])
+
+    _hp = _h(doc, "6.5 信誉要求", 2)
+    _hp.paragraph_format.page_break_before = True
+    _p(doc, "我公司近三年未发生过重大质量事故和重大安全事故；投选文件递交截止日期前，"
+            "在“信用中国”网站无失信惩戒记录，未被“国家企业信用信息公示系统”列为"
+            "严重违法失信名单（黑名单）。现作出如下承诺：", align="justify")
+    _p(doc, "1. 我公司参加本次询比前三年内，在经营活动中没有因违法经营受到刑事处罚"
+            "或者责令停产停业、吊销许可证或者执照、较大数额罚款等行政处罚；",
+       align="justify")
+    _p(doc, "2. 我公司未被列入失信被执行人名单、重大税收违法失信主体、政府采购"
+            "严重违法失信行为记录名单；", align="justify")
+    _p(doc, "3. 我公司对所提交的全部资料的真实性、合法性、有效性负责，如有虚假，"
+            "愿承担相应法律责任。", align="justify")
+    _p(doc, f"投选人：{co_name}（盖单位公章）", indent=False)
+    _p(doc, f"法定代表人：{af['legal']}（签字）", indent=False)
+    _p(doc, f"日期：{today}", indent=False)
+    _asset_block(doc, "信用", [("未被列入失信被执行人网站截图",),
+                              ("未被列入重大税收违法失信主体",),
+                              ("未被列入政府采购严重违法失信行为记录名单",),
+                              ("中国政府采购网严重违法失信名单截图",)],
+                 caption="信用记录查询截图",
+                 width_cm=style["images"]["screenshot_cm"], break_after=False,
+                 break_before_first=True)
+
+    # ── 7. 其他 ──
+    _hp = _h(doc, _TITLES[6], 1)
+    _hp.paragraph_format.page_break_before = True
+
+    # 7.1 项目负责人资格一览表（附件6）
+    _h(doc, "7.1 项目负责人资格一览表", 2)
+    _p(doc, f"项目负责人：{lead}", size=14, indent=False)
+    _lp = people[0] if people else {}
+    _grid(doc, [
+        ["姓　名", str(_lp.get("name") or ""), "性　别", str(_lp.get("gender") or ""),
+         "年　龄", str(_lp.get("age") or "")],
+        ["职　务", _lp.get("role") or "项目负责人", "职　称",
+         str(_lp.get("title") or ""), "学　历", str(_lp.get("education") or "")],
+        ["参加工作时间", "", "从事服务建设工作年限", "", "拟任岗位", "项目负责人"],
+        ["证书名称", "职称证书", "专业名称及级别",
+         f"{_lp.get('major') or ''}／{_lp.get('title') or ''}", "", ""],
+        ["证书编号", str(_lp.get("cert_no") or "见证书"), "", "", "", ""],
+    ], widths=[2.4, 4.0, 1.9, 4.0, 1.6, 1.7], font_size=10.5)
+    _p(doc, "曾获荣誉奖励情况：无", size=11, indent=False)
+    _p(doc, "2023 年以来（类似服务描述）业绩", size=11, indent=False)
+    _table(doc, ["服务名称", "服务规模", "本人主要工作", "完成日期"],
+           [[nm, "合同金额 " + f"{int(amt):,}" + " 元", "项目负责人", dt]
+            for nm, dt, amt, _cli, _desc in _XUNBI_PERF[:2]],
+           widths=[7.2, 3.6, 2.8, 2.2], font_size=10.5,
+           aligns=["left", "center", "center", "center"])
+
+    # 7.2 项目组人员一览表（附件7）
+    _h(doc, "7.2 项目组人员一览表", 2)
+    _p(doc, f"投选人名称（盖章）：{co_name}", size=12, indent=False)
+    _table(doc, ["序号", "本服务职务", "姓名", "性别", "年龄", "单位职务", "职称",
+                 "证书名称", "证书编号", "备注"],
+           [[str(i), p.get("role") or "专业技术人员", p.get("name") or "",
+             p.get("gender") or "", str(p.get("age") or ""),
+             p.get("role") or "", p.get("title") or "", "职称证书",
+             str(p.get("cert_no") or "见证书"), ""]
+            for i, p in enumerate(people, 1)],
+           widths=[1.0, 2.2, 1.8, 1.2, 1.2, 2.0, 2.2, 1.8, 2.0, 1.0],
+           font_size=9.5, aligns=["center"] * 10)
+    _p(doc, "说明：对受托人失去诚信、更换关键岗位管理人员的，必须按照合同在支付的"
+            "工程款中扣除约定的违约金，对不经建设单位同意擅自更换的要加倍处罚。",
+       size=10.5, indent=False)
+
+    # 7.3 机具设备配置表（附件8）
+    _h(doc, "7.3 机具设备配置表", 2)
+    _p(doc, f"投选人名称（盖章）：{co_name}", size=12, indent=False)
+    _table(doc, ["序号", "设备名称", "型号规格", "数量", "国别产地", "制造年份",
+                 "用途", "备注"],
+           [["1", "RTK GPS接收机", "南方银河1", "3套", "中国", "2023", "野外测量", "自有"],
+            ["2", "全站仪", "南方NTS-362R", "2台", "中国", "2022", "地形测量", "自有"],
+            ["3", "水准仪", "苏一光DSZ2", "2台", "中国", "2023", "高程测量", "自有"],
+            ["4", "南方CASS成图软件", "CASS 11.0", "4套", "中国", "2024", "内业成图", "正版"],
+            ["5", "无人机", "大疆精灵4RTK", "2架", "中国", "2023", "航拍核查", "自有"],
+            ["6", "绘图仪", "惠普T1708", "1台", "中国", "2022", "成果出图", "自有"],
+            ["7", "图形工作站", "联想P720", "3台", "中国", "2024", "数据处理", "自有"],
+            ["8", "笔记本电脑", "联想ThinkPad", "6台", "中国", "2024", "外业记录", "自有"]],
+           widths=[1.0, 3.6, 3.4, 1.4, 1.8, 1.8, 2.4, 1.4], font_size=10,
+           aligns=["center"] * 8)
+
+    # 7.4 项目组织实施方案 / 质量保障措施 / 进度安排（技术部分 5 分）
+    _h(doc, "7.4 技术方案", 2)
+    md = ""
+    if use_llm:
+        try:
+            md = await _write_xunbi_plan(tender)
+        except Exception as e:
+            logger.warning(f"[投选文件] 技术方案生成失败，用内置框架: {e}")
+            md = ""
+    _md = md or _xunbi_plan_fallback(tender)
+    # 三段作为 7.4 下的三级标题（LLM/框架里是「## 」，降一级）
+    _md = re.sub(r'^##\s+', '### ', _md, flags=re.M)
+    _md_to_docx(doc, _md, None)
+
+    # 7.5 报价表（第六章 报价表格式：按批复地块汇总 + 分项工作内容清单）
+    _h(doc, "7.5 报价表", 2)
+    _p(doc, f"{project}报价表", size=14, align="center", indent=False, name="宋体")
+    _p(doc, f"投选人名称（盖章）：{co_name}　　单位：元", indent=False)
+    _batches = _batch_numbers(tender)
+    _rows = []
+    _n_b = max(len(_batches), 2)
+    for i in range(_n_b):
+        _share = (0.6, 0.4) if _n_b == 2 else (1.0 / _n_b,) * _n_b
+        _amt = int(round(total_yuan * _share[i] / 10) * 10)
+        _rows.append([str(i + 1), _batches[i] if i < len(_batches) else "—",
+                      "以批复文件为准", "—", str(_amt)])
+    _table(doc, ["序号", "地块批文号", "亩数", "每亩单价", "价格"], _rows,
+           widths=[1.4, 7.2, 3.2, 2.0, 2.0], font_size=11)
+    _p(doc, f"总价含税合计费用（税率：6%）：{big}（￥{total_yuan}.00 元）",
+       indent=False)
+    _p(doc, "说明：本项目合同价款形式为固定综合单价，合同总价为批复亩数×每亩综合"
+            "单价；上表价格为按批复文号对应的服务费用汇总，亩数及每亩单价以自然资源"
+            "主管部门批复文件为准，最终结算总价不超过本次投标总报价。", size=10.5,
+       align="justify")
+
+    _p(doc, "分项工作内容报价清单", size=14, align="center", indent=False,
+       name="宋体")
+    _q_rows, _acc = [], 0
+    _items = work_items or _default_work_items()
+    _sum_w = sum(_XUNBI_ITEM_PRICE.values())
+    for i, _it in enumerate(_items, 1):
+        _w = _XUNBI_ITEM_PRICE.get(_it["no"])
+        if _w is None:
+            _w = _sum_w / max(len(_items), 1)
+        _amt = int(round(total_yuan * _w / _sum_w / 10) * 10)
+        if i == len(_items):
+            _amt = total_yuan - _acc          # 尾差放最后一行
+        _acc += _amt
+        _q_rows.append([_it["no"], _it["name"], _it["desc"][:90], "项", "1",
+                        str(_amt), str(_amt)])
+    _table(doc, ["序号", "工作内容", "工作描述", "单位", "数量", "综合单价（元）",
+                 "合价（元）"], _q_rows,
+           widths=[1.2, 4.2, 6.4, 1.2, 1.2, 2.2, 2.2], font_size=9,
+           aligns=["center", "left", "left", "center", "center", "center", "center"])
+    _p(doc, f"合计（含税，税率6%）：{big}（￥{total_yuan}.00 元）", indent=False)
+    _p(doc, "注：1. 上述报价为完成询比文件全部工作内容的全费用综合单价，包括人工费、"
+            "仪器设备使用费、土壤采样检测费、报告编制费、专家评审费、差旅交通费、"
+            "资料打印装订费、企业管理费、利润、规费、增值税及附加等全部费用。",
+       size=10.5, indent=False)
+    _p(doc, "2. 报价一次报定，不接受选择性报价；投选报价超过最高限价 55 万元"
+            "（含税）的按否决投选处理。", size=10.5, indent=False)
+    _p(doc, f"投选人（盖章）：{co_name}", size=12, indent=False)
+    _p(doc, f"法定代表人或授权代表（签字）：{af['agent']}", size=12, indent=False)
+    _p(doc, f"日期：{today}", size=12, indent=False)
+
+    _apply_body_format(doc, style)
+    _center_all_cells(doc)
+    _page_number_footer(doc)
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out))
+    try:
+        _stamp_toc(out, titles=_TITLES, anchors=tuple(_TITLES), style=style)
+    except Exception as e:
+        logger.warning(f"[投选文件] 目录页码写入失败，保留目录域: {e}")
+    logger.info(f"[投选文件] 已生成 {out}（{len(people)} 人，报价 {small} 万元）")
+    return out
+
+
+def _legal_id(af: Dict[str, str], company_id: int) -> str:
+    """法定代表人身份证号：从人员库按姓名取（缺则写「见公司档案」）。"""
+    try:
+        import sqlite3 as _sq
+        c = _sq.connect(str(KB))
+        row = c.execute(
+            "select id_no from company_personnel where company_id=? and name=? "
+            "and coalesce(id_no,'')<>'' limit 1",
+            (int(company_id), str(af.get("legal") or ""))).fetchone()
+        c.close()
+        if row and str(row[0]).strip():
+            return str(row[0]).strip()
+    except Exception:
+        pass
+    return "见公司档案"
+
+
+def _agent_id(people: List[dict], af: Dict[str, str]) -> str:
+    for p in people:
+        if str(p.get("name")) == str(af.get("agent") or "") and p.get("id_no"):
+            return str(p["id_no"])
+    return "见公司档案"
+
+
+def _batch_numbers(tender: dict) -> List[str]:
+    """询比公告里的临时用地批文号（淮资规临地复【2025】0043号 这类）。"""
+    return list(tender.get("batch_numbers") or [])
+
+
+def _default_work_items() -> List[Dict[str, str]]:
+    return [
+        {"no": "1.1", "name": "编制临时用地复垦申请", "desc": "编制临时用地复垦申请材料"},
+        {"no": "1.2", "name": "复垦土壤检测", "desc": "现场采样与监测"},
+        {"no": "1.3", "name": "编制土壤污染调查报告", "desc": "编制土壤污染调查报告并通过评审"},
+        {"no": "2.1", "name": "复垦土壤检测", "desc": "耕地质量评定土壤采样检测"},
+        {"no": "2.2", "name": "编制耕地质量评定报告", "desc": "编制耕地质量评定报告并通过审查"},
+        {"no": "3.1", "name": "临时用地复垦验收申请", "desc": "验收资料提交镇村盖章"},
+        {"no": "3.2", "name": "同意接收临时用地的说明", "desc": "出具同意接收说明"},
+        {"no": "3.3", "name": "编制临时用地复垦验收报告", "desc": "编制验收报告并通过审核"},
+        {"no": "3.4", "name": "临时用地复垦现场验收", "desc": "组织相关部门和专家现场验收"},
+        {"no": "4.1", "name": "备案", "desc": "提交验收备案申请并取得确认文件"},
+        {"no": "5", "name": "复垦保证金退还手续办理", "desc": "办理保证金及耕地占用税退还"},
+    ]
+
+
+async def _write_xunbi_plan(tender: dict, *, llm=None) -> str:
+    """询比技术部分（评分表 2.2.4(2)，5 分）：三段式方案，每段独立生成。"""
+    try:
+        from app.services.llm_service import LLMService
+        llm = llm or LLMService()
+    except Exception:
+        return ""
+    scope = (tender.get("scope") or "")[:1800]
+    items = "；".join(f"{w['no']} {w['name']}" for w in (tender.get("work_items") or []))
+    facts = (
+        f"项目名称：{tender.get('project_name')}\n"
+        f"询比编号：{tender.get('project_no')}\n"
+        f"询比人：{tender.get('purchaser')}\n"
+        f"服务地点：{tender.get('service_address')}\n"
+        f"服务周期：{tender.get('duration_months')} 个月\n"
+        f"服务控制价：{tender.get('max_price_wan')} 万元\n"
+        f"询比范围：{scope}\n"
+        f"分项工作内容：{items}\n"
+    )
+    system = ("你是土地复垦验收技术服务投标文件编写专家，替投标人（江苏众拓测绘有限公司）"
+              "写技术响应方案。文风平实专业，内容必须落在本项目事实上，不编造地名、"
+              "数字和批文号。")
+    sections = [
+        ("项目组织实施方案",
+         "写项目组织实施方案：项目组织机构与职责分工（项目负责人、技术负责人、"
+         "外业组、内业组、质检组）、工作阶段划分（前期准备与资料收集、土壤污染调查、"
+         "耕地质量评定、复垦验收申请与现场验收、备案与保证金退还）、与自然资源、"
+         "农业农村、生态环境部门及镇村的对接机制、成果提交清单。不少于 1300 字。"),
+        ("质量保障措施",
+         "写质量保障措施：质量管理体系与三级校审制度、土壤采样与检测的质量控制"
+         "（布点、采样深度、样品流转、平行样与质控样）、检测机构资质与仪器检定、"
+         "耕地质量等别评定的数据审核、报告编制与专家评审的质量把关、成果归档。"
+         "不少于 1200 字。"),
+        ("进度安排",
+         "写进度安排：按 12 个月服务周期编排各阶段时间节点与里程碑，说明关键路径、"
+         "进度控制措施（周报、节点考核、赶工预案）以及保证按期完成验收备案的措施。"
+         "不少于 1000 字。"),
+    ]
+    sem = asyncio.Semaphore(3)
+
+    async def _one(title: str, brief: str) -> str:
+        user = (
+            f"为下面的询比项目撰写投选文件技术部分的「{title}」。\n\n{facts}\n"
+            f"写作要求：{brief}\n"
+            "用「## 」输出小节标题；每节分 3～5 个自然段，开头总述再写做法、标准、"
+            "责任人和时间；不用项目符号，步骤用「1）2）3）」；不写空话，不出现"
+            "「待补充」「以实际为准」等占位语；不要输出 Markdown 表格。"
+        )
+        async with sem:
+            try:
+                _res = await asyncio.wait_for(
+                    llm.chat_with_reasoning(
+                        messages=[{"role": "user", "content": user}], system=system,
+                        max_tokens=6000, temperature=0.35, disable_thinking=True),
+                    timeout=240)
+                text = str((_res or {}).get("content") or "").strip()
+                if text and len(text) > 400 and "待补充" not in text:
+                    if not text.lstrip().startswith("##"):
+                        text = f"## {title}\n\n" + text
+                    return text
+            except Exception as e:
+                logger.warning(f"[投选文件] 技术方案「{title}」生成失败: {e}")
+        return ""
+
+    parts = await asyncio.gather(*(_one(t, b) for t, b in sections))
+    return "\n\n".join(p for p in parts if p)
+
+
+def _xunbi_plan_fallback(tender: dict) -> str:
+    """LLM 不可用时的技术方案框架（仍按招标三项评审内容成文）。"""
+    name = tender.get("project_name") or "本项目"
+    months = tender.get("duration_months") or 12
+    return (
+        f"## 1. 项目组织实施方案\n\n"
+        f"{name}实行项目负责人负责制。项目负责人对合同履约、成果质量和进度全面负责；"
+        "技术负责人负责技术路线、成果审核和专家评审组织；下设外业组、内业组和质检组，"
+        "分别承担现场采样测量、资料整理报告编制和成果校审工作。\n\n"
+        "工作按五个阶段推进：1）前期准备阶段，收集临时用地批复、勘测定界、复垦方案"
+        "等资料，编制工作大纲并报询比人确认；2）土壤污染调查阶段，完成现场采样、"
+        "样品检测和土壤污染调查报告编制；3）耕地质量评定阶段，确定评定单元，完成"
+        "土壤采样检测、数据整理与耕地质量等别评定报告；4）验收阶段，编制验收申请"
+        "材料报镇村盖章，组织农业农村、自然资源、生态环境等部门和专家现场验收；"
+        "5）备案与退还阶段，向自然资源主管部门提交备案申请，取得同意备案确认文件，"
+        "办理复垦保证金和耕地占用税退还手续。\n\n"
+        "## 2. 质量保障措施\n\n"
+        "公司按质量管理体系运行，实行作业组自检、项目组复核、公司质检三级校审，"
+        "未经校审的成果不得提交。土壤采样执行布点、采样深度和样品流转规定，"
+        "同步采集平行样与质控样；检测工作委托具备资质的检测机构承担，仪器设备"
+        "按期检定。耕地质量评定数据由技术负责人复核，报告经专家评审后定稿。"
+        "全部成果按档案管理要求整理归档，并向询比人提交纸质和电子成果。\n\n"
+        "## 3. 进度安排\n\n"
+        f"服务周期 {months} 个月。第 1～2 月完成资料收集、现场踏勘和工作大纲；"
+        "第 2～5 月完成土壤污染调查和报告编制；第 5～8 月完成耕地质量评定；"
+        "第 8～11 月完成验收申请、现场验收；第 11～12 月完成备案和保证金退还。"
+        "实行周报制度，关键节点向询比人书面汇报；遇雨季等不利因素提前调整作业"
+        "计划，确保按期完成全部工作。\n"
+    )
 
 
 def _company_addr(name: str) -> str:

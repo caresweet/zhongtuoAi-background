@@ -2769,40 +2769,12 @@ async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
 
     people = personnel or select_bid_personnel(
         company_id=company_id, seed=seed, members=5, require_insured=person_si)
-    # 被授权人默认选测绘/土地类高级职称的第一人（询比公告 3.4.1 要求项目负责人
-    # 具有测绘或土地相关专业中级及以上职称），并让他同时任项目负责人
-    _agent = (agent_name or "").strip()
-    if not _agent:
-        for _p0 in people:
-            if ("高级" in str(_p0.get("title") or "")
-                    and any(k in str(_p0.get("major") or "")
-                            for k in ("测绘", "土地"))):
-                _agent = str(_p0.get("name") or "")
-                break
-        if not _agent:
-            _agent = str((people[0] if people else {}).get("name") or "")
-    if _agent:
-        _hit = next((p for p in people if str(p.get("name")) == _agent), None)
-        if _hit is None:
-            try:
-                from app.services.personnel_store import personnel_for
-                _rec = (personnel_for([_agent], company_id) or [None])[0]
-            except Exception:
-                _rec = None
-            if _rec:
-                _hit = {
-                    "id": None, "name": _rec.get("姓名"),
-                    "gender": _rec.get("性别"), "age": _rec.get("年龄"),
-                    "education": _rec.get("学历"), "major": _rec.get("专业"),
-                    "title": _rec.get("职称/职务"),
-                    "certs": _rec.get("执业资格证书") or [], "cert_no": "",
-                    "id_no": "", "phone": "",
-                }
-        if _hit:
-            for _p0 in people:
-                _p0["role"] = "专业技术人员"
-            _hit["role"] = "项目负责人"
-            people = [_hit] + [p for p in people if p is not _hit]
+    # 🔴 询比公告 3.4.1：**项目负责人**须测绘/土地中级以上；被授权人不必是负责人。
+    #    前端会预填公司档案里的受托人（张红艳），她不是技术人员——不能再像大冈
+    #    项目那样把被授权人顶成项目负责人，否则项目负责人资格不符。
+    #    被授权人 = 前端传入（默认公司受托人）；项目负责人 = 选人结果第一人。
+    _agent = (agent_name or "").strip() or str(
+        (people[0] if people else {}).get("name") or "")
 
     # 技术负责人：询比商务评分对技术负责人职称单独计分，取组员中职称最高者
     if len(people) > 1:
@@ -2965,7 +2937,7 @@ async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
     _p(doc, f"法定代表人：{af['legal']}（签字或盖章）", indent=False)
     _p(doc, f"身份证号码：{_legal_id(af, company_id)}", indent=False)
     _p(doc, f"委托代表人：{af['agent']}（签字或盖章）", indent=False)
-    _p(doc, f"身份证号码：{_agent_id(people, af)}", indent=False)
+    _p(doc, f"身份证号码：{_agent_id(people, af, company_id)}", indent=False)
     _p(doc, today, indent=False)
     _p(doc, "", indent=False)
     _p(doc, "附：委托代理人身份证复印件", indent=False)
@@ -3404,10 +3376,23 @@ def _legal_id(af: Dict[str, str], company_id: int) -> str:
     return "见公司档案"
 
 
-def _agent_id(people: List[dict], af: Dict[str, str]) -> str:
+def _agent_id(people: List[dict], af: Dict[str, str], company_id: int = 0) -> str:
+    """被授权人身份证号：先查选人结果，再查人员库（被授权人可能不在项目组里）。"""
+    _name = str(af.get("agent") or "")
     for p in people:
-        if str(p.get("name")) == str(af.get("agent") or "") and p.get("id_no"):
+        if str(p.get("name")) == _name and p.get("id_no"):
             return str(p["id_no"])
+    try:
+        import sqlite3 as _sq
+        c = _sq.connect(str(KB))
+        row = c.execute(
+            "select id_no from company_personnel where company_id=? and name=? "
+            "and coalesce(id_no,'')<>'' limit 1", (int(company_id), _name)).fetchone()
+        c.close()
+        if row and str(row[0]).strip():
+            return str(row[0]).strip()
+    except Exception:
+        pass
     return "见公司档案"
 
 

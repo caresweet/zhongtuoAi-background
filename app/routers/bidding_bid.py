@@ -131,7 +131,9 @@ async def generate_bid(request: BidGenerateRequest):
     req = parse_tender(tender)
     safe = "".join(ch for ch in str(req.get("project_name") or "投标文件")
                    if ch not in '\\/:*?"<>|')[:40]
-    out_name = f"{safe}_投标文件_{uuid.uuid4().hex[:6]}.docx"
+    # 询比项目叫「投选文件」，其余叫「投标文件」（文件名与文档口径一致）
+    _kind = "投选文件" if req.get("bid_format") == "xunbi" else "投标文件"
+    out_name = f"{safe}_{_kind}_{uuid.uuid4().hex[:6]}.docx"
     out = Path(settings.STORAGE_DIR) / "generated" / out_name
     try:
         await build_bid_document(

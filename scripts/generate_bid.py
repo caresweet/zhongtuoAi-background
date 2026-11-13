@@ -32,15 +32,18 @@ async def main() -> int:
 
     from app.services.bidding_bid_builder import build_bid_document
     from app.config import settings
+    from app.services.report_naming import stamped_filename
 
-    out = Path(settings.STORAGE_DIR) / "generated" / args.out
+    # 每次生成带时间戳标识，不覆盖旧稿（业主 2026-11-12）
+    out_name = stamped_filename(args.out)
+    out = Path(settings.STORAGE_DIR) / "generated" / out_name
     p = await build_bid_document(
         tender_path=args.tender, company_id=args.company_id,
         price_wan=args.price, out_path=out, seed=args.seed,
         use_llm=not args.no_llm)
     print("OUTPUT", p)
     try:
-        dl = Path.home() / "Downloads" / args.out
+        dl = Path.home() / "Downloads" / out_name
         shutil.copyfile(p, dl)
         print("DOWNLOAD", dl)
     except Exception as e:

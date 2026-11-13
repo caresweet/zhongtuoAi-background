@@ -26,6 +26,7 @@ async def main() -> int:
     ap.add_argument("--company-id", type=int, default=4)
     ap.add_argument("--price", type=float, required=True, help="投标报价（万元）")
     ap.add_argument("--out", default="投标文件.docx")
+    ap.add_argument("--agent", default="", help="被授权人（同时任项目负责人）；不填取选人结果第一人")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-llm", action="store_true", help="服务方案用内置框架，不调 LLM")
     args = ap.parse_args()
@@ -40,7 +41,7 @@ async def main() -> int:
     p = await build_bid_document(
         tender_path=args.tender, company_id=args.company_id,
         price_wan=args.price, out_path=out, seed=args.seed,
-        use_llm=not args.no_llm)
+        use_llm=not args.no_llm, agent_name=args.agent)
     print("OUTPUT", p)
     try:
         dl = Path.home() / "Downloads" / out_name

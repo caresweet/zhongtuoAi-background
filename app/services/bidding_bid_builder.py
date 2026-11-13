@@ -2082,6 +2082,27 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         company_id=company_id, seed=seed,
         members=max(int((tender.get("staff_min") or {}).get("项目组成员") or 3), 3),
         require_insured=person_si)
+    # 指定了被授权人 → 让他同时担任项目负责人（授权书身份证与成员表口径一致）。
+    # 选人结果里没有他时，从人员库补进来并顶到第一位，保持 1 负责人 + N 组员。
+    if agent_name and people:
+        _hit = next((p for p in people if str(p.get("name")) == agent_name), None)
+        if _hit:
+            for _p0 in people:
+                _p0["role"] = "项目组成员"
+            _hit["role"] = "项目负责人"
+            people = [_hit] + [p for p in people if p is not _hit]
+        else:
+            try:
+                from app.services.personnel_store import personnel_for
+                _rec = (personnel_for([agent_name], company_id) or [None])[0]
+            except Exception:
+                _rec = None
+            if _rec:
+                _rec = dict(_rec)
+                _rec["role"] = "项目负责人"
+                for _p0 in people:
+                    _p0["role"] = "项目组成员"
+                people = [_rec] + people[:max(0, len(people) - 1)]
     texts = _asset_texts(co_name)
     af = _auth_fields(texts, company=company,
                       agent_name=agent_name or str(
@@ -2233,6 +2254,29 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, f"投标人名称（公章）：{co_name}", size=12, indent=False, name="仿宋")
         _p(doc, f"日期：{today}", size=12, indent=False, name="仿宋")
 
+    def _id_pair(name: str):
+        """身份证正反面**并排**（无边框两列表格，正文与授权书共用）。"""
+        _imgs = _asset_images(f"{name} 身份证", limit=4)
+        if not _imgs:
+            return False
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.shared import Cm as _Cm
+        _t = doc.add_table(rows=1, cols=2)
+        _t.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _t.autofit = False
+        for _i, (_nm, _data) in enumerate(_imgs[:2]):
+            _cell = _t.cell(0, _i)
+            _cell.width = _Cm(_imgw["id_card_cm"])
+            _cp = _cell.paragraphs[0]
+            _cp.alignment = 1
+            _cp.paragraph_format.space_after = 0
+            try:
+                _cp.add_run().add_picture(io.BytesIO(_data),
+                                          width=_Cm(_imgw["id_card_cm"]))
+            except Exception as _e:
+                logger.warning(f"[投标文件] 身份证图插入失败: {_e}")
+        return True
+
     def _auth_letter():
         # 按招标文件附表逐行填写：**填写值带下划线**，签名处留下划线空位
         # （业主 2026-11-11：「要保留出下划线的内容」）。
@@ -2254,30 +2298,6 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
         _p(doc, f"单位名称：{co_name}", size=12, indent=False, name="仿宋")
         _p(doc, f"地    址：{af['address']}", size=12, indent=False, name="仿宋")
         _p(doc, f"日    期：{af['date_dot']}", size=12, indent=False, name="仿宋")
-
-        def _id_pair(name: str):
-            _imgs = _asset_images(f"{name} 身份证", limit=4)
-            if not _imgs:
-                return False
-            # 正反面**并排**：用无边框两列表格，比「两张图塞一个段落」稳
-            # （段落里插图到 14.6cm 时 LibreOffice/WPS 会折行成上下两张）
-            from docx.enum.table import WD_TABLE_ALIGNMENT
-            from docx.shared import Cm as _Cm
-            _t = doc.add_table(rows=1, cols=2)
-            _t.alignment = WD_TABLE_ALIGNMENT.CENTER
-            _t.autofit = False
-            for _i, (_nm, _data) in enumerate(_imgs[:2]):
-                _cell = _t.cell(0, _i)
-                _cell.width = _Cm(_imgw["id_card_cm"])
-                _cp = _cell.paragraphs[0]
-                _cp.alignment = 1
-                _cp.paragraph_format.space_after = 0
-                try:
-                    _cp.add_run().add_picture(io.BytesIO(_data),
-                                              width=_Cm(_imgw["id_card_cm"]))
-                except Exception as _e:
-                    logger.warning(f"[投标文件] 身份证图插入失败: {_e}")
-            return True
 
         # 身份证紧跟授权书（人工稿：同一页印完；不另起一整页留白）
         _p(doc, "", size=12, indent=False, name="仿宋")
@@ -2311,11 +2331,18 @@ async def build_compact_bid_document(*, tender_path: str | Path, company_id: int
     def _file_assets(text: str):
         t = str(text)
         if any(k in t for k in ("营业执照", "身份证明")):
-            # 人工稿：文件1 只放营业执照（横放扫描件，旋转 90° 占满整页）
-            _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照",
+            # 招标要求：营业执照等证明文件 **+ 自然人的身份证明**。
+            # 2026-11-13 业主：只放一张营业执照不行，法定代表人身份证要跟在后面；
+            # 扫描件写明是「副本」，图题也按实际文件改。
+            _asset_block(doc, "营业执照", [("1.营业执照",)], caption="营业执照（副本）",
                          width_cm=_imgw["license_cm"],
                          rotate90=bool(_imgw.get("rotate_license", True)),
                          break_after=False)
+            if af.get("legal") and _asset_images(f"{af['legal']} 身份证", limit=1):
+                _lbl = _p(doc, "法定代表人身份证：", size=12, indent=False, name="仿宋")
+                # 营业执照是整页旋转图，身份证另起一页（图题与图片不分家）
+                _lbl.paragraph_format.page_break_before = True
+                _id_pair(af["legal"])
             return
         if "财务" in t:
             # 「上一年度财务报表」= 上一年度审计报告 + 其后的资产负债表/利润表/

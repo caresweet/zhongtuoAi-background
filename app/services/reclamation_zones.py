@@ -54,8 +54,14 @@ def _clean_name(s: str) -> str:
 def _method_degree(name: str) -> tuple[str, str]:
     if "井场" in name:
         return "挖损和压占", "重度"
-    if any(k in name for k in ("表土堆放", "堆土", "表土堆存")):
+    if any(k in name for k in ("堆放", "堆土", "表土堆存")):
         return "压占", "中度"
+    # 管道开挖带 / 沟槽 / 管沟：槽体是挖损，两侧堆土是压占
+    if any(k in name for k in ("管道", "开挖带", "沟槽", "管沟")):
+        return "挖损和压占", "重度"
+    # 基坑、取土场等纯开挖：只有挖损
+    if any(k in name for k in ("基坑", "取土", "开挖")):
+        return "挖损", "重度"
     return "压占", "重度"
 
 

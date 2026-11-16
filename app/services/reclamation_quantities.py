@@ -157,6 +157,29 @@ def _cushion_thickness_m(filled: dict) -> float:
     return v / 100.0 if v > 0 else 0.0
 
 
+def _excavation_area_m2(filled: dict) -> float:
+    """挖损面积（㎡）：优先取显式参数，否则取功能分区里损毁方式含「挖损」的分区合计。
+
+    管道开挖带、沟槽、基坑这类以挖为主的单元，必须单独计量开挖/回填；
+    只算「表土剥离 + 垫层清理」会漏掉槽体土方（2026-11-16 专家批注）。
+    """
+    v = _num((filled or {}).get("excavation_area_m2"))
+    if v > 0:
+        return v
+    try:
+        from app.services.reclamation_zones import zones_from_filled
+        zones = zones_from_filled(filled)
+    except Exception:
+        zones = []
+    return sum(_num(z.get("area_m2")) for z in zones
+               if "挖损" in str(z.get("method") or ""))
+
+
+def _excavation_depth_m(filled: dict) -> float:
+    """平均开挖深度（m）。取不到返回 0 —— 不拿经验深度顶替。"""
+    return _num((filled or {}).get("excavation_depth_m"))
+
+
 def build_quantity_rows(filled: dict) -> List[dict]:
     """→ `[{section, name, unit, qty}]`（与第6章 表6-1 的列一一对应）。
 
@@ -209,10 +232,24 @@ def build_quantity_rows(filled: dict) -> List[dict]:
         add("平整工程", "表土回填", "100m³", _strip_m3 / 100.0)
     add("平整工程", "田面平整", "100m²", strip_m2 / 100.0)
 
-    # （四）恢复水利 —— 沟渠疏通 = 沟渠面积 × 1.5
+    # （四）挖损工程 —— 沟槽/基坑开挖与回填
+    #     挖损面积优先取显式参数，否则取功能分区中损毁方式含「挖损」的分区合计；
+    #     开挖深度必须来自本项目资料，取不到就不出这两项（不拿经验深度顶替）。
+    _exc_m2 = _excavation_area_m2(filled)
+    _exc_d = _excavation_depth_m(filled)
+    if _exc_m2 > 0 and _exc_d > 0:
+        _exc_m3 = _exc_m2 * _exc_d
+        # 表土已按「面积 × 剥离厚度」单列在土壤剥离工程，槽体开挖量扣掉表土层，
+        # 避免同一层土在两张表里重复计价。
+        _top_in_exc = min(_exc_m3, _exc_m2 * _strip_t) if _strip_t > 0 else 0.0
+        _exc_net = _exc_m3 - _top_in_exc
+        add("挖损工程", "沟槽开挖", "100m³", _exc_net / 100.0)
+        add("挖损工程", "沟槽回填", "100m³", _exc_net / 100.0)
+
+    # （五）恢复水利 —— 沟渠疏通 = 沟渠面积 × 1.5
     add("恢复水利工程", "沟渠疏通", "100m³", ditch_m2 * DITCH_FACTOR / 100.0)
 
-    # （五）生物化学 —— 培肥按可剥离地类（耕地+林地）面积（15 t/ha 口径）
+    # （六）生物化学 —— 培肥按可剥离地类（耕地+林地）面积（15 t/ha 口径）
     _farm_m2 = strip_m2
     add("生物化学工程", "土壤培肥（有机肥）", "吨",
         _farm_m2 / 10000.0 * FERT_ORGANIC_T_PER_HA)
@@ -285,6 +322,14 @@ def build_summary(filled: dict) -> str:
         _p.append(f"垫层清理 {hard_m2 * _surf_t:.1f} m³"
                   f"（硬化面积 {hard_m2 / 10000.0:.4f} 公顷 × {_surf_t * 100:.0f} cm）、"
                   f"垃圾外运 {hard_m2 * _surf_t:.1f} m³")
+    _exc_m2 = _excavation_area_m2(filled)
+    _exc_d = _excavation_depth_m(filled)
+    if _exc_m2 > 0 and _exc_d > 0:
+        _exc_m3 = _exc_m2 * _exc_d
+        _top_in_exc = min(_exc_m3, _exc_m2 * _strip_t) if _strip_t > 0 else 0.0
+        _exc_net = _exc_m3 - _top_in_exc
+        _p.append(f"沟槽开挖 {_exc_net:.1f} m³、沟槽回填 {_exc_net:.1f} m³"
+                  f"（挖损面积 {_exc_m2 / 10000.0:.4f} 公顷 × 开挖深度 {_exc_d:.2f} m）")
     if ditch_m2:
         _p.append(f"沟渠疏通 {ditch_m2 * DITCH_FACTOR:.1f} m³")
     _p.append(f"土地翻耕 {strip_m2 / 10000.0:.4f} 公顷、田面平整 {strip_m2 / 10000.0:.4f} 公顷")
@@ -351,6 +396,15 @@ def enrich_filled_data(filled: dict, *, endpoint: str = "", cost_excel: str = ""
     _missing = [k for k in ("topsoil_thickness", "hard_surface_type",
                             "hard_area_m2", "surface_thickness_cm")
                 if not str(filled.get(k) or "").strip()]
+    # 有挖损分区却没有开挖深度 → 沟槽开挖/回填两项出不来，必须显式记缺口
+    try:
+        from app.services.reclamation_zones import zones_from_filled
+        _has_exc = any("挖损" in str(z.get("method") or "")
+                       for z in zones_from_filled(filled))
+    except Exception:
+        _has_exc = False
+    if _has_exc and _excavation_depth_m(filled) <= 0:
+        _missing.append("excavation_depth_m")
     if _missing:
         logger.warning(f"[工程量] 缺设计参数，对应分项不出：{_missing}")
 

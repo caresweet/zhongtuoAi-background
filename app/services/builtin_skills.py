@@ -116,6 +116,13 @@ CATALOG: Tuple[BuiltinSkill, ...] = (
         correction="支持率=100%、反对率=0%；问卷份数/户数与事实卡一致；"
                    "风险分值措施后必须高于措施前",
     ),
+    BuiltinSkill(
+        id="b-calc-004", module="calc", domains=("reclamation",),
+        desc="涉及挖损的必须单列开挖与回填",
+        correction="管道开挖带、沟槽、基坑按「挖损面积 × 开挖深度」单列沟槽开挖与回填量，"
+                   "表6-1 工程量与投资估算同一口径；有挖损分区就必须有开挖深度，"
+                   "缺失写【待补充】，不得只写压占",
+    ),
 
     # ── 外部对接 ──
     BuiltinSkill(

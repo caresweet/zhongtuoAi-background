@@ -83,6 +83,9 @@ _DESIGN_FIELDS = [
     ("表土剥离厚度(cm)", "", "是", "可研/初设；没有就留空，系统会问"),
     ("硬化结构类型", "", "是", "碎石垫层+钢板 / 混凝土面层+垫层"),
     ("硬化面积(公顷)", "", "是", "井场、场站等硬化/压占面积"),
+    ("挖损面积(公顷)", "", "否",
+     "管道开挖带、沟槽、基坑等挖损区域面积；不填则按功能分区中损毁方式含「挖损」的分区合计"),
+    ("平均开挖深度(m)", "", "否", "沟槽/基坑平均开挖深度，用于沟槽开挖与回填工程量"),
     ("面层厚度(cm)", "", "否", "混凝土面层或钢板厚度"),
     ("垫层厚度(cm)", "", "否", "碎石垫层厚度"),
     ("覆土厚度(cm)", "", "否", "复垦覆土厚度，默认同表土剥离厚度"),
@@ -364,6 +367,8 @@ _PAIR_MAP = {
     "表土剥离厚度(cm)": "topsoil_thickness",
     "硬化结构类型": "hard_surface_type",
     "硬化面积(公顷)": "hard_area_ha",
+    "挖损面积(公顷)": "excavation_area_ha",
+    "平均开挖深度(m)": "excavation_depth_m",
     "面层厚度(cm)": "surface_thickness_cm",
     "垫层厚度(cm)": "cushion_thickness_cm",
     "覆土厚度(cm)": "cover_thickness_cm",
@@ -535,6 +540,8 @@ def read_intake_workbook(path: str | Path) -> Optional[Dict[str, Any]]:
         fields["area_m2"] = round(sum(z["area_m2"] for z in zones), 4)
     if fields.get("hard_area_ha"):
         fields["hard_area_m2"] = round(_num(fields.pop("hard_area_ha")) * 10000, 2)
+    if fields.get("excavation_area_ha"):
+        fields["excavation_area_m2"] = round(_num(fields.pop("excavation_area_ha")) * 10000, 2)
     if fields.get("stockpile_area_ha"):
         fields["stockpile_area_m2"] = round(_num(fields.pop("stockpile_area_ha")) * 10000, 2)
 

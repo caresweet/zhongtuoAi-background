@@ -11,6 +11,8 @@
     topsoil_thickness     表土剥离/覆土厚度（存厘米，如 "30"）
     hard_surface_type     硬化结构做法（碎石垫层+钢板 / 混凝土面层+垫层）
     hard_area_m2          硬化/压占面积（平方米）
+    excavation_area_m2    挖损面积（平方米，管道沟槽/基坑）
+    excavation_depth_m    平均开挖深度（米）
     surface_thickness_cm  结构层厚度（厘米）
     cushion_thickness_cm  垫层厚度（厘米，混凝土做法）
     service_years         土地复垦方案服务年限（“36 个月”）
@@ -92,6 +94,16 @@ _HARD_AREA_PATTERNS = (
     # 施工组织设计常写「需清除地面垫层的面积为 2.0048hm2」
     re.compile(r'(?:清除地面垫层|地面垫层|场地铺筑|铺筑)[^。；，]{0,8}?面积'
                r'[^。；，]{0,4}?' + _NUM + r'\s*' + _AREA_UNITS),
+)
+
+# 挖损（管道沟槽、基坑）——面积与开挖深度要单独取，不能并进「硬化/压占」
+_EXC_AREA_PATTERNS = (
+    re.compile(r'(?:挖损|开挖带|沟槽|管沟|基坑)[^。；，]{0,10}?(?:面积|范围)'
+               r'[^。；，]{0,4}?' + _NUM + r'\s*' + _AREA_UNITS),
+)
+_EXC_DEPTH_PATTERNS = (
+    re.compile(r'(?:开挖深度|沟槽深度|槽深)[^。；，\d]{0,6}?'
+               + _NUM + r'\s*' + _LEN_UNITS),
 )
 
 _SERVICE = re.compile(
@@ -202,6 +214,12 @@ def extract_design_params(filled: dict, materials: Iterable[Tuple[str, str]]) ->
     # ③ 硬化/压占面积
     _put_first("hard_area_m2", _HARD_AREA_PATTERNS,
                lambda v, u: _fmt(_area_m2(v, u), 2))
+
+    # ③b 挖损面积 / 平均开挖深度（管道沟槽、基坑单独计量）
+    _put_first("excavation_area_m2", _EXC_AREA_PATTERNS,
+               lambda v, u: _fmt(_area_m2(v, u), 2))
+    _put_first("excavation_depth_m", _EXC_DEPTH_PATTERNS,
+               lambda v, u: _fmt(_cm(v, u) / 100.0, 2))
 
     # ④ 服务年限
     def _svc(v, u):

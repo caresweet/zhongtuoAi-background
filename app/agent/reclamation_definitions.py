@@ -62,7 +62,8 @@ RECLAMATION_CHAPTER_DEFINITIONS = {
     },
     4: {
         "title": "土地复垦方向可行性分析",
-        "description": "土地损毁分析与评定、复垦区土地利用状况、生态环境影响分析、"
+        "description": "土地损毁分析与评定（损毁方式按压占、挖损分别说明）、"
+                       "复垦区土地利用状况、生态环境影响分析、"
                        "土地复垦适宜性评价、水土资源平衡分析、"
                        "生态保护红线及生态空间管控区分析、复垦的目标任务",
         "key_tables": ["临时用地土地利用现状统计表", "评价单元土地损毁情况表",
@@ -87,7 +88,7 @@ RECLAMATION_CHAPTER_DEFINITIONS = {
     6: {
         "title": "土地复垦工程设计及工程量测算",
         "description": "工程设计（工程技术措施、生物化学措施、监测管护措施设计）"
-                       "及工程量测算",
+                       "及工程量测算（涉及挖损的管道沟槽、基坑须单列开挖与回填量）",
         "key_tables": ["工程量测算表"],
         "sections": ["6.1 工程设计", "6.2 工程量测算"],
         "min_words": 1200, "max_words": 1600,
@@ -158,6 +159,8 @@ RECLAMATION_KEY_LABELS: Dict[str, str] = {
     # 设计参数（硬化结构/面积/厚度）
     "hard_surface_type": "硬化结构做法",
     "hard_area_m2": "硬化/压占面积（平方米）",
+    "excavation_area_m2": "挖损面积（平方米）",
+    "excavation_depth_m": "平均开挖深度（米）",
     "surface_thickness_cm": "结构层厚度（厘米）",
     "cushion_thickness_cm": "垫层厚度（厘米）",
     # 土地适宜性评价因子（表4-9）：可研/勘测抽取 → 弹窗 → Excel 模板
@@ -328,6 +331,7 @@ RECLAMATION_CARD_KEYS: List[str] = [
     "land_use_zones",
     "hard_surface_type", "hard_area_m2", "surface_thickness_cm",
     "cushion_thickness_cm",
+    "excavation_area_m2", "excavation_depth_m",
     # 勘测定界 —— 临时用地面积复用既有 `area_m2`/`area_mu`（勘测定界解析器只出 ㎡）
     "area_m2", "area_mu",
     "land_classification", "land_ownership", "boundary_desc", "plot_count",

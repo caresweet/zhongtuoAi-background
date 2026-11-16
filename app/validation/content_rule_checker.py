@@ -39,7 +39,9 @@ def _check_fabricated_regulation(text: str) -> List[tuple]:
         out = []
         for h in (hits or []):
             if isinstance(h, dict):
-                out.append((str(h.get("text") or h.get("regulation") or ""), "疑似编造法规"))
+                # find_hallucinated_regulations 的字段是 value，其他来源可能是 text/regulation
+                out.append((str(h.get("value") or h.get("text")
+                                or h.get("regulation") or ""), "疑似编造法规"))
             else:
                 out.append((str(h), "疑似编造法规"))
         return out

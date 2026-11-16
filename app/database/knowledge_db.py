@@ -249,3 +249,13 @@ def _migrate_add_chat_tables(conn):
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_rs_active ON review_skills(is_active)"
         ))
+
+    # ── builtin_skill_settings: 内置技能开关（缺省启用；管理员可在「内置技能」页关）──
+    if not inspector.has_table("builtin_skill_settings"):
+        conn.execute(text("""
+            CREATE TABLE builtin_skill_settings (
+                skill_id TEXT PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))

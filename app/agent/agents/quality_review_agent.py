@@ -854,6 +854,7 @@ class QualityReviewAgent(BaseAgent):
             severity = rule.get("severity", "warning")
             chapter = rule.get("chapter", 0)
             correction = rule.get("correction", "")
+            source = rule.get("source", "expert")
             if not pattern:
                 continue
             for ch_num, ch_data in chapters.items():
@@ -865,16 +866,27 @@ class QualityReviewAgent(BaseAgent):
                 try:
                     if re.search(pattern, md):
                         needs_regen = not correction
+                        label = "内置技能" if source == "builtin" else "专家规则"
+                        replacement = rule.get("replacement")
+                        if source == "builtin":
+                            suggestion = ("auto_fix" if replacement is not None
+                                          else ("regenerate" if needs_regen else ""))
+                        else:
+                            suggestion = "auto_fix" if correction else "regenerate"
                         issues.append({
                             "chapter": ch_num,
-                            "type": "expert_skill_violation",
+                            "type": ("builtin_skill_violation" if source == "builtin"
+                                     else "expert_skill_violation"),
                             # 🔴 修复：无 correction 的专家规则违反必须整章重写（suggestion=regenerate），
                             #     但原 severity 多为 warning/error，而 _classify_issue 只认 critical 才进重写队列，
                             #     导致违规只做日志统计、从不触发重写。这里强制提升为 critical。
                             "severity": "critical" if needs_regen else severity,
-                            "message": f"第{ch_num}章违反专家规则：{desc}",
+                            "message": f"第{ch_num}章违反{label}：{desc}",
                             "correction": correction,
-                            "suggestion": "auto_fix" if correction else "regenerate",
+                            "pattern": pattern,
+                            "replacement": replacement,
+                            "skill_rule_id": rule.get("skill_id"),
+                            "suggestion": suggestion,
                         })
                 except re.error:
                     continue
@@ -1563,6 +1575,17 @@ class QualityReviewAgent(BaseAgent):
             new_md = re.sub(r'[（(]全文共\d+字[，,][^）)]*[）)]', '', new_md)
             new_md = re.sub(r'```json\s*[\s\S]*?```', '', new_md)
             fixed = new_md != markdown
+
+        elif issue_type == "builtin_skill_violation":
+            # 内置技能规则：按 pattern → replacement 直接替换（replacement 为空串 = 删除）
+            pattern = str(issue.get("pattern") or "")
+            replacement = issue.get("replacement")
+            if pattern and replacement is not None:
+                try:
+                    new_md = re.sub(pattern, str(replacement), new_md)
+                    fixed = new_md != markdown
+                except re.error:
+                    fixed = False
 
         elif issue_type == "org_name_error":
             # 🔴 基准取**本报告所属公司**，不再是写死的江苏众拓 ——

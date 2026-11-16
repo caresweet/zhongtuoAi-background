@@ -1140,6 +1140,18 @@ def _get_chapter_specific_requirements(num: int) -> str:
 _learning_hints_cache = {"hints": "", "updated": 0}
 
 
+def _with_builtin_hints(base: str, domain: str) -> str:
+    """在专家/用户 skill 之后追加系统内置技能（不依赖数据库，永远生效）。"""
+    try:
+        from app.services.builtin_skills import hints_for
+        extra = hints_for(domain)
+    except Exception:
+        extra = ""
+    if not extra:
+        return base
+    return base + extra
+
+
 def _get_expert_skill_hints(chapter_num: int, domain: str = "stability") -> str:
     """加载专家蒸馏的审核 skill + 用户报告要求，注入生成 prompt 预防问题。
 
@@ -1155,7 +1167,7 @@ def _get_expert_skill_hints(chapter_num: int, domain: str = "stability") -> str:
         from app.config import settings
         db_path = settings.DATA_DIR / "knowledge_base.db"
         if not db_path.exists():
-            return ""
+            return _with_builtin_hints("", domain)
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         # 🔴 用户报告要求（无条件注入，不按章节过滤）
@@ -1194,9 +1206,10 @@ def _get_expert_skill_hints(chapter_num: int, domain: str = "stability") -> str:
                     lines.append(f"- {ch}{r['rule_desc']}：{r['correction']}")
             parts.append("\n".join(lines))
 
-        return "\n".join(parts) + "\n" if parts else ""
+        return _with_builtin_hints(
+            "\n".join(parts) + "\n" if parts else "", domain)
     except Exception:
-        return ""
+        return _with_builtin_hints("", domain)
 
 
 def _get_learning_hints() -> str:

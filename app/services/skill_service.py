@@ -366,7 +366,12 @@ def _parse_skills_json(content: str) -> List[Dict]:
 
 
 async def get_active_skills(domain: str = "stability") -> Dict[str, Any]:
-    """获取活跃的审核 skill（规则 + 文本 + 用户要求）。"""
+    """获取活跃的审核 skill（规则 + 文本 + 用户要求）。
+
+    数据来源两处：`review_skills` 表（专家蒸馏/用户要求/自动提炼）
+    + `builtin_skills`（系统出厂）。数据库不可用时仍返回内置技能。
+    """
+    rows = []
     try:
         from app.database.knowledge_db import async_session
         from sqlalchemy import text
@@ -377,36 +382,51 @@ async def get_active_skills(domain: str = "stability") -> Dict[str, Any]:
                 WHERE domain = :domain AND is_active = 1
                 ORDER BY id
             """), {"domain": domain})).fetchall()
-
-        rules = []
-        texts = []
-        requirements = []  # 🔴 用户报告要求（无条件注入）
-        for r in rows:
-            if r.skill_type == "rule" and r.rule_pattern:
-                rules.append({
-                    "pattern": r.rule_pattern,
-                    "desc": r.rule_desc or "",
-                    "severity": r.severity or "warning",
-                    "correction": r.correction or "",
-                    "chapter": r.chapter_num or 0,
-                })
-            elif r.skill_type == "user_requirement" and (r.rule_desc or r.correction):
-                requirements.append({
-                    "id": r.id,
-                    "desc": r.rule_desc or "",
-                    "correction": r.correction or "",
-                    "chapter": r.chapter_num or 0,
-                })
-            elif r.skill_type == "text" and (r.rule_desc or r.correction):
-                texts.append({
-                    "desc": r.rule_desc or "",
-                    "correction": r.correction or "",
-                    "chapter": r.chapter_num or 0,
-                })
-        return {"rules": rules, "texts": texts, "requirements": requirements, "total": len(rows)}
     except Exception as e:
         logger.warning(f"get_active_skills failed: {e}")
-        return {"rules": [], "texts": [], "requirements": [], "total": 0}
+
+    rules = []
+    texts = []
+    requirements = []  # 🔴 用户报告要求（无条件注入）
+    for r in rows:
+        if r.skill_type == "rule" and r.rule_pattern:
+            rules.append({
+                "pattern": r.rule_pattern,
+                "desc": r.rule_desc or "",
+                "severity": r.severity or "warning",
+                "correction": r.correction or "",
+                "chapter": r.chapter_num or 0,
+                "skill_id": r.id,
+                "source": "expert",
+            })
+        elif r.skill_type == "user_requirement" and (r.rule_desc or r.correction):
+            requirements.append({
+                "id": r.id,
+                "desc": r.rule_desc or "",
+                "correction": r.correction or "",
+                "chapter": r.chapter_num or 0,
+            })
+        elif r.skill_type == "text" and (r.rule_desc or r.correction):
+            texts.append({
+                "desc": r.rule_desc or "",
+                "correction": r.correction or "",
+                "chapter": r.chapter_num or 0,
+                "skill_id": r.id,
+                "source": "expert",
+            })
+
+    from app.services.builtin_skills import rules_for, texts_for
+    builtin_rules = rules_for(domain)
+    builtin_texts = texts_for(domain)
+    rules.extend(builtin_rules)
+    texts.extend(builtin_texts)
+
+    return {
+        "rules": rules, "texts": texts, "requirements": requirements,
+        "total": len(rows) + len(builtin_rules) + len(builtin_texts),
+        "expert_total": len(rows),
+        "builtin_total": len(builtin_rules) + len(builtin_texts),
+    }
 
 
 async def get_user_requirements(domain: str = "stability") -> List[Dict[str, Any]]:

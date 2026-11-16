@@ -1129,6 +1129,15 @@ def _plan_chunks(chapter) -> List[List[Tuple[str, List[str], int]]]:
     return [[sub] for sub in chapter[1]]
 
 
+def _with_builtin_hints(system: str) -> str:
+    """追加系统内置技能（投标域：检索/工具/计算/外部对接/审核）。"""
+    try:
+        from app.services.builtin_skills import hints_for
+        return system + hints_for("bidding")
+    except Exception:
+        return system
+
+
 async def _gen_chunk(llm, system: str, facts: str, chapter_title: str, chunk,
                      prior: str) -> str:
     outline, target = [], 0
@@ -1206,8 +1215,9 @@ async def _write_plan(tender: dict, *, llm=None) -> str:
         f"预算/最高限价：{tender.get('budget_wan')} 万元\n"
         f"采购内容：{scope}\n"
     )
-    system = ("你是招标投标文件编写专家，替供应商（江苏众拓测绘有限公司）写投标响应文件。"
-              "文风平实专业，所有内容必须落在本项目事实上，不编造地名、数字和批文号。")
+    system = _with_builtin_hints(
+        "你是招标投标文件编写专家，替供应商（江苏众拓测绘有限公司）写投标响应文件。"
+        "文风平实专业，所有内容必须落在本项目事实上，不编造地名、数字和批文号。")
 
     sem = asyncio.Semaphore(4)      # 控制并发，避免触发接口限流
 
@@ -3441,9 +3451,10 @@ async def _write_xunbi_plan(tender: dict, *, llm=None) -> str:
         f"询比范围：{scope}\n"
         f"分项工作内容：{items}\n"
     )
-    system = ("你是土地复垦验收技术服务投标文件编写专家，替投标人（江苏众拓测绘有限公司）"
-              "写技术响应方案。文风平实专业，内容必须落在本项目事实上，不编造地名、"
-              "数字和批文号。")
+    system = _with_builtin_hints(
+        "你是土地复垦验收技术服务投标文件编写专家，替投标人（江苏众拓测绘有限公司）"
+        "写技术响应方案。文风平实专业，内容必须落在本项目事实上，不编造地名、"
+        "数字和批文号。")
     sections = [
         ("对项目的理解与总体工作思路",
          "写对项目的理解与总体工作思路：临时用地复垦验收的政策依据（《土地复垦条例》"

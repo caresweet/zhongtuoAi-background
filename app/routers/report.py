@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, Depends, Form, HTTPException, UploadFile, F
 from fastapi.responses import StreamingResponse
 
 from app.database.auth_db import get_auth_db
-from app.deps import get_current_user, is_staff
+from app.deps import get_current_user, is_staff, require_staff
 from app.models.user import User
 
 from app.schemas.report import (
@@ -1127,10 +1127,31 @@ async def distill_review_skills(request: dict):
 
 @router.get("/reviews/skills", response_model=ApiResponse)
 async def get_review_skills(domain: str = "stability"):
-    """获取当前的审核 skill（供审核 agent 和生成使用）。"""
+    """获取当前的审核 skill（专家蒸馏 + 系统内置，供审核 agent 和生成使用）。"""
     from app.services import skill_service
     skills = await skill_service.get_active_skills(domain)
     return ApiResponse(message="审核 skill", data=skills)
+
+
+@router.get("/reviews/builtin-skills", response_model=ApiResponse)
+async def get_builtin_skills(domain: str = "stability", module: str = "",
+                             _: User = Depends(require_staff)):
+    """系统内置技能目录（审核/检索/工具/计算/外部对接），按域过滤。"""
+    from app.services.builtin_skills import catalog
+    items = catalog(domain=domain, module=(module or None))
+    return ApiResponse(message="内置技能", data={"total": len(items), "items": items})
+
+
+@router.put("/reviews/builtin-skills/{skill_id}", response_model=ApiResponse)
+async def update_builtin_skill(skill_id: str, body: dict = Body(...),
+                               _: User = Depends(require_staff)):
+    """启用/停用一条内置技能（缺省启用；停用后不再注入 prompt、不再审核）。"""
+    from app.services.builtin_skills import set_enabled
+    result = set_enabled(skill_id, bool(body.get("enabled", True)))
+    if not result.get("updated"):
+        raise HTTPException(status_code=400,
+                            detail=result.get("message") or "保存失败")
+    return ApiResponse(message="已更新", data=result)
 
 
 @router.post("/reviews/auto-extract", response_model=ApiResponse)

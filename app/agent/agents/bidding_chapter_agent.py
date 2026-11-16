@@ -50,6 +50,16 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _with_builtin(text: str) -> str:
+    """追加系统内置技能（检索/工具/计算/外部对接/审核），按投标域过滤。"""
+    try:
+        from app.services.builtin_skills import hints_for
+        return text + hints_for("bidding")
+    except Exception as e:      # pragma: no cover - 兜底路径
+        logger.warning(f"[投标] 读取内置技能失败: {e}")
+        return text
+
+
 def _system_prompt() -> str:
     """投标的行文规则优先读 `app/content_rules/bidding_style.md`（+ common）。
 
@@ -60,10 +70,11 @@ def _system_prompt() -> str:
         from app.validation.content_guardrails import AI_BUZZWORDS
         rules = load_domain_rules("bidding", buzzwords="、".join(AI_BUZZWORDS))
         if rules:
-            return "你是招标投标文件编写专家，替供应商写投标（磋商）响应文件。\n" + rules
+            return _with_builtin(
+                "你是招标投标文件编写专家，替供应商写投标（磋商）响应文件。\n" + rules)
     except Exception as e:      # pragma: no cover - 兜底路径
         logger.warning(f"[投标] 读取 content_rules 失败，用内置规则: {e}")
-    return _SYSTEM_PROMPT
+    return _with_builtin(_SYSTEM_PROMPT)
 
 
 class BiddingChapterAgent(BaseAgent):

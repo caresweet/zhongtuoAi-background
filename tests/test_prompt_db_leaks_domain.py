@@ -213,9 +213,12 @@ def _kb_with_stability_skill(tmp_path, monkeypatch):
 
 
 def test_expert_skill_hints_domain_filtered(_kb_with_stability_skill):
-    """`_get_expert_skill_hints` 按域过滤：稳评有、复垦空。"""
-    assert "稳评专家意见" in mo._get_expert_skill_hints(2, "stability")
-    assert mo._get_expert_skill_hints(2, "reclamation") == ""
+    """专家 skill 按域过滤；系统内置技能不依赖数据库、所有域生效。"""
+    stab = mo._get_expert_skill_hints(2, "stability")
+    rec = mo._get_expert_skill_hints(2, "reclamation")
+    assert "稳评专家意见" in stab
+    assert "稳评专家意见" not in rec          # 数据库行不串域
+    assert "内置技能" in rec                   # 内置技能对所有域生效
 
 
 def test_get_few_shot_with_skills_domain_filtered(_kb_with_stability_skill):

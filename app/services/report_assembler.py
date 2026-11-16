@@ -1368,6 +1368,17 @@ class ReportAssembler:
             self._fix_doc_government_names(doc, filled)
         except Exception as _gve:
             logger.warning(f"政府称谓归一跳过: {_gve}")
+
+        # 🔴 附件编号最终重排：装配后段可能重新加/改过附件标题，
+        #    在保存前以最终文档为准再排一次（清单行与逐项标题各自 1..N）。
+        if getattr(self, "_domain", "stability") == "reclamation":
+            try:
+                _idx = [i for i, p in enumerate(doc.paragraphs)
+                        if p.text.strip() == "附件清单"]
+                if _idx:
+                    self._renumber_appendix_numbers(doc, _idx[-1])
+            except Exception as _are:
+                logger.warning(f"附件编号最终重排跳过: {_are}")
         doc.save(str(outpath))
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
         return f"generated/{filename}"

@@ -62,7 +62,13 @@ async def _polish_text(llm, md: str, system: str, timeout: float) -> str:
             llm.chat(messages=msgs, system=system,
                      max_tokens=budget, temperature=0.2),
             timeout=timeout)
-    return str((res or {}).get("content") if isinstance(res, dict) else res or "").strip()
+    text = str((res or {}).get("content") if isinstance(res, dict) else res or "").strip()
+    # 去掉代码围栏与「好的，以下是…」前言；只保留从第一个标题开始的正文
+    text = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", text).strip()
+    m = re.search(r"(?m)^#{1,4}\s+", text)
+    if m and m.start() > 0:
+        text = text[m.start():]
+    return text.strip()
 
 
 def _chunks(md: str, limit: int = 7000) -> List[str]:

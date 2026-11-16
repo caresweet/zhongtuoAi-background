@@ -69,3 +69,18 @@ def test_zero_opposition_with_50_percent_context_not_flagged():
 def test_score_100_is_valid():
     issues = find_data_validity_issues("措施前稳评总分100分。")
     assert not [i for i in issues if "评分" in i.get("description", "")]
+
+
+def test_stability_abbreviation_and_percent_repairs():
+    from app.services.report_content_repairs import (
+        fix_percent_decimals, fix_stability_abbreviations)
+    out, n = fix_stability_abbreviations(
+        "稳评实施单位开展稳评工作。\n## 稳评标题\n| 稳评 | 列 |")
+    assert out.count("社会稳定风险评估") == 2
+    assert "## 稳评标题" in out and "| 稳评 |" in out
+    assert n == 2
+
+    out2, n2 = fix_percent_decimals("支持率100%，反对率0%。100.0% 不变。")
+    assert "100.0%" in out2 and "0.0%" in out2
+    assert "100.0.0%" not in out2
+    assert n2 == 2

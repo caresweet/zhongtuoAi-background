@@ -261,6 +261,34 @@ class SpecChecker:
             checks=checks,
         )
 
+    @staticmethod
+    def _company_style(target: str):
+        """公司现行版式（与规范模板冲突时以它为准）；无对应槽位返回 None。"""
+        slot = {"1级标题": "h1", "2级标题": "h2", "3级标题": "h3",
+                "正文": "body"}.get(str(target or ""))
+        if not slot:
+            return None
+        try:
+            from app.agent.chapter_catalog import typography
+            return typography("stability", slot)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _run_east_asia_font(run) -> str:
+        """取 run 的中文字体（w:eastAsia）；没设返回空串。
+
+        `run.font.name` 读的是西文字体，中文正文常被设成 Times New Roman，
+        用它判中文字体会把「仿宋」误报成「Times New Roman」。
+        """
+        try:
+            from docx.oxml.ns import qn
+            rPr = run._element.rPr
+            rf = rPr.rFonts if rPr is not None else None
+            return str(rf.get(qn("w:eastAsia")) or "") if rf is not None else ""
+        except Exception:
+            return ""
+
     @classmethod
     def _check_rule(cls, doc: Document, rule: FormatRule) -> RuleCheck:
         """Check a single format rule against the document.
@@ -288,12 +316,17 @@ class SpecChecker:
 
                 # Check font
                 if rule.font:
-                    actual_font = run.font.name
+                    actual_font = cls._run_east_asia_font(run) or run.font.name
                     if actual_font:
                         # Normalize: 仿宋_GB2312 ~ 仿宋
                         actual_normalized = actual_font.replace("_GB2312", "")
                         rule_normalized = rule.font.replace("_GB2312", "")
-                        if actual_normalized != rule_normalized:
+                        # 🔴 公司版式口径：一级黑体 22pt / 三级宋体 14pt / 正文宋体 12pt
+                        #    （业主选型，见 chapter_catalog._TYPO）。规范模板是旧版
+                        #    宋体小三/仿宋四号，不能拿它判现行成品不合格。
+                        _alt = cls._company_style(rule.target)
+                        _co_h1 = bool(_alt and actual_normalized == _alt[0])
+                        if actual_normalized != rule_normalized and not _co_h1:
                             all_ok = False
                             issues.append(
                                 f"「{rule.target}」字体应为{rule.font}，"
@@ -306,7 +339,11 @@ class SpecChecker:
                     expected_pt = CN_FONT_SIZES.get(rule.font_size_cn)
                     if expected_pt and run.font.size:
                         actual_size = run.font.size
-                        if abs(actual_size - expected_pt) > cls.PT_TOLERANCE:
+                        _alt = cls._company_style(rule.target)
+                        _ok_company = bool(
+                            _alt and abs(actual_size - Pt(_alt[1])) <= cls.PT_TOLERANCE)
+                        if abs(actual_size - expected_pt) > cls.PT_TOLERANCE \
+                                and not _ok_company:
                             all_ok = False
                             issues.append(
                                 f"「{rule.target}」字号应为{rule.font_size_cn}"

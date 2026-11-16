@@ -677,6 +677,30 @@ def fix_government_names(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     return out, n
 
 
+def fix_stability_abbreviations(md: str) -> Tuple[str, int]:
+    """正文不用「稳评」简称（内容规则）；标题/表格/图片行不动。"""
+    out, n = [], 0
+    for line in str(md or "").splitlines():
+        s = line.strip()
+        if s and not s.startswith(("#", "|", "![", "图 ")):
+            new, k = re.subn(r'稳评', '社会稳定风险评估', line)
+            n += k
+            line = new
+        out.append(line)
+    return "\n".join(out), n
+
+
+def fix_percent_decimals(md: str) -> Tuple[str, int]:
+    """百分比统一保留一位小数（100% → 100.0%）。"""
+    return re.subn(r'(?<![\d.])(\d+)%(?!\.)', r'\1.0%', str(md or ""))
+
+
+def fix_vague_survey(md: str) -> Tuple[str, int]:
+    """「以现状调查确认结果为准」改成具体对象。"""
+    return re.subn(r'以现状调查确认结果为准',
+                   '以现状调查确认的权属、地类、面积为准', str(md or ""))
+
+
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                               state: Optional[Dict[str, Any]] = None) -> List[str]:
     logs: List[str] = []
@@ -700,6 +724,9 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_att = fix_attachment_ref(md)
         md, n_gov = fix_government_names(
             md, ((state or {}).get("filled_data") or {}))
+        md, n_abbr = fix_stability_abbreviations(md)
+        md, n_pct = fix_percent_decimals(md)
+        md, n_vague = fix_vague_survey(md)
         if str(key) == "7":
             md, n_date = fix_date_order(md)
             if n_date:
@@ -737,6 +764,12 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                 logs.append(f"第{key}章 修正附件指向 {n_att} 处")
             if n_gov:
                 logs.append(f"第{key}章 统一政府称谓 {n_gov} 处")
+            if n_abbr:
+                logs.append(f"第{key}章 展开「稳评」简称 {n_abbr} 处")
+            if n_pct:
+                logs.append(f"第{key}章 百分比补一位小数 {n_pct} 处")
+            if n_vague:
+                logs.append(f"第{key}章 模糊调查话术具体化 {n_vague} 处")
     n_count = fix_risk_count(chapters)
     if n_count:
         logs.append(f"风险条数统一 {n_count} 处")

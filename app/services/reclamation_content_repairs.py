@@ -1156,6 +1156,13 @@ def fix_investment_wording(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     return out, n
 
 
+def fix_standard_codes(md: str) -> Tuple[str, int]:
+    """标准号错字/格式归一（批注：GB/T21010-20017）。"""
+    out, n = re.subn(r'GB/T\s*21010\s*[-—]\s*20017',
+                     'GB/T 21010-2017', md)
+    return out, n
+
+
 def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                                 filled: Dict[str, Any],
                                 land_table_caption: str = "",
@@ -1215,6 +1222,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                       if _no in (6, 12) else (md, 0))
         md, n_fml = fix_price_formula(md)
         md, n_reg = fix_regulation_duplicates(md)
+        md, n_std = fix_standard_codes(md)
         md, n_inv = fix_investment_wording(md, filled or {})
         from app.services.report_content_repairs import fix_government_names
         md, n_gov = fix_government_names(md, filled or {})
@@ -1258,7 +1266,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                          ("硬化面积来源", n_e), ("补面积统计表", n_area),
                          ("复垦方向措辞", n_dir), ("运距统一", n_haul),
                          ("请示抬头", n_auth), ("价差公式", n_fml),
-                         ("法规重复", n_reg), ("投资口径", n_inv),
+                         ("法规重复", n_reg), ("标准号", n_std), ("投资口径", n_inv),
                          ("政府称谓", n_gov),
                          ("补其他费用表", n_other), ("阶段费用对齐", n_sch),
                          ("悬空表句", n_dangle), ("表引用重定向", n_ref)):

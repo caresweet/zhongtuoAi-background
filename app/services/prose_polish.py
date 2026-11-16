@@ -4,7 +4,7 @@
 用户反馈（2026-11-16）：「很多语句不通顺」。确定性规则只能断长句、并残句，
 缺字/词语粘连/多层从句还得让模型顺一遍。约束：
     · 只做语言润色：数字、名称、文号、标题、表格、图占位一律不许动；
-    · 改完做**硬校验**（数字多重集、标题集合、表格行数、长度 0.8～1.2），
+    · 改完做**硬校验**（数字多重集、标题集合、表格行数、长度 0.6～1.5），
       任何一项不通过就丢弃，保留原文；
     · 只处理体检有问题的章（长句/段首雷同/套话），不整本重写。
 """
@@ -35,16 +35,23 @@ def _table_rows(md: str) -> int:
                if line.strip().startswith("|"))
 
 
-def _passes(orig: str, new: str) -> bool:
-    if not new or len(new) < len(orig) * 0.8 or len(new) > len(orig) * 1.2:
-        return False
+def _check(orig: str, new: str) -> str:
+    """返回不通过原因；空串 = 通过。"""
+    if not new:
+        return "空输出"
+    if len(new) < len(orig) * 0.6 or len(new) > len(orig) * 1.5:
+        return f"长度异常 {len(orig)}→{len(new)}"
     if sorted(_numbers(orig)) != sorted(_numbers(new)):
-        return False
+        return "数字被改动"
     if _headings(orig) != _headings(new):
-        return False
+        return "标题被改动"
     if _table_rows(orig) != _table_rows(new):
-        return False
-    return True
+        return "表格行数被改动"
+    return ""
+
+
+def _passes(orig: str, new: str) -> bool:
+    return not _check(orig, new)
 
 
 async def _polish_text(llm, md: str, system: str, timeout: float) -> str:
@@ -134,8 +141,9 @@ async def polish_chapters(chapters: Dict[Any, Dict[str, Any]], llm=None,
                 logger.warning(f"[润色] 第{no}章失败: {e}")
                 ok = False
                 break
-            if not _passes(part, text):
-                logger.warning(f"[润色] 第{no}章校验不通过（{len(part)} 字块），保留原文")
+            _why = _check(part, text)
+            if _why:
+                logger.warning(f"[润色] 第{no}章未采用：{_why}（{len(part)} 字块）")
                 ok = False
                 break
             new_parts.append(text)

@@ -72,7 +72,11 @@ BLOCKING_PATTERNS: List[Tuple[str, str]] = [
     (r"请提供|请补充|请填写", "对话式指令残留"),
     (r"根据实际情况|视情况而定", "泛化不确定表达"),
     (r"具体.*?待定|暂未确定|尚未明确", "待定表达"),
-    (r"有关单位|相关部门", "责任主体泛化表达"),
+    # 🔴 只在「由/责成 + 相关部门 + 动词」这种把责任推给泛称时才算泛化；
+    #    「党委政府或相关部门意见」「与区级相关部门沟通」是正常表述
+    (r"(?:由|责成|督促|要求)\s*(?:有关|相关)部门\s*"
+     r"(?:应|应当|要|必须|负责|及时|加强|落实|处理|解决)",
+     "责任主体泛化表达"),
     (r"\{\{[^}]+\}\}|____+|<[^>]{1,50}>", "占位符残留"),
     (r"\[.*?\]\(.*?\)", "Markdown链接残留"),
     (r"好的[，,]|当然可以[，,]|下面我来|我将为您", "口语/对话式表达"),
@@ -90,7 +94,8 @@ DATA_VALIDITY_PATTERNS: List[Tuple[str, str]] = [
     (r'(?<!\d)-(\d+(?:\.\d+)?)\s*(?:分|人|户|亩|㎡|平方米|万元|%|元|公顷)',
      "出现负数数据"),
     # Opposition rate > 0% (land acquisition projects must have 0% opposition)
-    (r'反对(?:率|人数|比例).*?(?:[1-9]\d*(?:\.\d+)?\s*%|(?:[1-9]\d*人))',
+    # 🔴 限定在同一句内，避免「反对率为0%。…3家单位」跨句误抓
+    (r'反对(?:率|人数|比例)[^。；\n]{0,16}?(?:[1-9]\d*(?:\.\d+)?\s*%|[1-9]\d*人)',
      "征地项目出现反对率/反对人数，合规项目不应有反对"),
     # Overly precise numbers (4+ decimal places → likely fabricated)
     (r'(?<!\d)\d+\.\d{4,}(?!\d)', "数据过于精确（4位以上小数），疑似编造"),
@@ -211,6 +216,18 @@ def find_blocking_issues(text: str) -> List[Dict[str, str]]:
     masked = re.sub(ALLOWED_MISSING_MARKER, "", text or "")
     issues: List[Dict[str, str]] = []
     for pattern, desc in BLOCKING_PATTERNS:
+        if desc == "占位符残留":
+            # 签字/日期栏的下划线是给人手签的，不是未替换占位符
+            for m in re.finditer(pattern, masked):
+                line_start = masked.rfind("\n", 0, m.start()) + 1
+                line = masked[line_start:m.end() + 10]
+                if any(k in line for k in ("签字", "签名", "评估助理", "资料员",
+                                           "编制人", "负责人", "日期", "盖章")):
+                    continue
+                issues.append({"type": "blocking_wording",
+                               "description": desc, "pattern": pattern})
+                break
+            continue
         if re.search(pattern, masked):
             issues.append({"type": "blocking_wording", "description": desc, "pattern": pattern})
     return issues
@@ -231,6 +248,11 @@ def find_data_validity_issues(text: str) -> List[Dict[str, str]]:
     for pattern, desc in DATA_VALIDITY_PATTERNS:
         matches = list(re.finditer(pattern, masked))
         for m in matches[:3]:  # Report up to 3 instances per pattern
+            # 年份规则只查「项目年份」，法规的施行/修正/通过日期是合法引用
+            if desc.startswith("年份"):
+                seg = masked[max(0, m.start() - 30):m.end() + 15]
+                if any(k in seg for k in ("施行", "修正", "通过", "公布", "出版")):
+                    continue
             issues.append({
                 "type": "data_validity",
                 "description": desc,
@@ -374,7 +396,12 @@ def validate_numeric_ranges(markdown: str) -> List[Dict[str, str]]:
                           "message": f"{label}偏大({lo}-{hi}{unit}): {m.group(0)}"})
 
     # ── Survey samples ──
-    for m in re.finditer(r'(?:发放|回收|调查|问卷).*?(\d+)\s*(?:份|人)', markdown):
+    # 🔴 限定同一句内，且跳过「单位问卷 3 份」——3 家单位是正常的，不是个人问卷样本
+    for m in re.finditer(
+            r'(?:发放|回收|调查|问卷)[^。；\n]{0,30}?(\d+)\s*(?:份|人)', markdown):
+        seg = markdown[max(0, m.start() - 20):m.end() + 10]
+        if "单位" in seg:
+            continue
         val = int(m.group(1))
         lo, hi, unit, label = NUMERIC_RANGES["total_samples"]
         if val < lo:
@@ -383,7 +410,7 @@ def validate_numeric_ranges(markdown: str) -> List[Dict[str, str]]:
                           "message": f"{label}偏小({lo}-{hi}{unit}): {m.group(0)}"})
 
     # ── Support rate ──
-    for m in re.finditer(r'支持率[^%]*?(\d+\.?\d*)\s*%', markdown):
+    for m in re.finditer(r'支持率[^%\n]{0,10}?(\d+\.?\d*)\s*%', markdown):
         val = float(m.group(1))
         if val < 0 or val > 100:
             issues.append({"type": "invalid_range", "field": "support_rate",
@@ -449,7 +476,10 @@ def find_hallucinated_regulations(markdown: str) -> List[Dict[str, str]]:
         # 检查 citation 前是否有"征告/预公告/拟征告/公告"等词
         start = max(0, markdown.find(citation) - 8)
         context = markdown[start:start + 8 + len(citation)]
-        return any(kw in context for kw in ['征告', '拟征告', '预公告', '征收土地预公告', '公告'])
+        return any(kw in context for kw in [
+            '征告', '拟征告', '预公告', '征收土地预公告', '公告',
+            '发改', '批复文号', '备案', '核准', '环评', '水保', '规划许可',
+        ])
 
     for citation in citations:
         if _is_project_doc(citation):

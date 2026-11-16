@@ -366,6 +366,17 @@ async def main():
 
     path = assemble_full(state)
     print(f"\n✅ 完成 → {path}")
+    # 🔴 交付闸门结果（覆盖矩阵 + 字数预算）：不可交付时把阻断项打出来
+    try:
+        from app.services.coverage_matrix import summarize as _sum_gate
+        print("🔎 " + _sum_gate({"coverage": state.get("_coverage") or {},
+                                 "word_budget": state.get("_word_budget") or {}}))
+        if state.get("_deliverable") is False:
+            print("⛔ 不可交付：" + "；".join(
+                str(b.get("message") or "") for b in
+                (state.get("_deliverable_blockers") or [])[:6]))
+    except Exception as _ge:
+        print("⚠️ 闸门摘要打印失败:", _ge)
 
     # 🔴 写回界面会话 —— 界面与脚本共用一份状态（下次脚本/界面看到的是同一份）
     if args.session.strip():

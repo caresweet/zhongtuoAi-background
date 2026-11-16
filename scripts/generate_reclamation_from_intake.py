@@ -175,6 +175,18 @@ async def main() -> int:
         print("[润色] 跳过:", _pe, flush=True)
 
     out = report_assembler.assemble(state)
+    # 🔴 交付闸门结果（覆盖矩阵 + 字数预算）
+    try:
+        from app.services.coverage_matrix import summarize as _sum_gate
+        print("[闸门] " + _sum_gate({"coverage": state.get("_coverage") or {},
+                                     "word_budget": state.get("_word_budget") or {}}),
+              flush=True)
+        if state.get("_deliverable") is False:
+            print("[闸门] ⛔ 不可交付：" + "；".join(
+                str(b.get("message") or "") for b in
+                (state.get("_deliverable_blockers") or [])[:6]), flush=True)
+    except Exception as _ge:
+        print("[闸门] 摘要打印失败:", _ge, flush=True)
     src = settings.STORAGE_DIR / out
     # 🔴 每次生成都带时间戳标识，不覆盖上一版（业主 2026-11-12）—— 旧的批注稿
     #    与新稿同名过，打开时点错看到的还是旧批注。

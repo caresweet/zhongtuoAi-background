@@ -351,6 +351,14 @@ async def main():
         print("⚠️ 图片目录构建跳过:", _ie)
 
     state = await generate_all(state, only)
+
+    # 语句润色：只处理体检有问题的章，数字/标题/表格校验不过就保留原文
+    try:
+        from app.services.prose_polish import polish_chapters
+        _polished = await polish_chapters(state.get("chapters") or {})
+        print("🪄 润色章节：", _polished)
+    except Exception as _pe:
+        print("⚠️ 润色跳过:", _pe)
     # 🔴 这份 pkl 已**降级为「离线兜底」**：只有在没传 `--session` 时才会被读到。
     #    写的时候打上来源标记，下次谁再用它，日志会明说「这份是从哪个会话导出的」，
     #    不会再出现「不知道 pkl 对应哪个界面会话」的情况。

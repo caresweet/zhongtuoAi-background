@@ -166,6 +166,14 @@ async def main() -> int:
             traceback.print_exc()
         await asyncio.sleep(1)
 
+    # 语句润色：只处理体检有问题的章，数字/标题/表格校验不过就保留原文
+    try:
+        from app.services.prose_polish import polish_chapters
+        _polished = await polish_chapters(state.get("chapters") or {}, llm)
+        print("[润色]", _polished, flush=True)
+    except Exception as _pe:
+        print("[润色] 跳过:", _pe, flush=True)
+
     out = report_assembler.assemble(state)
     src = settings.STORAGE_DIR / out
     # 🔴 每次生成都带时间戳标识，不覆盖上一版（业主 2026-11-12）—— 旧的批注稿

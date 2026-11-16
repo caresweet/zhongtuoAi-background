@@ -1361,9 +1361,43 @@ class ReportAssembler:
             self._inject_audit_comments(doc, state)
         except Exception as _ce:
             logger.warning(f"Audit comment injection skipped: {_ce}")
+
+        # 🔴 政府称谓最后归一：评审表由模板/提取值渲染，不走章节 markdown 修补，
+        #    「街道办事处审核」这类模板句只能在这里统一（马头镇就是镇）。
+        try:
+            self._fix_doc_government_names(doc, filled)
+        except Exception as _gve:
+            logger.warning(f"政府称谓归一跳过: {_gve}")
         doc.save(str(outpath))
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
         return f"generated/{filename}"
+
+    def _fix_doc_government_names(self, doc, filled) -> None:
+        """全文档统一政府称谓（含评审表、表格单元格、页眉页脚不处理）。"""
+        from app.services.report_content_repairs import fix_government_names
+        _filled = filled or {}
+
+        def _fix_p(p) -> None:
+            text = p.text
+            if not text or "街" not in text and "镇" not in text and "乡" not in text:
+                return
+            new, n = fix_government_names(text, _filled)
+            if not n or new == text:
+                return
+            if p.runs:
+                p.runs[0].text = new
+                for r in p.runs[1:]:
+                    r.text = ""
+            else:
+                p.add_run(new)
+
+        for p in doc.paragraphs:
+            _fix_p(p)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        _fix_p(p)
 
     def _fill_table_data(self, doc, filled):
         """Fill table cells with computed data from project facts + survey data."""
@@ -7099,9 +7133,12 @@ class ReportAssembler:
         # 🔴 清单与逐项标题的编号可能不同步（实测清单「附件1」、标题「附件2」，
         #    专家批注读成两件同名附件）。以出现顺序为准重排，两边都从 1 连续。
         try:
-            _start = next(i for i, p in enumerate(doc.paragraphs)
-                          if p.text.strip() == "附件清单")
-            self._renumber_appendix_numbers(doc, _start)
+            # 🔴 取**最后一个**「附件清单」：目录域里也可能有同名条目，
+            #    从目录那条开始找会一路撞到「14 附件」Heading 1 提前 break。
+            _idx = [i for i, p in enumerate(doc.paragraphs)
+                    if p.text.strip() == "附件清单"]
+            if _idx:
+                self._renumber_appendix_numbers(doc, _idx[-1])
         except Exception as _re_err:
             logger.warning(f"[复垦附件] 编号重排失败（保持原样）: {_re_err}")
 

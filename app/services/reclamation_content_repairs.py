@@ -1191,6 +1191,12 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         orig = md
         from app.services.report_content_repairs import fix_truncated_paragraphs
         md, n_tr = fix_truncated_paragraphs(md)
+        from app.services.report_content_repairs import fix_punctuation_runs
+        md, n_punct = fix_punctuation_runs(md)
+        from app.validation.content_guardrails import (
+            merge_broken_sentences, split_long_sentences)
+        md, n_long = split_long_sentences(md, 80)
+        md, n_merge = merge_broken_sentences(md)
         md, n_u = fix_units(md)
         md, n_d = dedupe_sections(md)
         md, n_s = fix_service_period(md, filled or {})
@@ -1212,6 +1218,21 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_inv = fix_investment_wording(md, filled or {})
         from app.services.report_content_repairs import fix_government_names
         md, n_gov = fix_government_names(md, filled or {})
+        if _no == 6 and "工程量计算说明" not in md:
+            try:
+                from app.services.data_sources import (
+                    source_table, table_as_markdown)
+                from app.services.reclamation_quantities import build_derivation_table
+                _blk = table_as_markdown(build_derivation_table(filled or {}),
+                                         "工程量计算说明")
+                _src = table_as_markdown(
+                    source_table("reclamation", filled or {}),
+                    "数据来源与计算口径说明")
+                if _blk or _src:
+                    md = md.rstrip() + "\n\n" + _blk + "\n" + _src
+                    logs.append("第6章 追加工程量计算说明与数据来源")
+            except Exception as _de:
+                logger.warning(f"[第6章] 计算说明追加失败: {_de}")
         md, n_area = fill_area_table(
             md, filled or {}, _no, (known_captions or {}).get(_no, ())) if _no == 4 else (md, 0)
         md, n_other = add_other_cost_table(md, filled or {}) if _no == 7 else (md, 0)
@@ -1221,10 +1242,14 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         # 🔴 表引用重定向放在最后：前面可能刚补了表/改了表题，要以最终表号为准
         md, n_ref = fix_table_refs(
             md, _no, (known_captions or {}).get(_no, ())) if _no else (md, 0)
+        if orig.endswith("\n") and not md.endswith("\n"):
+            md += "\n"
         if md != orig:
             ch["markdown"] = md
         bits = []
-        for label, k in (("截断残句", n_tr), ("单位hm²", n_u), ("重复段", n_d),
+        for label, k in (("截断残句", n_tr), ("标点归一", n_punct),
+                         ("长句断句", n_long), ("断句回并", n_merge),
+                         ("单位hm²", n_u), ("重复段", n_d),
                          ("服务年限", n_s), ("使用期起止", n_ue),
                          ("剥离地类", n_tl), ("复垦方向/面积", n_r),
                          ("地块数", n_plot),

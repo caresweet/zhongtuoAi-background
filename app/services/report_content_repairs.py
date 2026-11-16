@@ -632,6 +632,13 @@ def fill_participant_signatures(chapters: Dict[Any, Dict[str, Any]],
     return 1
 
 # ── 入口 ────────────────────────────────────────────────────
+def fix_punctuation_runs(md: str) -> Tuple[str, int]:
+    """连续标点/多余空格归一（「，，」「。。」）。不动 markdown 表格分隔行。"""
+    out, n = re.subn(r'([，。；：、])\1+', r'\1', md)
+    out2, n2 = re.subn(r'[ \t]{2,}', ' ', out)
+    return out2, n + n2
+
+
 def fix_government_names(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     """统一政府称谓：镇就是「XX镇人民政府」，街道就是「XX街道办事处」。
 
@@ -681,6 +688,11 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
             continue
         orig = md
         md, n_tr = fix_truncated_paragraphs(md)
+        md, n_punct = fix_punctuation_runs(md)
+        from app.validation.content_guardrails import (
+            merge_broken_sentences, split_long_sentences)
+        md, n_long = split_long_sentences(md, 80)
+        md, n_merge = merge_broken_sentences(md)
         md, n_area = fix_area_sum(md)
         md, n_law = fix_fake_laws(md)
         md, n_garble = fix_garble(md)
@@ -692,10 +704,27 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
             md, n_date = fix_date_order(md)
             if n_date:
                 logs.append(f"第7章 评审日期调整 {n_date} 处")
+        if str(key) == "6":
+            try:
+                from app.services.data_sources import as_markdown
+                _src = as_markdown("stability", ((state or {}).get("filled_data") or {}))
+                if _src and "数据来源与计算口径说明" not in md:
+                    md = md.rstrip() + "\n\n" + _src
+                    logs.append("第6章 追加数据来源与计算口径说明")
+            except Exception:
+                pass
+        if orig.endswith("\n") and not md.endswith("\n"):
+            md += "\n"
         if md != orig:
             ch["markdown"] = md
             if n_tr:
                 logs.append(f"第{key}章 截断残句 {n_tr} 处")
+            if n_punct:
+                logs.append(f"第{key}章 标点/空格归一 {n_punct} 处")
+            if n_long:
+                logs.append(f"第{key}章 长句断句 {n_long} 处")
+            if n_merge:
+                logs.append(f"第{key}章 断句回并 {n_merge} 处")
             if n_area:
                 logs.append(f"第{key}章 总面积改为地类分项之和（{n_area} 处）")
             if n_law:

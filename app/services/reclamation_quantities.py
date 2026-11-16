@@ -285,6 +285,73 @@ def build_quantity_table(filled: dict) -> Optional[dict]:
             "rows": out}
 
 
+def build_derivation_table(filled: dict) -> Optional[dict]:
+    """表6-2 工程量计算说明：每个分项的公式、结果、依据（回答「数怎么来的」）。"""
+    rows = _rows(filled)
+    if not rows:
+        return None
+    total_m2 = _total_m2(filled, rows)
+    if total_m2 <= 0:
+        return None
+    strip_m2 = _area_of(rows, level="一级", names=_STRIP_CLASSES)
+    hard_m2 = _hard_area_m2(filled, total_m2)
+    ditch_m2 = _area_of(rows, level="二级", names=("沟渠",), contains=True)
+    _strip_t = _strip_thickness_m(filled)
+    _surf = _surface_type(filled)
+    _surf_t = _surface_thickness_m(filled)
+    _cush_t = _cushion_thickness_m(filled)
+    _exc_m2 = _excavation_area_m2(filled)
+    _exc_d = _excavation_depth_m(filled)
+
+    out: List[List[str]] = []
+
+    def add(name: str, formula: str, result: str, basis: str) -> None:
+        out.append([name, formula, result, basis])
+
+    if strip_m2 and _strip_t > 0:
+        _v = strip_m2 * _strip_t
+        add("表土剥离", f"{strip_m2 / 10000.0:.4f} 公顷 × {_strip_t * 100:.0f} cm",
+            f"{_v:.1f} m³", "勘测定界可剥离地类面积 + 设计剥离厚度")
+        add("表土回填", "同表土剥离量（剥离表土全部回覆）", f"{_v:.1f} m³",
+            "表土剥离量")
+    if _surf == "concrete" and hard_m2 > 0 and _surf_t > 0 and _cush_t > 0:
+        add("混凝土面层拆除", f"{hard_m2 / 10000.0:.4f} 公顷 × {_surf_t * 100:.0f} cm",
+            f"{hard_m2 * _surf_t:.1f} m³", "硬化面积 + 面层厚度")
+        add("垫层清除", f"{hard_m2 / 10000.0:.4f} 公顷 × {_cush_t * 100:.0f} cm",
+            f"{hard_m2 * _cush_t:.1f} m³", "硬化面积 + 垫层厚度")
+        add("垃圾外运", "面层拆除量 + 垫层清除量",
+            f"{hard_m2 * (_surf_t + _cush_t):.1f} m³", "拆除/清除工程量合计")
+    elif _surf == "gravel" and hard_m2 > 0 and _surf_t > 0:
+        add("垫层清理", f"{hard_m2 / 10000.0:.4f} 公顷 × {_surf_t * 100:.0f} cm",
+            f"{hard_m2 * _surf_t:.1f} m³", "硬化面积 + 垫层厚度")
+        add("垃圾外运", "同垫层清理量", f"{hard_m2 * _surf_t:.1f} m³",
+            "垫层清理量")
+    if _exc_m2 > 0 and _exc_d > 0:
+        _exc_m3 = _exc_m2 * _exc_d
+        _top = min(_exc_m3, _exc_m2 * _strip_t) if _strip_t > 0 else 0.0
+        add("沟槽开挖", f"{_exc_m2 / 10000.0:.4f} 公顷 × {_exc_d:.2f} m − 已剥离表土 {_top:.1f} m³",
+            f"{_exc_m3 - _top:.1f} m³", "挖损面积 × 平均开挖深度（避免与表土剥离重复）")
+        add("沟槽回填", "同沟槽开挖量（原土回填）", f"{_exc_m3 - _top:.1f} m³",
+            "沟槽开挖量")
+    if ditch_m2:
+        add("沟渠疏通", f"{ditch_m2:.1f} ㎡ × {DITCH_FACTOR}", f"{ditch_m2 * DITCH_FACTOR:.1f} m³",
+            "沟渠面积 × 疏通系数")
+    add("土地翻耕/田面平整", f"可剥离地类面积 {strip_m2 / 10000.0:.4f} 公顷",
+        f"{strip_m2 / 10000.0:.4f} 公顷", "勘测定界地类面积")
+    if strip_m2:
+        add("土壤培肥", f"{strip_m2 / 10000.0:.4f} 公顷 × 15 t/ha（有机肥）/ 0.75 t/ha（复合肥）",
+            f"有机肥 {strip_m2 / 10000.0 * FERT_ORGANIC_T_PER_HA:.3f} t；"
+            f"复合肥 {strip_m2 / 10000.0 * FERT_COMPOUND_T_PER_HA:.3f} t",
+            "耕地培肥标准")
+    if not out:
+        return None
+    return {
+        "caption": "表6-2 工程量计算说明",
+        "headers": ["分项", "计算式", "结果", "依据"],
+        "rows": out,
+    }
+
+
 def _fmt_qty(v: float) -> str:
     """工程量与样本同口径：保留到小数点后 3~4 位，去掉多余的 0。"""
     s = f"{float(v):.4f}".rstrip("0").rstrip(".")

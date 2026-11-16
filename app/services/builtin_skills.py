@@ -129,6 +129,13 @@ CATALOG: Tuple[BuiltinSkill, ...] = (
                    "表6-1 工程量与投资估算同一口径；有挖损分区就必须有开挖深度，"
                    "缺失写【待补充】，不得只写压占",
     ),
+    BuiltinSkill(
+        id="b-calc-005", module="calc",
+        desc="关键数据必须带来源和算式",
+        correction="面积→勘测定界；户数/问卷→调查统计表；金额→投资估算表；"
+                   "工程量写「面积 × 厚度/深度」的算式。来源不明的数不写，"
+                   "算不出的写【待补充】并说明缺什么",
+    ),
 
     # ── 外部对接 ──
     BuiltinSkill(
@@ -153,6 +160,12 @@ CATALOG: Tuple[BuiltinSkill, ...] = (
         id="b-audit-004", module="audit",
         desc="关键数据不用模糊词",
         correction="不要写「大约/若干/左右 + 数字」，给实测值或【待补充】",
+    ),
+    BuiltinSkill(
+        id="b-audit-005", module="audit",
+        desc="语句要通顺：短句为主，一句一事",
+        correction="主谓宾完整，不用多层从句；每句不超过 60 字；"
+                   "不出现「操作方式为将土…」这类缺字、断句或词语粘连",
     ),
 )
 

@@ -37,7 +37,9 @@ def test_project_card_keys_seam_stability_is_the_stored_list():
     """稳评字段清单逐字等于 `_PROJECT_CARD_KEYS`（单源，未复制第二份）。"""
     assert catalog.project_card_keys("stability") == mo._PROJECT_CARD_KEYS
     assert catalog.project_card_keys(None) == mo._PROJECT_CARD_KEYS
-    assert len(mo._PROJECT_CARD_KEYS) == 59
+    # 2026-11-16：新增 5 个行政区划字段（township_type/township_gov/city/county/
+    # natural_resources_bureau），59 → 64
+    assert len(mo._PROJECT_CARD_KEYS) == 64
 
 
 def test_project_card_keys_reclamation_is_its_own_list():

@@ -2526,13 +2526,21 @@ class ReportAssembler:
         """第4章「参与人员签字」：在标签下插入签名库的手写签名图。"""
         from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
         from docx.shared import Cm as _Cm, Pt as _Pt
-        from app.services.personnel_signature import load_index, signature_for
+        from app.services.personnel_signature import (
+            load_index, signature_or_placeholder)
 
         filled = filled or {}
-        names = list(getattr(self, "_selected_personnel", None)
-                     or filled.get("_selected_personnel") or [])
+        # 🔴 与前置工作组名单同源（人员库 / 勾选人员）；取不到才退回签名库键表。
+        names = [str(p.get("姓名") or "").strip()
+                 for p in (self._load_company_personnel() or [])
+                 if str((p or {}).get("姓名") or "").strip()]
+        if not names:
+            names = list(getattr(self, "_selected_personnel", None)
+                         or filled.get("_selected_personnel") or [])
         if not names:
             names = list(load_index().keys())
+        seen = set()
+        names = [n for n in names if not (n in seen or seen.add(n))]
         if not names:
             return
         target = None
@@ -2587,7 +2595,7 @@ class ReportAssembler:
                 r0._element.rPr.rFonts.set(qn("w:eastAsia"), FONT_SONGTI)
                 r0.font.size = _Pt(10.5)
                 p1 = c1.paragraphs[0]; p1.alignment = 1
-                sig = signature_for(str(nm))
+                sig = signature_or_placeholder(str(nm))
                 if sig:
                     try:
                         p1.add_run().add_picture(sig, height=_Cm(1.0))
@@ -6222,15 +6230,21 @@ class ReportAssembler:
            无边框、无表头行、统一小四(12pt)。此前做成 4 列表格是错的
            （业主反馈：不要边框、不要「姓名/分工」表头行、字号不对）。
 
-        人员 = 用户勾选的人；签名 = 该人的手写签名图，没有就留空供手签。
+        人员 = **前置「稳评工作组人员及分工情况」同一份名单**
+        （`_load_company_personnel()`：人员库按公司过滤，勾选了就按勾选）；
+        签名 = 该人的手写签名图，没有就用「(此处签名)」占位图。
         """
-        try:
-            from app.services.personnel_store import personnel_for
-            people = personnel_for(getattr(self, "_selected_personnel", None) or None,
-                                  self._company_id())
-        except Exception as e:
-            logger.warning(f"签字块取人员失败: {e}")
-            return
+        # 🔴 名单必须与前置工作组名单同源：两处各查各的就会出现
+        #    「前面写项目组成员是甲、乙，签字却是丙、丁」（业主 2026-11-16 实测）。
+        people = self._load_company_personnel()
+        if not people:
+            try:
+                from app.services.personnel_store import personnel_for
+                people = personnel_for(getattr(self, "_selected_personnel", None) or None,
+                                       self._company_id())
+            except Exception as e:
+                logger.warning(f"签字块取人员失败: {e}")
+                return
         if not people:
             return
 

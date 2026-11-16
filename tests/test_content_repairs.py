@@ -340,17 +340,17 @@ def test_drop_missing_sys_table_refs():
     assert "以勘测定界成果为准" in out
 
 
-def test_fill_participant_signatures():
-    """第4章「参与人员签字」不能只有三个空标签。"""
-    from app.services.report_content_repairs import fill_participant_signatures
+def test_replace_participant_signature_block():
+    """第4章「参与人员签字」整节交给装配器按人员库渲染（名单与前置工作组一致）。"""
+    from app.services.report_content_repairs import replace_participant_signature_block
 
-    md = ("## 第4章\n\n### （五）参与人员签字\n\n评估专业人员：\n\n评估助理：\n\n"
-          "资料员：\n\n## 第5章\n")
+    md = ("## 第4章\n\n### （五）参与人员签字\n\n评估专业人员：陈春、刘利伟、安如月\n\n"
+          "评估助理：____________________\n\n资料员：____________________\n\n## 第5章\n")
     chapters = {4: {"markdown": md}}
-    st = {"filled_data": {"leader": "王海涛"},
-          "selected_personnel": ["徐作诚", "郝怡佳"]}
-    assert fill_participant_signatures(chapters, st) == 1
+    assert replace_participant_signature_block(chapters) == 1
     out = chapters[4]["markdown"]
-    assert "王海涛" in out and "徐作诚" in out
-    assert "____" in out
-    assert "第5章" in out
+    assert "[SYS_TABLE:4-5]" in out
+    assert "评估专业人员：陈春" not in out
+    assert "（五）参与人员签字" in out and "## 第5章" in out
+    # 幂等：再跑一次不再改
+    assert replace_participant_signature_block(chapters) == 0

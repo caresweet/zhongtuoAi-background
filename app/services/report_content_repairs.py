@@ -572,63 +572,44 @@ def drop_missing_sys_table_refs(chapters: Dict[Any, Dict[str, Any]],
     return changed
 
 
-# ── ⑩ 第4章「（五）参与人员签字」不能只有三个空标签 ──────────
-def fill_participant_signatures(chapters: Dict[Any, Dict[str, Any]],
-                                state: Optional[Dict[str, Any]] = None) -> int:
-    """把评估人员姓名与手写签字线补进第4章「参与人员签字」。
+# ── ⑩ 第4章「（五）参与人员签字」交给装配器按**同一份工作组名单**渲染 ──
+def replace_participant_signature_block(chapters: Dict[Any, Dict[str, Any]]) -> int:
+    """把「（五）参与人员签字」整节正文换成 `[SYS_TABLE:4-5]` 标记。
 
-    专家批注 2026-11-12：该节只有「评估专业人员/评估助理/资料员」三个标签，
-    没有姓名也没有签字线。姓名取用户勾选的报告人员（或事实卡组长），
-    其余角色留手写空位。
+    专家批注（2026-11-12 / 2026-11-16）：
+      · 该节不能只有「评估专业人员/评估助理/资料员」三个空标签；
+      · 签字的人必须和前置「稳评工作组人员及分工情况」里的项目组成员**对得上**。
+
+    LLM 会把知识库模板里那套老团队名单（陈春、刘利伟、安如月…）连人带角色抄进来，
+    而前置名单来自**人员库**（`company_personnel`）—— 两处必然对不上。
+    所以正文只留章标题，人员与签名图统一由装配器
+    `_render_personnel_signature_table()` 按人员库渲染：
+        编写单位：…
+        编写时间：…
+        姓名（职务）：[手写签名图 / (此处签名) 占位图]
     """
-    if not isinstance(state, dict):
-        return 0
     ch4 = chapters.get(4) or chapters.get("4")
     if not isinstance(ch4, dict):
         return 0
     md = str(ch4.get("markdown") or "")
     if "参与人员签字" not in md:
         return 0
-    f = state.get("filled_data") or {}
-    names = [str(x).strip() for x in (state.get("selected_personnel")
-             or f.get("_selected_personnel") or []) if str(x).strip()]
-    leader = str(f.get("leader") or "").strip()
-    if names:
-        if leader and leader not in names:
-            names = [leader] + names
-    else:
-        # 没勾选人员时用**签名库**里有人签字的那几位（与签字图一一对应）
-        try:
-            from app.services.personnel_signature import load_index
-            names = list(load_index().keys())
-        except Exception:
-            names = []
-        if not names and leader:
-            names = [leader]
     lines = md.split("\n")
-    start = next((i for i, ln in enumerate(lines)
-                  if ln.strip().lstrip("#").strip().startswith("（五）参与人员签字")), None)
+
+    def _is_heading(ln: str) -> bool:
+        s = ln.strip().lstrip("#").strip().strip("*").strip()
+        return s.startswith("（五）参与人员签字")
+
+    start = next((i for i, ln in enumerate(lines) if _is_heading(ln)), None)
     if start is None:
         return 0
     end = next((i for i in range(start + 1, len(lines))
                 if lines[i].strip().startswith("#")), len(lines))
-    body = "\n".join(lines[start + 1:end])
-    if "____" in body or any(n in body for n in names):
-        return 0
-    new_body = [
-        "",
-        "评估专业人员：" + ("、".join(names) if names
-                          else "____________________"),
-        "",
-        "评估助理：____________________",
-        "",
-        "资料员：____________________",
-        "",
-        # 🔴 不能单独一行全是下划线：Markdown 会把它当分隔线（---/___）整行吃掉
-        "参与人员签字：____________________　　____________________　　____________________",
-        "",
-    ]
-    ch4["markdown"] = "\n".join(lines[:start + 1] + new_body + lines[end:])
+    body = lines[start + 1:end]
+    if any("[SYS_TABLE:4-5]" in ln or "[SYS_TABLE:4—5]" in ln for ln in body):
+        return 0                                  # 已是标记，幂等
+    ch4["markdown"] = "\n".join(
+        lines[:start + 1] + ["", "[SYS_TABLE:4-5]", ""] + lines[end:])
     return 1
 
 # ── 入口 ────────────────────────────────────────────────────
@@ -785,7 +766,7 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
     n_t6 = drop_missing_sys_table_refs(chapters, state)
     if n_t6:
         logs.append(f"第6章删除缺失地类表的引用 {n_t6} 处")
-    n_sig = fill_participant_signatures(chapters, state)
+    n_sig = replace_participant_signature_block(chapters)
     if n_sig:
-        logs.append("第4章参与人员签字已补姓名与签字线")
+        logs.append("第4章参与人员签字改为按人员库名单 + 签名图渲染")
     return logs

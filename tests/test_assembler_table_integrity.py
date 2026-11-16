@@ -552,3 +552,37 @@ def test_signature_section_uses_signature_images():
     t = d.tables[0]
     assert t._tbl.tblPr.get(qn("w:tblCaption")) == "_signature"
     assert t._tbl.findall(".//" + qn("wp:inline"))
+
+
+def test_signature_index_heals_stale_absolute_paths():
+    """index.json 里是别的机器的绝对路径时，按本机同名文件找回来。"""
+    from app.services.personnel_signature import _resolve_path
+
+    entry = {"path": "/Users/someone-else/storage/personnel_signatures/陈春.png",
+             "template_media": "image8.png"}
+    real = _resolve_path("陈春", entry)
+    assert real and real.endswith("陈春.png")
+
+
+def test_signature_section_uses_roster_from_front_matter():
+    """（五）参与人员签字 的名单必须与前置「工作组人员及分工情况」同源。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from app.services.report_assembler import ReportAssembler
+
+    roster = [{"姓名": "陈春", "职称/职务": "高级工程师"},
+              {"姓名": "汪菲菲", "职称/职务": "高级工程师"}]
+    d = Document()
+    a = ReportAssembler()
+    a._load_company_personnel = lambda: list(roster)
+    a._cv = lambda key, default=None: "江苏众拓项目代理咨询有限公司"
+    a._session_state = {"filled_data": {"report_month": "2026-11"}}
+    a._render_personnel_signature_table(d, 4)
+
+    text = "\n".join(p.text for p in d.paragraphs)
+    assert "编写单位：江苏众拓项目代理咨询有限公司" in text
+    assert "编写时间：2026年11月" in text
+    assert "陈春（高级工程师）：" in text
+    assert "汪菲菲（高级工程师）：" in text
+    # 陈春有真签名、汪菲菲没有 → 用「(此处签名)」占位图；两行都应有图
+    assert len(d.element.body.findall(".//" + qn("wp:inline"))) >= 2

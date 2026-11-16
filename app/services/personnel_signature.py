@@ -74,13 +74,56 @@ def build_index(force: bool = False) -> Dict[str, dict]:
     return idx
 
 
+def _resolve_path(name: str, entry: dict) -> str:
+    """把 index 里的 path 落到**本机真实存在**的文件上。
+
+    🔴 index.json 里的 path 是**建库那台机器**的绝对路径：
+        `/Users/mac/…/storage/personnel_signatures/陈春.png`
+       同步到服务器/容器后该路径不存在，`signature_for()` 就一律返回 None ——
+       线上报告的签字区只剩姓名、没有一个签名图（实测 2026-11-16）。
+       这里按「原名同后缀 → 同名任意后缀」在本目录里找回来，并回写 index。
+    """
+    p = Path(str(entry.get("path") or ""))
+    if str(p) and p.is_file():
+        return str(p)
+    media = str(entry.get("template_media") or "")
+    suffix = Path(media).suffix.lower()
+    if suffix:
+        cand = _SIG_DIR / f"{name}{suffix}"
+        if cand.is_file():
+            return str(cand)
+    for cand in sorted(_SIG_DIR.glob(f"{name}.*")):
+        if cand.is_file() and cand.name != PLACEHOLDER_NAME:
+            return str(cand)
+    return ""
+
+
 def load_index() -> Dict[str, dict]:
     global _cache
     if _cache is not None:
         return _cache
     try:
         if _INDEX.exists():
-            _cache = json.loads(_INDEX.read_text(encoding="utf-8")) or {}
+            raw = json.loads(_INDEX.read_text(encoding="utf-8")) or {}
+            idx: Dict[str, dict] = {}
+            healed = False
+            for name, entry in raw.items():
+                if not isinstance(entry, dict):
+                    continue
+                e = dict(entry)
+                real = _resolve_path(str(name), e)
+                if real and real != str(e.get("path") or ""):
+                    e["path"] = real
+                    healed = True
+                idx[str(name)] = e
+            _cache = idx
+            if healed:
+                try:
+                    _INDEX.write_text(json.dumps(idx, ensure_ascii=False, indent=1),
+                                      encoding="utf-8")
+                    logger.info("[签名库] index 路径已按本机文件修正")
+                except Exception:
+                    pass
             return _cache
     except Exception:
         pass

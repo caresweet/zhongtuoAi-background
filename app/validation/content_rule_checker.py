@@ -52,7 +52,7 @@ def _check_fabricated_regulation(text: str) -> List[tuple]:
 
 # 表头含这些列名却没带单位 → 命中「表格缺单位」
 _UNIT_NEEDED_COLS = ("面积", "人数", "个数", "份数", "户数", "占比", "比例", "金额", "补偿")
-_UNIT_PAT = re.compile(r'(平方米|㎡|m2|亩|公顷|户|人|份|个|%|万元|元)')
+_UNIT_PAT = re.compile(r'(平方米|㎡|m2|m²|hm²|hm2|亩|公顷|户|人|份|个|%|万元|元)')
 
 
 @_register("table_unit_required")

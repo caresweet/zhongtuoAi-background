@@ -84,3 +84,18 @@ def test_stability_abbreviation_and_percent_repairs():
     assert "100.0%" in out2 and "0.0%" in out2
     assert "100.0.0%" not in out2
     assert n2 == 2
+
+
+def test_vague_regulation_replaced():
+    from app.services.reclamation_content_repairs import fix_vague_regulation
+    out, n = fix_vague_regulation("按有关规定执行。")
+    assert "《土地复垦条例》" in out and "按有关规定" not in out
+    assert n == 1
+
+
+def test_hm2_table_unit_not_flagged():
+    from app.validation.content_rule_checker import check_text
+    text = "| 临时用地名称 | 面积（hm²） | 损毁方式 |\n|---|---|---|\n| 场站 | 0.98 | 压占 |"
+    issues = check_text(text, rules=[{"id": "table_unit_required", "enabled": True,
+                                      "type": "content", "label": "表格缺单位量纲"}])
+    assert issues == []

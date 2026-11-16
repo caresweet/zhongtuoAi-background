@@ -154,8 +154,9 @@ def check_and_fix(chapters: Dict[Any, Dict[str, Any]], filled: Dict[str, Any],
     _run("支持率", _labeled_value, chapters, r'支持率', "%", _sr)
     _dyn = _num(str(f.get("dynamic_total_investment") or "").replace("万元", ""))
     if domain == "reclamation" and _dyn > 0:
-        _run("动态总投资", _labeled_value, chapters,
-             r'(?:复垦)?(?:动态)?总投资', "万元", _dyn)
+        # 只统一「复垦动态/总投资」，不碰「项目总投资」（主体工程投资，另一个口径）
+        _run("复垦动态总投资", _labeled_value, chapters,
+             r'(?:复垦动态总投资|复垦总投资|动态总投资)', "万元", _dyn)
 
     # ── 多章重复的结构化文字：按多数派 ──
     _run("四至", _majority, chapters, _boundary_pattern(), "四至范围",

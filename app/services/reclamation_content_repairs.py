@@ -1156,6 +1156,12 @@ def fix_investment_wording(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
     return out, n
 
 
+def fix_vague_regulation(md: str) -> Tuple[str, int]:
+    """「按有关规定」改成可核对的法规依据（批注：泛化引用）。"""
+    return re.subn(r'按(?:国家|省|市|有关|相关)?有关规定',
+                   '按《土地复垦条例》及其实施办法等有关规定', md)
+
+
 def fix_standard_codes(md: str) -> Tuple[str, int]:
     """标准号错字/格式归一（批注：GB/T21010-20017）。"""
     out, n = re.subn(r'GB/T\s*21010\s*[-—]\s*20017',
@@ -1223,6 +1229,9 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_fml = fix_price_formula(md)
         md, n_reg = fix_regulation_duplicates(md)
         md, n_std = fix_standard_codes(md)
+        from app.services.report_content_repairs import fix_percent_decimals
+        md, n_pct = fix_percent_decimals(md)
+        md, n_vreg = fix_vague_regulation(md)
         md, n_inv = fix_investment_wording(md, filled or {})
         from app.services.report_content_repairs import fix_government_names
         md, n_gov = fix_government_names(md, filled or {})
@@ -1266,7 +1275,9 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                          ("硬化面积来源", n_e), ("补面积统计表", n_area),
                          ("复垦方向措辞", n_dir), ("运距统一", n_haul),
                          ("请示抬头", n_auth), ("价差公式", n_fml),
-                         ("法规重复", n_reg), ("标准号", n_std), ("投资口径", n_inv),
+                         ("法规重复", n_reg), ("标准号", n_std),
+                         ("百分比小数", n_pct), ("泛化法规", n_vreg),
+                         ("投资口径", n_inv),
                          ("政府称谓", n_gov),
                          ("补其他费用表", n_other), ("阶段费用对齐", n_sch),
                          ("悬空表句", n_dangle), ("表引用重定向", n_ref)):

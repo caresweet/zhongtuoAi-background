@@ -22,12 +22,20 @@ _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _HEAD_RE = re.compile(r"^#{1,4}\s+.+$", re.M)
 
 
-def _numbers(md: str) -> List[str]:
-    return _NUM_RE.findall(md or "")
+def _numbers(md: str) -> List[float]:
+    """数字归一成 float 多重集（2.6800 与 2.68 视为同一个数）。"""
+    out: List[float] = []
+    for x in _NUM_RE.findall(md or ""):
+        try:
+            out.append(float(x))
+        except ValueError:
+            pass
+    return sorted(out)
 
 
 def _headings(md: str) -> set:
-    return {h.strip() for h in _HEAD_RE.findall(md or "")}
+    """只比标题文字（忽略 # 级别与空白差异）。"""
+    return {re.sub(r'^#+\s*', '', h).strip() for h in _HEAD_RE.findall(md or "")}
 
 
 def _table_rows(md: str) -> int:

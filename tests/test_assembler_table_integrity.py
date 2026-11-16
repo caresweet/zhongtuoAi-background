@@ -586,3 +586,24 @@ def test_signature_section_uses_roster_from_front_matter():
     assert "汪菲菲（高级工程师）：" in text
     # 陈春有真签名、汪菲菲没有 → 用「(此处签名)」占位图；两行都应有图
     assert len(d.element.body.findall(".//" + qn("wp:inline"))) >= 2
+
+
+def test_placeholder_signatures_survive_image_dedupe():
+    """签字占位图是同一张图，全局图片去重不能把后 15 个人的签字行删掉。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from app.services.report_assembler import ReportAssembler
+
+    d = Document()
+    a = ReportAssembler()
+    a._load_company_personnel = lambda: [{"姓名": "甲"}, {"姓名": "乙"}, {"姓名": "丙"}]
+    a._cv = lambda key, default=None: "某公司"
+    a._session_state = {"filled_data": {}}
+    a._render_personnel_signature_table(d, 4)
+    a.dedupe_duplicate_images(d)
+
+    names = [p.text.strip() for p in d.paragraphs if p.text.strip().endswith("：")]
+    assert any(n.startswith("甲") for n in names)
+    assert any(n.startswith("乙") for n in names)
+    assert any(n.startswith("丙") for n in names)
+    assert len(d.element.body.findall(".//" + qn("wp:inline"))) >= 3

@@ -276,6 +276,35 @@ def _set_run_font(run, ea_font: str, size=None, bold: bool = False,
     run.font.bold = bold
 
 
+_SIG_BOOKMARK_PREFIX = "_sig_line_"
+
+
+def _mark_signature_paragraph(paragraph, idx: int) -> None:
+    """给签字行打一个不可见书签，供图片去重识别（见 `dedupe_duplicate_images`）。"""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn as _qn
+    _id = str(9000 + int(idx))
+    try:
+        bs = OxmlElement("w:bookmarkStart")
+        bs.set(_qn("w:id"), _id)
+        bs.set(_qn("w:name"), f"{_SIG_BOOKMARK_PREFIX}{idx}")
+        be = OxmlElement("w:bookmarkEnd")
+        be.set(_qn("w:id"), _id)
+        paragraph._p.insert(0, bs)
+        paragraph._p.append(be)
+    except Exception:
+        pass
+
+
+def _is_signature_paragraph(el) -> bool:
+    """段落是否带签字行书签（签字占位图是同一张图，不能被当成重复插图删掉）。"""
+    from docx.oxml.ns import qn as _qn
+    for b in el.iter(_qn("w:bookmarkStart")):
+        if str(b.get(_qn("w:name")) or "").startswith(_SIG_BOOKMARK_PREFIX):
+            return True
+    return False
+
+
 def _match_tally(tallies: dict, label: str, option: str):
     """把 LLM 写的调查题目（label）映射到问卷真实勾选统计（tallies）里的题目。
 
@@ -6270,7 +6299,7 @@ class ReportAssembler:
         # 🔴 签名：有真签名用真签名，没有就放**占位图**（业主口径）。
         from app.services.personnel_signature import signature_for, signature_or_placeholder
         from docx.shared import Cm as _Cm
-        for p in people:
+        for _i, p in enumerate(people):
             name = str(p.get("姓名") or "").strip()
             if not name:
                 continue
@@ -6286,6 +6315,10 @@ class ReportAssembler:
                     para.add_run().add_picture(sig, height=_Cm(0.85))
                 except Exception as e:
                     logger.warning(f"签名图插入失败 {name}: {e}")
+            # 🔴 打上「签名行」书签：全局图片去重（`dedupe_duplicate_images`）会把
+            #    相同的「(此处签名)」占位图当成重复插图**整段删掉** —— 实测只留下
+            #    第一个占位的人，其余 15 人从签字区消失。带这个标记的段落一律跳过去重。
+            _mark_signature_paragraph(para, _i)
 
 
     def _load_company_personnel(self) -> list:
@@ -7747,6 +7780,10 @@ class ReportAssembler:
         kids = list(body.iterchildren())
         for i, el in enumerate(kids):
             if el.tag != _qn('w:p'):
+                continue
+            # 🔴 签字行：占位图是同一张「(此处签名)」，按媒体去重会把整段删掉 ——
+            #    实测 22 人的签字区只剩第一个占位的人。这类段落一律跳过。
+            if _is_signature_paragraph(el):
                 continue
             media = _media_of(el)
             if not media:

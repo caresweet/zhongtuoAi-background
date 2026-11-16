@@ -59,3 +59,13 @@ def test_standard_code_typo_repair():
     out, n = fix_standard_codes("《土地利用现状分类》，GB/T21010-20017；")
     assert "GB/T 21010-2017" in out and "20017" not in out
     assert n == 1
+
+
+def test_zero_opposition_with_50_percent_context_not_flagged():
+    issues = find_data_validity_issues("反对率为0.0%，不存在超过50%群众反对的情形。")
+    assert not [i for i in issues if "反对" in i.get("description", "")]
+
+
+def test_score_100_is_valid():
+    issues = find_data_validity_issues("措施前稳评总分100分。")
+    assert not [i for i in issues if "评分" in i.get("description", "")]

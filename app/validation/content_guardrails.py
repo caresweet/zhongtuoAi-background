@@ -99,8 +99,8 @@ DATA_VALIDITY_PATTERNS: List[Tuple[str, str]] = [
      "征地项目出现反对率/反对人数，合规项目不应有反对"),
     # Overly precise numbers (4+ decimal places → likely fabricated)
     (r'(?<!\d)\d+\.\d{4,}(?!\d)', "数据过于精确（4位以上小数），疑似编造"),
-    # Scores exceeding 100
-    (r'(?<!\d)1[0-9]{2,}\s*分', "评分超过100分，超出合理范围"),
+    # Scores exceeding 100 (100 本身合法)
+    (r'(?<!\d)(?:10[1-9]|[1-9]\d{3,}|[2-9]\d{2,})\s*分', "评分超过100分，超出合理范围"),
     # Year errors — not 2026
     (r'202[0-57-9]年', "年份错误，应为2026年"),
 ]
@@ -252,6 +252,12 @@ def find_data_validity_issues(text: str) -> List[Dict[str, str]]:
             if desc.startswith("年份"):
                 seg = masked[max(0, m.start() - 30):m.end() + 15]
                 if any(k in seg for k in ("施行", "修正", "通过", "公布", "出版")):
+                    continue
+            if "反对" in desc:
+                # 「反对率为0.0%，不存在超过50%」——取反对后的第一个数，0 就跳过
+                tail = m.group(0)[2:]
+                num = re.search(r'\d+(?:\.\d+)?', tail)
+                if num and float(num.group(0)) == 0:
                     continue
             issues.append({
                 "type": "data_validity",

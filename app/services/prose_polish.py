@@ -54,6 +54,72 @@ def _passes(orig: str, new: str) -> bool:
     return not _check(orig, new)
 
 
+def _needs_polish(text: str) -> bool:
+    """该小节是否需要模型顺一遍（长句/AI 套词/段首雷同/标点重复）。"""
+    if re.search(r"([，。；：、])\1+", text):
+        return True
+    for sent in re.split(r"[。！？；;]", text):
+        if len(sent.strip()) > 80:
+            return True
+    try:
+        from app.validation.content_guardrails import AI_BUZZWORD_PATTERNS
+        for item in AI_BUZZWORD_PATTERNS:
+            pat = item[0] if isinstance(item, (tuple, list)) else item
+            if re.search(pat, text):
+                return True
+    except Exception:
+        pass
+    opens = [p.strip()[:4] for p in text.splitlines()
+             if p.strip() and not p.strip().startswith(("#", "|", "!["))]
+    if any(opens.count(o) >= 3 for o in set(opens)):
+        return True
+    return False
+
+
+async def polish_section_text(md: str, llm=None, *, timeout: float = 120.0,
+                              max_sections: int = 10) -> tuple[str, List[str]]:
+    """逐小节顺语句：先做确定性归一，再对有问题的小节做模型润色。
+
+    Returns: `(新正文, 被模型润色的小节标题列表)`。
+    """
+    if not md:
+        return md, []
+    from app.validation.content_guardrails import (
+        merge_broken_sentences, split_long_sentences)
+
+    parts = re.split(r"(?m)(?=^##\s)", md)
+    out: List[str] = []
+    polished: List[str] = []
+    for part in parts:
+        body = part
+        body, _n1 = split_long_sentences(body, 80)
+        body, _n2 = merge_broken_sentences(body)
+        if llm is not None and len(body) >= 50 and _needs_polish(body) \
+                and len(polished) < max_sections:
+            title = ""
+            m = re.match(r"^##\s+(.+)$", body, re.M)
+            if m:
+                title = m.group(1).strip()
+            try:
+                new = await _polish_text(llm, body, _SECTION_SYSTEM, timeout)
+            except Exception as e:
+                logger.warning(f"[小节润色] {title or '本节'}失败: {e}")
+                new = ""
+            if new and not _check(body, new):
+                body = new
+                polished.append(title or f"第{len(polished)+1}节")
+        out.append(body)
+    return "".join(out), polished
+
+
+_SECTION_SYSTEM = (
+    "你是中文公文校对。只改语病、缺字、词语粘连、断句和重复表达。"
+    "禁止改动：数字、金额、面积、日期、单位名称、人名、文号、法规名称、"
+    "各级标题、表格内容、图占位。同章相邻段落不要用相同的四字开头。"
+    "保持原 markdown 结构，输出完整正文，不要解释、不要加前后缀。"
+)
+
+
 async def _polish_text(llm, md: str, system: str, timeout: float) -> str:
     """润色一段正文；优先关闭思考链（推理模型会把预算耗在 reasoning 上）。"""
     msgs = [{"role": "user", "content": "请润色下面这份报告的章节正文，只修语言问题：\n\n" + md}]

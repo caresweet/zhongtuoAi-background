@@ -88,12 +88,12 @@ def test_tool_round_disabled_by_switch():
 def test_act_injects_tool_results_into_prompt():
     """act() 走工具回合后，工具结果注入 user_prompt，再生成正文。"""
     # 捕获传给 LLM 的 user_prompt，断言含工具补充数据标记
-    captured = {}
+    captured = {"user_texts": []}
 
     class CaptureLLM:
         async def chat_with_reasoning(self, **kwargs):
             msgs = kwargs.get("messages", [])
-            captured["user_text"] = msgs[0]["content"] if msgs else ""
+            captured["user_texts"].append(msgs[0]["content"] if msgs else "")
             return {"content": "第6章正文内容较长……" * 20, "reasoning": "", "tool_calls": []}
 
     agent = _DummyAgent(llm_service=CaptureLLM())
@@ -111,5 +111,7 @@ def test_act_injects_tool_results_into_prompt():
                                                "user_data": {}}))
 
     assert result.get("status") == "generated"
-    assert "工具补充数据" in captured["user_text"], "工具结果应注入 user_prompt"
-    assert "【评分】措施前扣分合计 12 分" in captured["user_text"]
+    # 生成调用在第一节；后续小节润色也会调 LLM，因此看所有调用里有没有注入
+    assert any("工具补充数据" in t for t in captured["user_texts"]), \
+        "工具结果应注入 user_prompt"
+    assert any("【评分】措施前扣分合计 12 分" in t for t in captured["user_texts"])

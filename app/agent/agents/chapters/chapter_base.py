@@ -507,6 +507,18 @@ class ChapterAgentBase(BaseAgent):
         except Exception as _rg2:
             logger.warning(f"[复垦收口] 第{self.chapter_number}章续写后处理失败: {_rg2}")
 
+        # 🔴 逐小节顺语句（业主 2026-11-16）：每生成一个小节就要通顺。
+        #    先确定性断句/并句；仍超长、有套词、段首雷同的**小节**才调模型润色，
+        #    数字/标题/表格校验不过就保留原文。
+        try:
+            from app.services.prose_polish import polish_section_text
+            content, _polished = await polish_section_text(content, self._llm)
+            if _polished:
+                logger.info(f"[小节润色] 第{self.chapter_number}章："
+                            f"{'、'.join(_polished[:6])}")
+        except Exception as _pp:
+            logger.warning(f"[小节润色] 第{self.chapter_number}章跳过: {_pp}")
+
         # 🔴 金湖模板：不注入系统表格，LLM生成markdown表格即可
         tables = self._extract_tables(content)
         sources = rag_context.get("sources", [])

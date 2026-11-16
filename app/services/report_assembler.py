@@ -854,6 +854,21 @@ class ReportAssembler:
             except Exception as _se:
                 logger.warning(f"[风险指数] 一致性修正跳过: {_se}")
 
+        # 🔴 全文跨章一致性（业主 2026-11-16）：面积/户数/问卷/支持率/总投资统一到事实卡；
+        #    四至/公告期/运距按多章多数一致；改不了的记入清单。
+        try:
+            from app.services.consistency_check import check_and_fix
+            _c_issues, _c_fixes = check_and_fix(
+                chapters or {}, filled or {}, self._domain)
+            self._consistency_issues = _c_issues
+            if _c_fixes:
+                logger.info("[一致性] %s", "；".join(_c_fixes))
+            if _c_issues:
+                logger.warning("[一致性] 仍有 %d 处需人工确认：%s", len(_c_issues),
+                               "；".join(i.get("message", "") for i in _c_issues[:5]))
+        except Exception as _cce:
+            logger.warning(f"[一致性] 检查跳过: {_cce}")
+
         # 🔴 复垦：先从上传的 Shapefile 算**项目中心经纬度**，供正文坐标校正用
         #    （模型会把「33°16′33.45″」写成 `33163345` 这种连串）。
         if self._domain == "reclamation" and not filled.get("_centroid_lat"):

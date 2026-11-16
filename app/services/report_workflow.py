@@ -2172,9 +2172,28 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
             #    缺口就只剩「Word 批注」一个出口。复垦现在不写批注（业主口径），
             #    不回写等于缺口**彻底看不见**（实测 2026-10-10：接口 total=0，
             #    而同一批缺口在批注里明明有 9 章）。
-            for _k in ("_chapter_gaps", "_table_issues"):
-                if asm_state.get(_k):
+            # 🔴 交付闸门（覆盖矩阵 + 字数预算）也是**写进 asm_state** 再回写：
+            #    装配器拿的是白名单式临时 dict，不回写的话会话接口读不到
+            #    `_deliverable`，前端就永远显示「已完成」而没有「不可交付」提示。
+            from app.services.coverage_matrix import STATE_KEYS as _GATE_KEYS
+            for _k in ("_chapter_gaps", "_table_issues", *_GATE_KEYS):
+                if asm_state.get(_k) not in (None, {}, []):
                     state[_k] = asm_state[_k]
+            if asm_state.get("_coverage"):
+                try:
+                    from app.services.coverage_matrix import summarize as _sum_gate
+                    logs.append(_sum_gate({
+                        "coverage": asm_state.get("_coverage"),
+                        "word_budget": asm_state.get("_word_budget") or {},
+                    }))
+                except Exception:
+                    pass
+            if asm_state.get("_deliverable") is False:
+                _bl = asm_state.get("_deliverable_blockers") or []
+                logs.append("⛔ 覆盖/字数闸门未通过，本轮报告标记为**不可交付**"
+                            + (f"（{len(_bl)} 项）：" + "；".join(
+                                str(b.get("message") or "") for b in _bl[:5])
+                               if _bl else ""))
             # 🔴 交付体检：把「80% 可用、看一遍就过」算成分数与清单
             #    （业主 2026-10-30）。体检的是**最终进文档的章节**，不是中间稿。
             try:

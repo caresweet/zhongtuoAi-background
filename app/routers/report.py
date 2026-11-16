@@ -2685,6 +2685,12 @@ async def get_session_gaps(session_id: str, user: User = Depends(get_current_use
         "items": _jsonable(items),
         # 🔴 交付体检（80% 可用率目标）：可用率、需扫一眼的段落清单
         "audit": _jsonable((session.state or {}).get("_delivery_audit") or {}),
+        # 🔴 交付闸门（2026-11-16）：「审查要点是否写全 + 篇幅是否够」。
+        #    `deliverable=False` 时前端必须显式提示**不可交付**，并列出阻断项。
+        "coverage": _jsonable((session.state or {}).get("_coverage") or {}),
+        "word_budget": _jsonable((session.state or {}).get("_word_budget") or {}),
+        "deliverable": (session.state or {}).get("_deliverable"),
+        "blockers": _jsonable((session.state or {}).get("_deliverable_blockers") or []),
     })
 
 

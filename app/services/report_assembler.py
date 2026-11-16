@@ -1394,6 +1394,18 @@ class ReportAssembler:
                     self._renumber_appendix_numbers(doc, _idx[-1])
             except Exception as _are:
                 logger.warning(f"附件编号最终重排跳过: {_are}")
+
+        # 🔴 交付闸门（业主 2026-11-16）：「审查要点是否写全 + 篇幅是否够」，
+        #    纯确定性判定，不调模型。结果写回 state（`_coverage`/`_word_budget`/
+        #    `_deliverable`/`_deliverable_blockers`），工作流与界面接口直接读。
+        #    不阻断出稿 —— 只把「不可交付」和缺口列出来，交不交由人定。
+        try:
+            from app.services.coverage_matrix import attach as _attach_gate, summarize as _sum_gate
+            _gate = _attach_gate(state, domain=self._domain)
+            if not _gate.get("deliverable"):
+                logger.warning("[闸门] 本轮报告不可交付：%s", _sum_gate(_gate))
+        except Exception as _gge:
+            logger.warning(f"[闸门] 覆盖/字数检查跳过: {_gge}")
         doc.save(str(outpath))
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
         return f"generated/{filename}"

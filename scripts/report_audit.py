@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""报告审核 CLI —— 把六层校验串成一次可复现的审核，输出标准化报告。
+"""报告审核 CLI —— 把七层校验串成一次可复现的审核，输出标准化报告。
 
-六层（与 `.claude/skills/report-audit/SKILL.md` 一一对应）：
+七层（与 `.claude/skills/report-audit/SKILL.md` 一一对应）：
 
   1 结构     章节是否齐全、各章字数是否达标
   2 内容规则 占位符残留 / 模糊话术 / 表格缺单位 / 编造法规（content_rule_checker）
@@ -10,6 +10,7 @@
   4 指标阈值 问卷份数、支持率、户均人口等规则库（rule_checker，需 --filled）
   5 格式规范 字体/字号/对齐/缩进（spec_checker，需 --spec 或库里有「格式规范」模板）
   6 交付体检 「读一遍就过」可用率、AI 套话、配图无解读（delivery_audit）
+  7 覆盖闸门 审查要点是否写全 + 字数预算（coverage_matrix，**硬闸门**）
 
 用法：
   cd backend
@@ -216,6 +217,15 @@ def layer_delivery(chapters: Dict[int, Dict[str, str]]) -> Dict[str, Any]:
     return audit_chapters(body or chapters)
 
 
+def layer_gate(chapters: Dict[int, Dict[str, str]], domain: str) -> Dict[str, Any]:
+    """第 7 层：要求覆盖矩阵 + 字数预算（与生成时的交付闸门同一套判定）。"""
+    from app.services.coverage_matrix import check_coverage, check_word_budget
+    body = {k: v for k, v in chapters.items() if isinstance(k, int) and k > 0}
+    body = body or chapters
+    return {"coverage": check_coverage(body, domain),
+            "word_budget": check_word_budget(body, domain)}
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 打分（与 stability-report-review 口径一致）
 # ═══════════════════════════════════════════════════════════════════
@@ -234,7 +244,8 @@ def _deduct_for(issues: List[Dict[str, Any]]) -> float:
 
 
 def score_all(struct: dict, content: list, guard: dict,
-              threshold: dict, spec: dict, delivery: dict) -> Dict[str, Any]:
+              threshold: dict, spec: dict, delivery: dict,
+              gate: Optional[dict] = None) -> Dict[str, Any]:
     guard_all = []
     for key in ("blocking", "data_validity", "fabricated",
                 "numeric_ranges", "regulations", "materials"):
@@ -258,6 +269,11 @@ def score_all(struct: dict, content: list, guard: dict,
         len(struct.get("below_words") or []) * 5 +
         min(30.0, (1 - float(delivery.get("rate") or 0)) * 40)
     )
+    # 第 7 层：缺必需要求 / 明显偏薄的章都算内容完整性问题
+    if gate:
+        _critical_missing = len((gate.get("coverage") or {}).get("missing_critical") or [])
+        _thin = len((gate.get("word_budget") or {}).get("thin_chapters") or [])
+        complete -= _critical_missing * 8 + _thin * 3
 
     compliance = 100 - (
         _deduct_for(guard.get("blocking") or []) +
@@ -298,7 +314,7 @@ def _fmt_issue(it: Dict[str, Any]) -> str:
 
 def render_markdown(name: str, domain: str, path: Path, struct: dict, content: list,
                     guard: dict, threshold: dict, spec: dict, delivery: dict,
-                    score: dict) -> str:
+                    score: dict, gate: Optional[dict] = None) -> str:
     lines: List[str] = []
     w = lines.append
     w(f"# 📋 报告审核报告\n")
@@ -388,8 +404,37 @@ def render_markdown(name: str, domain: str, path: Path, struct: dict, content: l
           f"（{it.get('text')}…）")
     w("")
 
-    w("## 八、结论与建议\n")
-    if score["grade"] == "优秀":
+    w("## 八、第 7 层：要求覆盖与字数预算\n")
+    if gate:
+        cov = gate.get("coverage") or {}
+        bud = gate.get("word_budget") or {}
+        w(f"- 要求覆盖 **{cov.get('covered', 0)}/{cov.get('total', 0)}** 项"
+          + (f"，缺 {len(cov.get('missing') or [])} 项"
+             f"（其中必需 {len(cov.get('missing_critical') or [])} 项）"
+             if cov.get("missing") else "，全部覆盖"))
+        for m in (cov.get("missing") or []):
+            tag = "🔴 必需" if m.get("severity") == "critical" else "⚠️ 建议"
+            w(f"- {tag}：{m.get('name')}（依据：{m.get('basis')}）")
+        if bud.get("total_min_words"):
+            w(f"- 字数 **{bud.get('total_words')}** / 下限合计 {bud.get('total_min_words')}"
+              f"（{round(float(bud.get('total_ratio') or 0) * 100)}%）")
+        for row in (bud.get("missing_chapters") or []):
+            w(f"- 🔴 第{row.get('chapter')}章「{row.get('title')}」没有正文")
+        for row in (bud.get("thin_chapters") or []):
+            w(f"- 🔴 第{row.get('chapter')}章「{row.get('title')}」{row.get('words')} 字，"
+              f"不足下限 {row.get('min_words')} 字的 60%")
+    else:
+        w("- ℹ️ 未执行覆盖/字数检查")
+    w("")
+
+    w("## 九、结论与建议\n")
+    _gate_bad = bool(
+        (gate or {}).get("coverage", {}).get("missing_critical")
+        or (gate or {}).get("word_budget", {}).get("missing_chapters")
+        or (gate or {}).get("word_budget", {}).get("thin_chapters"))
+    if score["critical"] or _gate_bad:
+        w("- 退回修改：先处理 🔴 阻断项（含第 7 层缺项/偏薄章），再重跑本审核。")
+    elif score["grade"] == "优秀":
         w("- 可直接交付。")
     elif score["grade"] == "良好":
         w("- 修复上述 ⚠️ 项后交付。")
@@ -397,6 +442,8 @@ def render_markdown(name: str, domain: str, path: Path, struct: dict, content: l
         w("- 退回修改：先处理 🔴 阻断项，再重跑本审核。")
     if score["critical"]:
         w(f"- 当前有 **{score['critical']} 个 critical 问题**，必须清零。")
+    if _gate_bad:
+        w("- 第 7 层闸门未通过，本轮**不可交付**。")
     w("")
     return "\n".join(lines)
 
@@ -438,10 +485,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     threshold = layer_thresholds(filled)
     spec = layer_spec(path, args.spec, args.domain)
     delivery = layer_delivery(chapters)
-    score = score_all(struct, content, guard, threshold, spec, delivery)
+    gate = layer_gate(chapters, args.domain)
+    score = score_all(struct, content, guard, threshold, spec, delivery, gate)
 
     md = render_markdown(path.stem, args.domain, path, struct, content,
-                         guard, threshold, spec, delivery, score)
+                         guard, threshold, spec, delivery, score, gate)
 
     out_path = Path(args.out) if args.out else path.with_name(
         f"{path.stem}_审核报告_{datetime.now():%Y%m%d_%H%M}.md")
@@ -450,13 +498,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json:
         payload = {"score": score, "structure": struct, "content_rules": content,
                    "guardrails": guard, "thresholds": threshold, "spec": spec,
-                   "delivery": delivery}
+                   "delivery": delivery, "gate": gate}
         out_path.with_suffix(".json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(md)
     print(f"\n审核报告已写入：{out_path}")
-    passed = score["total"] >= 70 and score["critical"] == 0
+    # 🔴 第 7 层是**硬闸门**：缺必需要求、或某章明显偏薄，即使总分过 70 也判不通过
+    _gate_blocked = bool(
+        (gate.get("coverage") or {}).get("missing_critical")
+        or (gate.get("word_budget") or {}).get("missing_chapters")
+        or (gate.get("word_budget") or {}).get("thin_chapters")
+    )
+    passed = score["total"] >= 70 and score["critical"] == 0 and not _gate_blocked
     return 0 if passed else 1
 
 

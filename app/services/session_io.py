@@ -90,7 +90,12 @@ def put_state(session_id: str, state: dict, api: str = "", timeout: int = 120) -
     import urllib.request
     keys = ("filled_data", "chapters", "generated_sections", "output_path",
             "outline_list", "selected_personnel", "selected_cert_personnel",
-            "_questionnaire_result", "_chapter_gaps")
+            "_questionnaire_result", "_chapter_gaps",
+            # 🔴 交付闸门结果（覆盖矩阵 / 字数预算 / 可交付判定）：
+            #    不回写的话脚本生成完，界面 `GET /gaps` 读不到，用户永远看不到
+            #    「不可交付 + 阻断项」。
+            "_coverage", "_word_budget", "_deliverable",
+            "_deliverable_blockers")
     payload = {"state": {k: state.get(k) for k in keys if state.get(k) is not None}}
     url = f"{(api or DEFAULT_API).rstrip('/')}/api/v1/reports/generate/{session_id}/state"
     try:

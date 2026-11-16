@@ -47,6 +47,47 @@ def _passes(orig: str, new: str) -> bool:
     return True
 
 
+async def _polish_text(llm, md: str, system: str, timeout: float) -> str:
+    """润色一段正文；优先关闭思考链（推理模型会把预算耗在 reasoning 上）。"""
+    msgs = [{"role": "user", "content": "请润色下面这份报告的章节正文，只修语言问题：\n\n" + md}]
+    budget = min(12000, max(2000, len(md) * 2))
+    try:
+        res = await asyncio.wait_for(
+            llm.chat_with_reasoning(messages=msgs, system=system,
+                                    max_tokens=budget, temperature=0.2,
+                                    disable_thinking=True),
+            timeout=timeout)
+    except AttributeError:
+        res = await asyncio.wait_for(
+            llm.chat(messages=msgs, system=system,
+                     max_tokens=budget, temperature=0.2),
+            timeout=timeout)
+    return str((res or {}).get("content") if isinstance(res, dict) else res or "").strip()
+
+
+def _chunks(md: str, limit: int = 7000) -> List[str]:
+    """按 `##` 小节切块；单块仍超限就按段落硬切。"""
+    if len(md) <= limit:
+        return [md]
+    parts, cur = [], ""
+    for seg in re.split(r"(?m)(?=^##\s)", md):
+        if cur and len(cur) + len(seg) > limit:
+            parts.append(cur)
+            cur = seg
+        else:
+            cur += seg
+    if cur:
+        parts.append(cur)
+    out: List[str] = []
+    for p in parts:
+        if len(p) <= limit * 1.5:
+            out.append(p)
+            continue
+        for i in range(0, len(p), limit):
+            out.append(p[i:i + limit])
+    return out
+
+
 async def polish_chapters(chapters: Dict[Any, Dict[str, Any]], llm=None,
                           *, max_chapters: int = 5, timeout: float = 180.0) -> List[int]:
     """对体检有问题的章做语言润色，返回被润色的章号。"""
@@ -78,21 +119,23 @@ async def polish_chapters(chapters: Dict[Any, Dict[str, Any]], llm=None,
         md = str(chapters[no].get("markdown") or "")
         if len(md) < 80:
             continue
-        try:
-            res = await asyncio.wait_for(
-                llm.chat(
-                    messages=[{"role": "user", "content": (
-                        "请润色下面这份报告的章节正文，只修语言问题：\n\n" + md)}],
-                    system=system, max_tokens=min(12000, max(2000, len(md) * 2)),
-                    temperature=0.2),
-                timeout=timeout)
-            text = str((res or {}).get("content") if isinstance(res, dict) else res or "").strip()
-        except Exception as e:
-            logger.warning(f"[润色] 第{no}章失败: {e}")
+        new_parts: List[str] = []
+        ok = True
+        for part in _chunks(md):
+            try:
+                text = await _polish_text(llm, part, system, timeout)
+            except Exception as e:
+                logger.warning(f"[润色] 第{no}章失败: {e}")
+                ok = False
+                break
+            if not _passes(part, text):
+                logger.warning(f"[润色] 第{no}章校验不通过（{len(part)} 字块），保留原文")
+                ok = False
+                break
+            new_parts.append(text)
+        if not ok:
             continue
-        if not _passes(md, text):
-            logger.warning(f"[润色] 第{no}章校验不通过，保留原文")
-            continue
+        text = "".join(new_parts)
         chapters[no]["markdown"] = text
         done.append(no)
         logger.info(f"[润色] 第{no}章已润色（{len(md)} → {len(text)} 字）")

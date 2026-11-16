@@ -1154,6 +1154,30 @@ async def update_builtin_skill(skill_id: str, body: dict = Body(...),
     return ApiResponse(message="已更新", data=result)
 
 
+@router.get("/admin-division/search", response_model=ApiResponse)
+async def search_admin_division(q: str, _: User = Depends(require_staff)):
+    """联网搜索政府信息（乡镇/街道/主管部门），供人工核对。"""
+    from app.services.web_opinion import search_web
+    results = await search_web(q, top_k=8)
+    return ApiResponse(message="检索完成",
+                       data={"query": q, "total": len(results), "results": results})
+
+
+@router.get("/admin-division/resolve", response_model=ApiResponse)
+async def resolve_admin_division(location: str, _: User = Depends(require_staff)):
+    """从项目位置识别 市/区县/乡镇街道，并联网核验政府是否存在。"""
+    from app.services.admin_division import verify_async
+    filled = {"location": location}
+    info = await verify_async(filled)
+    return ApiResponse(message="已识别", data={
+        "location": location, "division": info,
+        "township_gov": filled.get("township_gov"),
+        "natural_resources_bureau": filled.get("natural_resources_bureau"),
+        "verified": bool(filled.get("admin_verified")),
+        "sources": filled.get("admin_sources") or [],
+    })
+
+
 @router.post("/reviews/auto-extract", response_model=ApiResponse)
 async def auto_extract_skills(request: dict):
     """自动提炼高频问题 → 生成 skill（从生成反馈的质量审计中统计高频问题）。"""

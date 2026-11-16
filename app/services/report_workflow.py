@@ -463,6 +463,18 @@ async def node_field_validate(state: ReportWorkflowState) -> ReportWorkflowState
     except Exception as _rfe:
         logger.warning(f"fix_reclamation_fields skipped: {_rfe}")
 
+    # 🔴 行政区划：识别项目所在乡镇/街道，联网核验政府是否存在。
+    #    批注（2026-11-16）：不能把「马头镇」写成「街道」；真实政府名称优先于模板。
+    try:
+        from app.services.admin_division import verify_async
+        _ad = await verify_async(filled, state.get("_project_materials") or [])
+        if _ad.get("township"):
+            logs.append(f"🏛 行政区划：{_ad.get('township_type') or ''}{_ad['township']}"
+                        + ("（已联网核验）" if filled.get("admin_verified")
+                           else "（按资料识别）"))
+    except Exception as _ade:
+        logger.warning(f"admin_division skipped: {_ade}")
+
     # 🔴 复垦：从材料里**自动找项目批复/备案文号**（业主：「不都是可以获取到的么」）。
     #    文本层先找；合同/批复扫描件再走一次视觉（按 md5 缓存）。找到就不弹窗问。
     try:

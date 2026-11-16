@@ -79,6 +79,11 @@ _PROJECT_CARD_LABELS = {
     #    解析出来却进不了提示词 = 白解析，正文只能写【待填写】或遁词。
     "town": "所属镇（街道）",
     "village": "涉及村（社区）",
+    "township_type": "行政区划类型（镇/乡/街道）",
+    "township_gov": "乡镇人民政府/街道办事处",
+    "city": "所属市",
+    "county": "所属区县",
+    "natural_resources_bureau": "自然资源主管部门",
     "land_classification": "土地地类构成（勘测定界·分类面积）",
     "land_ownership": "土地权属构成（勘测定界）",
     "boundary_desc": "四至范围（勘测定界/公告）",
@@ -126,6 +131,7 @@ _PROJECT_CARD_KEYS = [
     "publicity_start_date", "publicity_end_date", "report_month",
     # 🔴 资料解析产出的字段（此前解析出来但从未进事实卡，见 _PROJECT_CARD_LABELS 注释）
     "town", "village", "land_classification", "land_ownership", "boundary_desc",
+    "township_type", "township_gov", "city", "county", "natural_resources_bureau",
     "symposium_location", "symposium_date_text", "symposium_time",
     "survey_date_text", "questionnaire_date", "questionnaire_date_text",
     "dept_questionnaire_date",
@@ -242,6 +248,10 @@ _STABILITY_KEY_LABELS = {
     "total_samples": "问卷总数",
     "support_rate": "支持率",
     "doc_reference": "公告文号",
+    "town": "所属镇（街道）",
+    "township_type": "行政区划类型（镇/乡/街道）",
+    "township_gov": "乡镇人民政府/街道办事处",
+    "natural_resources_bureau": "自然资源主管部门",
 }
 
 

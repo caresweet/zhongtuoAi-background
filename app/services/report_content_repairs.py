@@ -632,6 +632,44 @@ def fill_participant_signatures(chapters: Dict[Any, Dict[str, Any]],
     return 1
 
 # ── 入口 ────────────────────────────────────────────────────
+def fix_government_names(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """统一政府称谓：镇就是「XX镇人民政府」，街道就是「XX街道办事处」。
+
+    专家批注（2026-11-16）：报告把「马头镇」写成「街道（淮阴区马头镇）」
+    「街道办事处审核」。区划类型优先取事实卡（`admin_division.resolve_local`
+    写入），事实卡没有就从本章正文里找「XX镇/XX乡/XX街道」。
+    """
+    from app.services.admin_division import parse_division, township_type
+
+    town = str((filled or {}).get("township") or "").strip()
+    typ = str((filled or {}).get("township_type") or "").strip()
+    if not town:
+        d = parse_division(md)
+        town = d["township"]
+        typ = township_type(town)
+    if not town:
+        return md, 0
+
+    out, n = md, 0
+    if typ in ("镇", "乡"):
+        for pat, rep in (
+                (rf'街道（([^）]*?{re.escape(town)}[^）]*?)）', rf'{typ}（\1）'),
+                (rf'{re.escape(town)}街道办事处', f'{town}人民政府'),
+                (r'街道办事处审核', f'{town}人民政府审核'),
+                (r'所在街道办事处', f'{town}人民政府'),
+        ):
+            out, k = re.subn(pat, rep, out)
+            n += k
+    elif typ == "街道":
+        for pat, rep in (
+                (rf'(?:镇|乡)（\s*{re.escape(town)}\s*）', f'街道（{town}）'),
+                (rf'{re.escape(town)}人民政府', f'{town}街道办事处'),
+        ):
+            out, k = re.subn(pat, rep, out)
+            n += k
+    return out, n
+
+
 def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                               state: Optional[Dict[str, Any]] = None) -> List[str]:
     logs: List[str] = []
@@ -648,6 +686,8 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_garble = fix_garble(md)
         md, n_formula = fix_score_formula(md)
         md, n_att = fix_attachment_ref(md)
+        md, n_gov = fix_government_names(
+            md, ((state or {}).get("filled_data") or {}))
         if str(key) == "7":
             md, n_date = fix_date_order(md)
             if n_date:
@@ -666,6 +706,8 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                 logs.append(f"第{key}章 重写群众意见得分公式")
             if n_att:
                 logs.append(f"第{key}章 修正附件指向 {n_att} 处")
+            if n_gov:
+                logs.append(f"第{key}章 统一政府称谓 {n_gov} 处")
     n_count = fix_risk_count(chapters)
     if n_count:
         logs.append(f"风险条数统一 {n_count} 处")

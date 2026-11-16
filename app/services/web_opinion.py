@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -29,21 +29,17 @@ def _query(project_name: str, location: str, doc_reference: str = "") -> str:
     return f"{base} 舆情 投诉 上访 负面 征地"
 
 
-async def search_opinion(project_name: str = "", location: str = "",
-                         doc_reference: str = "") -> Dict[str, Any]:
-    """返回 {available, query, summary, results:[{title,link,snippet}]}。"""
+async def search_web(query: str, top_k: int = 10) -> List[Dict[str, str]]:
+    """通用网络检索：有 key 走 Serper/Tavily，没有 key 走必应公开页。
+
+    返回 `[{title, link, snippet}]`；任何失败都返回空列表（不抛异常）。
+    """
     provider = (os.getenv("WEB_SEARCH_PROVIDER") or "").strip().lower()
     key = (os.getenv("WEB_SEARCH_API_KEY") or "").strip()
-    query = _query(project_name, location, doc_reference)
     if not provider or not key:
-        # 没有账号/Key 时的兜底：必应公开检索页（无需 key）。
-        # 业主 2026-11-12：「没有账号」—— 不能因此完全不查。
-        if (os.getenv("WEB_SEARCH_FREE") or "1").strip() not in ("0", "false", "no"):
-            items = await _bing_free(query)
-            if items:
-                return _summarize(True, query, items)
-        return {"available": False, "query": query, "summary": "",
-                "results": [], "reason": "未配置搜索 API，且公开检索无结果"}
+        if (os.getenv("WEB_SEARCH_FREE") or "1").strip() in ("0", "false", "no"):
+            return []
+        return list(await _bing_free(query))[:top_k]
     try:
         import httpx
         if provider == "serper":
@@ -51,32 +47,42 @@ async def search_opinion(project_name: str = "", location: str = "",
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post(url, headers={"X-API-KEY": key,
                                                "Content-Type": "application/json"},
-                                 json={"q": query, "num": 10, "gl": "cn", "hl": "zh-cn"})
+                                 json={"q": query, "num": top_k, "gl": "cn", "hl": "zh-cn"})
                 r.raise_for_status()
                 data = r.json()
-            items = [{"title": x.get("title", ""), "link": x.get("link", ""),
-                      "snippet": x.get("snippet", "")}
-                     for x in (data.get("organic") or [])][:10]
-        elif provider == "tavily":
+            return [{"title": x.get("title", ""), "link": x.get("link", ""),
+                     "snippet": x.get("snippet", "")}
+                    for x in (data.get("organic") or [])][:top_k]
+        if provider == "tavily":
             url = os.getenv("WEB_SEARCH_ENDPOINT") or "https://api.tavily.com/search"
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post(url, json={"api_key": key, "query": query,
-                                            "max_results": 10,
+                                            "max_results": top_k,
                                             "search_depth": "basic"})
                 r.raise_for_status()
                 data = r.json()
-            items = [{"title": x.get("title", ""), "link": x.get("url", ""),
-                      "snippet": x.get("content", "")}
-                     for x in (data.get("results") or [])][:10]
-        else:
-            return {"available": False, "query": query, "summary": "",
-                    "results": [], "reason": f"不支持的 WEB_SEARCH_PROVIDER={provider}"}
+            return [{"title": x.get("title", ""), "link": x.get("url", ""),
+                     "snippet": x.get("content", "")}
+                    for x in (data.get("results") or [])][:top_k]
+        logger.warning(f"[网络检索] 不支持的 WEB_SEARCH_PROVIDER={provider}")
     except Exception as e:
-        logger.warning(f"[舆情检索] 失败（按未检索处理）: {e}")
-        return {"available": False, "query": query, "summary": "",
-                "results": [], "reason": str(e)[:120]}
+        logger.warning(f"[网络检索] 失败（按未检索处理）: {e}")
+    return []
 
-    return _summarize(True, query, items)
+
+async def search_opinion(project_name: str = "", location: str = "",
+                         doc_reference: str = "") -> Dict[str, Any]:
+    """返回 {available, query, summary, results:[{title,link,snippet}]}。"""
+    query = _query(project_name, location, doc_reference)
+    items = await search_web(query, top_k=10)
+    if items:
+        return _summarize(True, query, items)
+    provider = (os.getenv("WEB_SEARCH_PROVIDER") or "").strip().lower()
+    key = (os.getenv("WEB_SEARCH_API_KEY") or "").strip()
+    reason = ("未配置搜索 API，且公开检索无结果"
+              if not provider or not key else "检索失败或无结果")
+    return {"available": False, "query": query, "summary": "",
+            "results": [], "reason": reason}
 
 
 def _summarize(available: bool, query: str, items) -> Dict[str, Any]:

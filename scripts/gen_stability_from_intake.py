@@ -47,6 +47,13 @@ async def main() -> int:
     company = await load_company(args.company_id) or {}
     if company.get("implement_unit") and not filled.get("implement_unit"):
         filled["implement_unit"] = company["implement_unit"]
+    # 行政区划：识别乡镇/街道并联网核验（无网/无 key 时按资料识别，不臆造）
+    try:
+        from app.services.admin_division import verify_async
+        _ad = await verify_async(filled)
+        print("[行政区划]", _ad)
+    except Exception as _ad_e:
+        print("[行政区划] 失败:", _ad_e)
     # 评审表「实施单位负责人/职务」优先取公司档案（法人），别在交付稿里印【待填写】
     if company.get("leader_name") and not filled.get("impl_leader"):
         filled["impl_leader"] = company["leader_name"]

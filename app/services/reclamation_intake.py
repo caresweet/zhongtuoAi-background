@@ -621,6 +621,12 @@ def apply_intake(filled: Dict[str, Any], intake: Dict[str, Any]) -> List[str]:
         filled["cost_estimate_excel_name"] = intake["cost_excel_name"]
         changed.append("cost_estimate_excel_name")
 
+    # 行政区划：从项目位置识别乡镇/街道，统一请示抬头与政府称谓
+    try:
+        from app.services.admin_division import resolve_local
+        resolve_local(filled)
+    except Exception:
+        pass
     return changed
 
 

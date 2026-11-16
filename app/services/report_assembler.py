@@ -7096,6 +7096,39 @@ class ReportAssembler:
                 #    再编「图14-1」反而像正文插图。
                 self._add_image(doc, _fp, "", numbered=False)
 
+        # 🔴 清单与逐项标题的编号可能不同步（实测清单「附件1」、标题「附件2」，
+        #    专家批注读成两件同名附件）。以出现顺序为准重排，两边都从 1 连续。
+        try:
+            _start = next(i for i, p in enumerate(doc.paragraphs)
+                          if p.text.strip() == "附件清单")
+            self._renumber_appendix_numbers(doc, _start)
+        except Exception as _re_err:
+            logger.warning(f"[复垦附件] 编号重排失败（保持原样）: {_re_err}")
+
+    @staticmethod
+    def _renumber_appendix_numbers(doc, start_idx: int) -> None:
+        """把附件区「附件N」的清单行与标题行分别按顺序重排为 1..N。"""
+        seq_list = seq_head = 0
+        for p in doc.paragraphs[start_idx:]:
+            text = p.text.strip()
+            if not text:
+                continue
+            if p.style.name == "Heading 1":      # 走出附件章
+                break
+            m = re.match(r'^附件\s*\d+\s*(.*)$', text)
+            if not m:
+                continue
+            if p.style.name.startswith("Heading"):
+                seq_head += 1
+                new = f"附件{seq_head} {m.group(1)}".strip()
+            else:
+                seq_list += 1
+                new = f"附件{seq_list} {m.group(1)}".strip()
+            if p.runs:
+                p.runs[0].text = new
+                for r in p.runs[1:]:
+                    r.text = ""
+
     def _fill_toc_cache(self, doc) -> int:
         """把目录域的**缓存结果**填成真实条目（供不刷新域的阅读器）。
 

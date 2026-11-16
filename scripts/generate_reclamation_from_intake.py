@@ -118,6 +118,14 @@ async def main() -> int:
             "surface_thickness_cm", "cushion_thickness_cm", "service_years")},
             flush=True)
 
+    # 行政区划：识别乡镇/街道并联网核验（无网/无 key 时按资料识别，不臆造）
+    try:
+        from app.services.admin_division import verify_async
+        _ad = await verify_async(filled, materials)
+        print("[行政区划]", _ad, flush=True)
+    except Exception as _ad_e:
+        print("[行政区划] 失败:", _ad_e, flush=True)
+
     state["template_path"] = await resolve_template_path(
         "reclamation",
         build_match_text(filled.get("location"), filled.get("project_name"),

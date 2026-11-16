@@ -1024,6 +1024,138 @@ def renumber_captions(md: str, chapter: int) -> Tuple[str, int]:
 
 
 # ── 入口 ────────────────────────────────────────────────────
+def _primary_direction(filled: Dict[str, Any]) -> str:
+    d = str((filled or {}).get("reclamation_direction") or "").strip()
+    if d:
+        return re.split(r'[、，,；;]', d)[0].strip()
+    for z in ((filled or {}).get("_land_use_zones") or []):
+        if isinstance(z, dict):
+            zd = str(z.get("reclaim_direction") or "").strip()
+            if zd:
+                return re.split(r'[、，,；;]', zd)[0].strip()
+    names, _area, _per = _land_targets(filled or {})
+    return re.split(r'[、，,；;]', names)[0].strip() if names else ""
+
+
+def fix_direction_wording(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """复垦方向不是水田时，措施文字里的「水田」要改成实际方向。
+
+    专家批注（2026-11-16）：「本方案复垦方向是旱地」，但第5章写
+    「以保证水田地面坡度小于3°」。只改措施语境，不动第4章对原地类的描述。
+    """
+    d = _primary_direction(filled)
+    if not d or d == "水田":
+        return md, 0
+    out, n = md, 0
+    for pat, rep in (
+            (r'水田地面坡度', f'{d}地面坡度'),
+            (r'以保证水田', f'以保证{d}'),
+            (r'复垦为水田', f'复垦为{d}'),
+            (r'恢复为水田', f'恢复为{d}'),
+            (r'复垦后为水田', f'复垦后为{d}'),
+    ):
+        out, k = re.subn(pat, rep, out)
+        n += k
+    return out, n
+
+
+_HAUL_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(?:km|公里)')
+_HAUL_CONTEXT = ("运距", "外运", "运输", "运至", "运送", "送至")
+
+
+def haul_distance_target(filled: Dict[str, Any],
+                         chapters: Dict[Any, Dict[str, Any]]) -> str:
+    """全篇运距取一个值：显式参数 → 第6章/工程量语境里出现最多的值。"""
+    v = str((filled or {}).get("haul_distance_km") or "").strip()
+    if v:
+        return v
+    from collections import Counter
+    cnt: Counter = Counter()
+    strong: Counter = Counter()      # 明确写「运距 X km」的优先
+    for key, ch in (chapters or {}).items():
+        md = str((ch or {}).get("markdown") or "")
+        for line in md.splitlines():
+            if not any(k in line for k in _HAUL_CONTEXT):
+                continue
+            for m in _HAUL_RE.finditer(line):
+                cnt[m.group(1)] += 1
+                if "运距" in line:
+                    strong[m.group(1)] += 1
+    if strong:
+        return strong.most_common(1)[0][0]
+    if not cnt:
+        return ""
+    return cnt.most_common(1)[0][0]
+
+
+def fix_haul_distance(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """同一份报告里的运距统一（批注：0.5km 与 3.5km 两处打架）。"""
+    target = str((filled or {}).get("haul_distance_km") or "").strip()
+    if not target:
+        return md, 0
+    lines, n = [], 0
+    for line in str(md or "").splitlines():
+        if any(k in line for k in _HAUL_CONTEXT):
+            new, k = _HAUL_RE.subn(f"{target}km", line)
+            n += k
+            line = new
+        lines.append(line)
+    return "\n".join(lines), n
+
+
+def fix_request_authority(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """复垦请示抬头统一为实际受理机关（市局 + 区县分局）。"""
+    bureau = str((filled or {}).get("natural_resources_bureau") or "").strip()
+    if not bureau:
+        try:
+            from app.services.admin_division import resolve_local
+            resolve_local(filled or {})
+            bureau = str((filled or {}).get("natural_resources_bureau") or "").strip()
+        except Exception:
+            bureau = ""
+    if not bureau:
+        city = str((filled or {}).get("city") or "").strip()
+        county = str((filled or {}).get("county") or "").strip()
+        if city and county:
+            from app.services.admin_division import natural_resources_bureau
+            bureau = natural_resources_bureau(city, county)
+    if not bureau:
+        return md, 0
+    out, n = md, 0
+    for pat in (
+            r'(?:[一-龥]{2,6}市)?自然资源和规划局(?:[一-龥]{1,6}分局)?',
+            r'(?:所在|当地|有关)?(?:县|区)?(?:级)?自然资源(?:和规划)?(?:主管)?部门',
+    ):
+        out, k = re.subn(pat, bureau, out)
+        n += k
+    return out, n
+
+
+def fix_price_formula(md: str) -> Tuple[str, int]:
+    """价差预备费公式只剩「Wi=」时补全公式（批注：公式是空的）。"""
+    out, n = re.subn(r'Wi\s*=\s*(?=\n|$)',
+                     'Wi = ai × [(1 + i)^ni − 1]', md)
+    return out, n
+
+
+def fix_regulation_duplicates(md: str) -> Tuple[str, int]:
+    """「第6部分：第6部分：建设项目」→ 去掉重复（批注）。"""
+    return re.subn(r'第([一二三四五六七八九十\d]+)部分[：:]\s*第\1部分[：:]',
+                   r'第\1部分：', md)
+
+
+def fix_investment_wording(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
+    """请示里的「估算总投资」写明是动态总投资，并给出静态投资。"""
+    dyn = str((filled or {}).get("dynamic_total_investment") or "").strip()
+    if not dyn:
+        return md, 0
+    est = (filled or {}).get("_budget_estimate") or {}
+    static = est.get("static_total") if isinstance(est, dict) else None
+    note = f"动态总投资 {dyn}" + (f"（静态 {static:.2f} 万元）" if isinstance(static, (int, float)) else "")
+    out, n = re.subn(r'估算总投资\s*\d+(?:\.\d+)?\s*万元', note, md)
+    return out, n
+
+
 def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                                 filled: Dict[str, Any],
                                 land_table_caption: str = "",
@@ -1032,6 +1164,9 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
     编号传入（第3章「见表3-1」要指向它）；`known_captions` 是各章**系统表**
     的最终表题（markdown 里已被删掉，悬空表句要靠它指回去）。"""
     logs: List[str] = []
+    _haul = haul_distance_target(filled or {}, chapters or {})
+    if _haul:
+        (filled or {})["haul_distance_km"] = _haul
     # 找第4章的「土地利用现状」表号，供第3章「见表3-1」改指向
     _land_caption = re.sub(r'\s+', '', str(land_table_caption or ""))
     if not _land_caption:
@@ -1068,6 +1203,15 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_a = fix_land_table_ref(md, _land_caption)
         md, n_dr = drop_missing_table_refs(md)
         md, n_e = explain_hard_area(md)
+        md, n_dir = fix_direction_wording(md, filled or {})
+        md, n_haul = fix_haul_distance(md, filled or {})
+        md, n_auth = (fix_request_authority(md, filled or {})
+                      if _no in (6, 12) else (md, 0))
+        md, n_fml = fix_price_formula(md)
+        md, n_reg = fix_regulation_duplicates(md)
+        md, n_inv = fix_investment_wording(md, filled or {})
+        from app.services.report_content_repairs import fix_government_names
+        md, n_gov = fix_government_names(md, filled or {})
         md, n_area = fill_area_table(
             md, filled or {}, _no, (known_captions or {}).get(_no, ())) if _no == 4 else (md, 0)
         md, n_other = add_other_cost_table(md, filled or {}) if _no == 7 else (md, 0)
@@ -1087,6 +1231,10 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                          ("剥离厚度", n_t), ("费用数字", n_c),
                          ("表3-1指向", n_a), ("删无效表号", n_dr),
                          ("硬化面积来源", n_e), ("补面积统计表", n_area),
+                         ("复垦方向措辞", n_dir), ("运距统一", n_haul),
+                         ("请示抬头", n_auth), ("价差公式", n_fml),
+                         ("法规重复", n_reg), ("投资口径", n_inv),
+                         ("政府称谓", n_gov),
                          ("补其他费用表", n_other), ("阶段费用对齐", n_sch),
                          ("悬空表句", n_dangle), ("表引用重定向", n_ref)):
             if k:

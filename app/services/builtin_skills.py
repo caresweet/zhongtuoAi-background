@@ -79,6 +79,12 @@ CATALOG: Tuple[BuiltinSkill, ...] = (
         desc="范文只学结构，不搬内容",
         correction="项目名、地名、金额、面积、日期一律用本项目事实卡，不得照抄范文",
     ),
+    BuiltinSkill(
+        id="b-ret-003", module="retrieval",
+        desc="政府名称必须是项目所在地真实存在的",
+        correction="镇写「XX镇人民政府」、街道写「XX街道办事处」、乡写「XX乡人民政府」；"
+                   "区划类型以资料或联网核验结果为准，不得把镇写成街道，不得编造政府",
+    ),
 
     # ── 工具 ──
     BuiltinSkill(

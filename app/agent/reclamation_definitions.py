@@ -161,6 +161,12 @@ RECLAMATION_KEY_LABELS: Dict[str, str] = {
     "hard_area_m2": "硬化/压占面积（平方米）",
     "excavation_area_m2": "挖损面积（平方米）",
     "excavation_depth_m": "平均开挖深度（米）",
+    "township": "所属镇（街道）",
+    "township_type": "行政区划类型（镇/乡/街道）",
+    "township_gov": "乡镇人民政府/街道办事处",
+    "city": "所属市",
+    "county": "所属区县",
+    "natural_resources_bureau": "自然资源主管部门",
     "surface_thickness_cm": "结构层厚度（厘米）",
     "cushion_thickness_cm": "垫层厚度（厘米）",
     # 土地适宜性评价因子（表4-9）：可研/勘测抽取 → 弹窗 → Excel 模板
@@ -332,6 +338,8 @@ RECLAMATION_CARD_KEYS: List[str] = [
     "hard_surface_type", "hard_area_m2", "surface_thickness_cm",
     "cushion_thickness_cm",
     "excavation_area_m2", "excavation_depth_m",
+    "township", "township_type", "township_gov", "city", "county",
+    "natural_resources_bureau",
     # 勘测定界 —— 临时用地面积复用既有 `area_m2`/`area_mu`（勘测定界解析器只出 ㎡）
     "area_m2", "area_mu",
     "land_classification", "land_ownership", "boundary_desc", "plot_count",

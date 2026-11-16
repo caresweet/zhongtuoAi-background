@@ -288,6 +288,12 @@ def apply_intake(filled: Dict[str, Any], intake: Dict[str, Any]) -> List[str]:
     if intake.get("attachments"):
         filled["_intake_attachments"] = intake["attachments"]
         changed.append("_intake_attachments")
+    # 行政区划：从项目位置识别乡镇/街道，统一全篇政府称谓
+    try:
+        from app.services.admin_division import resolve_local
+        resolve_local(filled)
+    except Exception:
+        pass
     return changed
 
 

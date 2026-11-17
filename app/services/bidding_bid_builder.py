@@ -3301,8 +3301,13 @@ async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
             "仪器设备使用费、土壤采样检测费、报告编制费、专家评审费、差旅交通费、"
             "资料打印装订费、企业管理费、利润、规费、增值税及附加等全部费用。",
        size=10.5, indent=False)
-    _p(doc, "2. 报价一次报定，不接受选择性报价；投选报价超过最高限价 55 万元"
-            "（含税）的按否决投选处理。", size=10.5, indent=False)
+    _max_txt = str(tender.get("max_price_wan") or tender.get("max_price")
+                   or tender.get("budget_wan") or "").strip()
+    _limit_note = (f"投选报价超过最高限价 {_max_txt} 万元（含税）的按否决投选处理。"
+                   if _max_txt else
+                   "投选报价超过最高限价（含税）的按否决投选处理。")
+    _p(doc, "2. 报价一次报定，不接受选择性报价；" + _limit_note,
+       size=10.5, indent=False)
     _p(doc, f"投选人（盖章）：{co_name}", size=12, indent=False)
     _p(doc, f"法定代表人或授权代表（签字）：{af['agent']}", size=12, indent=False)
     _p(doc, f"日期：{today}", size=12, indent=False)
@@ -3311,16 +3316,29 @@ async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
              name="宋体")
     _cp.paragraph_format.page_break_before = True
     _p(doc, f"投选人名称（盖章）：{co_name}　　单位：元", indent=False)
-    _cost = [("人工费（含工资、社会保险）", 180000, "项目负责人、技术负责人及"
-              "专业技术人员 6 人，按服务期投入计"),
-             ("外业采样与检测费", 140000, "土壤采样、样品流转、检测机构检测及"
-              "质控样费用"),
-             ("报告编制与专家评审费", 90000, "土壤污染调查报告、耕地质量评定"
-              "报告、复垦验收报告编制及专家评审"),
-             ("差旅交通与现场协调费", 40000, "现场用车、差旅、镇村及部门对接"),
-             ("资料打印装订费", 20000, "报告胶装、图件打印、成果装订"),
-             ("管理费、利润、规费及税金", 50000, "企业管理费、合理利润、规费及"
-              "增值税（税率 6%）")]
+    # 🔴 费用构成必须随本次报价缩放：原先写死 18/14/9/4/2/5 万元（合计 52 万），
+    #    报价 92 万时表内合计与投选函对不上，且注里还残留「最高限价 55 万元」。
+    _cost_spec = [
+        ("人工费（含工资、社会保险）", 180, "项目负责人、技术负责人及"
+         "专业技术人员 6 人，按服务期投入计"),
+        ("外业采样与检测费", 140, "土壤采样、样品流转、检测机构检测及"
+         "质控样费用"),
+        ("报告编制与专家评审费", 90, "土壤污染调查报告、耕地质量评定"
+         "报告、复垦验收报告编制及专家评审"),
+        ("差旅交通与现场协调费", 40, "现场用车、差旅、镇村及部门对接"),
+        ("资料打印装订费", 20, "报告胶装、图件打印、成果装订"),
+        ("管理费、利润、规费及税金", 50, "企业管理费、合理利润、规费及"
+         "增值税（税率 6%）"),
+    ]
+    _sum_w = sum(w for _, w, _ in _cost_spec) or 1
+    _cost, _acc = [], 0
+    for _i, (_nm, _w, _note) in enumerate(_cost_spec):
+        if _i == len(_cost_spec) - 1:
+            _amt = total_yuan - _acc
+        else:
+            _amt = int(round(total_yuan * _w / _sum_w / 100) * 100)
+            _acc += _amt
+        _cost.append((_nm, _amt, _note))
     _table(doc, ["序号", "费用项目", "金额（元）", "说明"],
            [[str(i), nm, str(amt), note]
             for i, (nm, amt, note) in enumerate(_cost, 1)]
@@ -3334,7 +3352,7 @@ async def build_xunbi_bid_document(*, tender_path: str | Path, company_id: int,
     for _ln in (
         "1. 质量承诺：按现行国家、行业和地方标准开展复垦验收技术服务，成果一次"
         "通过主管部门和专家审查；因我方原因未通过的，无偿修改完善直至通过。",
-        "2. 工期承诺：自合同签订之日起 12 个月内完成全部工作并取得验收备案确认"
+        f"2. 工期承诺：自合同签订之日起 {months or 12} 个月内完成全部工作并取得验收备案确认"
         "文件，非因询比人原因延误的，承担相应违约责任。",
         "3. 人员承诺：按投选文件配置项目负责人、技术负责人和专业人员，服务期内"
         "不擅自更换；确需更换的，提前书面报询比人同意，并以同职称人员顶岗。",

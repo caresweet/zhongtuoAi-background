@@ -83,9 +83,12 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     # ── 项目信息 ──
     project_name = grab(r'项目名称[:：]\s*(.+)')
     if not project_name:
-        # 封面式：第一行就是项目名
+        # 封面式：第一行就是项目名（不少询比封面没有“项目”二字，如“XX技术服务”）
         for ln in lines[:20]:
-            if ln and ("项目" in ln and len(ln) > 8 and "编号" not in ln):
+            if (len(ln) >= 10 and "编号" not in ln and "询比文件" not in ln
+                    and "有限公司" not in ln
+                    and any(k in ln for k in ("技术服务", "采购", "工程",
+                                              "方案", "项目", "咨询"))):
                 project_name = ln
                 break
     project_no = (grab(r'项目编号[:：]\s*([^\s，,]+)')
@@ -99,14 +102,17 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     # 金额单位：万元 或 元（大冈镇这份写的是 62000.00 元）
     budget = grab(r'本项目预算为[:：]?\s*' + _UNIT)
     budget_yuan = grab(r'预算金额[为:：]?\s*([0-9,]+(?:\.\d+)?)\s*元')
-    max_yuan = grab(r'最高限价[为:：]?\s*([0-9,]+(?:\.\d+)?)\s*元')
+    max_yuan = grab(r'最高(?:投选|投标)?限价[^0-9]{0,8}'
+                    r'([0-9,]+(?:\.\d+)?)\s*元')
     if budget_yuan and not budget:
         try:
             budget = f"{float(budget_yuan.replace(',', '')) / 10000:g}"
         except ValueError:
             budget = budget_yuan
-    max_price = grab(r'最高限价[为:：]?\s*' + _UNIT) or budget
-    if max_yuan and not grab(r'最高限价[为:：]?\s*' + _UNIT):
+    max_price = (grab(r'最高(?:投选|投标)?限价[^0-9]{0,10}' + _UNIT)
+                 or grab(r'总价最高限价[^0-9]{0,10}' + _UNIT)
+                 or budget)
+    if max_yuan and not grab(r'最高(?:投选|投标)?限价[^0-9]{0,10}' + _UNIT):
         try:
             max_price = f"{float(max_yuan.replace(',', '')) / 10000:g}"
         except ValueError:

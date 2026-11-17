@@ -20,6 +20,18 @@ from typing import Dict, List, Optional, Tuple
 
 import sqlite3
 
+from app.services.de_ai_rules import HARD_AI_PATTERNS, DE_AI_STYLE_TEXT
+
+# 同一标签的多条正则合并（如「空洞开头」有“随着…”“在当今…”两条）
+_DE_AI_RULES: Dict[str, Tuple[str, Optional[str]]] = {}
+for _pat, _label, _repl in HARD_AI_PATTERNS:
+    _old = _DE_AI_RULES.get(_label)
+    if _old:
+        _one = _old[1] if _old[1] == _repl else None
+        _DE_AI_RULES[_label] = (f"(?:{_old[0]})|(?:{_pat})", _one)
+    else:
+        _DE_AI_RULES[_label] = (_pat, _repl)
+
 ALL_DOMAINS = ("stability", "reclamation", "bidding")
 
 MODULES: Dict[str, str] = {
@@ -166,6 +178,54 @@ CATALOG: Tuple[BuiltinSkill, ...] = (
         desc="语句要通顺：短句为主，一句一事",
         correction="主谓宾完整，不用多层从句；每句不超过 60 字；"
                    "不出现「操作方式为将土…」这类缺字、断句或词语粘连",
+    ),
+    # 🔴 去 AI 味（2026-11-17 按网络公开 skill 的「表达层」规则抽取）
+    BuiltinSkill(
+        id="b-audit-006", module="audit", skill_type="rule",
+        pattern=_DE_AI_RULES["AI过渡词"][0],
+        desc="不用「值得注意的是/由此可见/总的来说/换言之」等 AI 过渡词",
+        correction="直接写下一句事实，删掉过渡语",
+        replacement=_DE_AI_RULES["AI过渡词"][1],
+        severity="warning",
+    ),
+    BuiltinSkill(
+        id="b-audit-007", module="audit", skill_type="rule",
+        pattern=_DE_AI_RULES["AI热词"][0],
+        desc="不用「赋能/抓手/组合拳/底层逻辑/生态位」等互联网黑话",
+        correction="换成具体动作和对象：谁做了什么、做到什么程度",
+        severity="warning",
+    ),
+    BuiltinSkill(
+        id="b-audit-008", module="audit", skill_type="rule",
+        pattern=_DE_AI_RULES["空洞开头"][0],
+        desc="不用「随着…的不断发展」「在当今…背景下」这类空洞开头",
+        correction="直接写项目事实：时间、地点、面积、任务来源",
+        severity="warning",
+    ),
+    BuiltinSkill(
+        id="b-audit-009", module="audit", skill_type="rule",
+        pattern=_DE_AI_RULES["翻译腔"][0],
+        desc="不用「通过…的方式」「对于…而言」等翻译腔",
+        correction="直接写主语和动作，如「采用…方法」改为「按…方法做」",
+        severity="warning",
+    ),
+    BuiltinSkill(
+        id="b-audit-010", module="audit", skill_type="rule",
+        pattern=_DE_AI_RULES["破折号堆叠"][0],
+        desc="一句里不要用两个以上破折号制造金句/反转",
+        correction="拆成两句，直接说结论；公文里的定义性破折号保留一处即可",
+        severity="warning",
+    ),
+    BuiltinSkill(
+        id="b-style-001", module="audit", skill_type="text",
+        desc="去 AI 味行文：具体、短句、少排比、不写金句",
+        correction=DE_AI_STYLE_TEXT,
+    ),
+    BuiltinSkill(
+        id="b-style-002", module="audit", skill_type="text",
+        desc="润色只改表达，不改事实",
+        correction="数字、单位、文号、日期、专名、标题、表格一律原样保留；"
+                   "改完必须核对数字与表格行数",
     ),
 )
 

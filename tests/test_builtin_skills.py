@@ -24,7 +24,8 @@ def test_rules_are_valid_and_domain_scoped():
     for r in rules:
         assert r["source"] == "builtin"
         re.compile(r["pattern"])                 # 正则必须合法
-        assert r["replacement"] is not None      # 内置规则都能自动修复
+        # replacement 为 None 表示「只提示、不自动改」（如 AI 热词、破折号堆叠）
+        assert r["replacement"] is None or isinstance(r["replacement"], str)
 
     # 规则只对声明域生效（当前两条都是全域）
     assert bs.rules_for("bidding")

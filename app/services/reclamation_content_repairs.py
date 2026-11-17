@@ -1206,6 +1206,8 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_tr = fix_truncated_paragraphs(md)
         from app.services.report_content_repairs import fix_punctuation_runs
         md, n_punct = fix_punctuation_runs(md)
+        from app.services.de_ai_rules import strip_filler
+        md, n_ai = strip_filler(md)
         from app.validation.content_guardrails import (
             merge_broken_sentences, split_long_sentences)
         md, n_long = split_long_sentences(md, 80)
@@ -1265,6 +1267,7 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
             ch["markdown"] = md
         bits = []
         for label, k in (("截断残句", n_tr), ("标点归一", n_punct),
+                         ("去AI味", n_ai),
                          ("长句断句", n_long), ("断句回并", n_merge),
                          ("单位hm²", n_u), ("重复段", n_d),
                          ("服务年限", n_s), ("使用期起止", n_ue),

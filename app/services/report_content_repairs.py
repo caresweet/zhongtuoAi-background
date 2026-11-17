@@ -694,6 +694,9 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
         orig = md
         md, n_tr = fix_truncated_paragraphs(md)
         md, n_punct = fix_punctuation_runs(md)
+        # 去 AI 味：删「值得注意的是/由此可见/总的来说/换言之」这类口水过渡
+        from app.services.de_ai_rules import strip_filler
+        md, n_ai = strip_filler(md)
         from app.validation.content_guardrails import (
             merge_broken_sentences, split_long_sentences)
         md, n_long = split_long_sentences(md, 80)
@@ -729,6 +732,8 @@ def repair_stability_chapters(chapters: Dict[Any, Dict[str, Any]],
                 logs.append(f"第{key}章 截断残句 {n_tr} 处")
             if n_punct:
                 logs.append(f"第{key}章 标点/空格归一 {n_punct} 处")
+            if n_ai:
+                logs.append(f"第{key}章 去 AI 味过渡词 {n_ai} 处")
             if n_long:
                 logs.append(f"第{key}章 长句断句 {n_long} 处")
             if n_merge:

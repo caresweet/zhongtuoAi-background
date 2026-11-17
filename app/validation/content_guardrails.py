@@ -59,6 +59,15 @@ AI_BUZZWORD_PATTERNS = [
     (r'据调查显示', "AI套词-机器翻译腔"),
 ]
 
+# 🔴 去 AI 味规则（2026-11-17）：从 Humanizer-zh / human-writing / qu-ai-wei /
+#    lieflat-less-ai-tone / stop-slop 的公开规则里，只抽「表达层」可复用项。
+#    交付体检（delivery_audit）与整章润色（prose_polish）都读这张表。
+from app.services.de_ai_rules import HARD_AI_PATTERNS as _DE_AI_PATTERNS  # noqa: E402
+
+AI_BUZZWORD_PATTERNS = list(AI_BUZZWORD_PATTERNS) + [
+    (pat, label) for pat, label, _repl in _DE_AI_PATTERNS
+]
+
 ALLOWED_MISSING_MARKER = r"【待用户补充：[^】]+（对应章节：[^】]+）】"
 
 # ═══════════════════════════════════════════════════════════════

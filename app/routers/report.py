@@ -2730,6 +2730,41 @@ async def put_session_state(session_id: str, request: dict = Body(...), user: Us
     return ApiResponse(message="会话状态已更新", data={"session_id": session_id})
 
 
+@router.get("/intake/schema", response_model=ApiResponse)
+async def get_intake_schema(domain: str = "stability",
+                            user: User = Depends(get_current_user)):
+    """基础资料弹窗的字段字典（稳评 / 复垦）。
+
+    字段与 Excel 模板**同源**（`stability_intake` / `reclamation_intake` 的字段常量），
+    用户可以在线填写，不必再上传 Excel。
+    """
+    from app.services.intake_form import form_schema
+    return ApiResponse(data=form_schema(domain))
+
+
+@router.post("/generate/{session_id}/intake", response_model=ApiResponse)
+async def save_session_intake(session_id: str, request: dict = Body(...),
+                              user: User = Depends(get_current_user)):
+    """保存弹窗填写的基础资料到 `filled_data`（复用 Excel 的派生逻辑）。"""
+    from app.services.intake_form import apply_form
+    session = report_service.get_session_for_user(session_id, user)
+    state = session.state
+    domain = str(request.get("domain") or state.get("_domain") or "stability")
+    filled = state.setdefault("filled_data", {})
+    changed, missing = apply_form(domain, filled, request or {})
+    state["_intake_source"] = "form"
+    report_service._save_sessions()
+    try:
+        await report_service.archive_filled_data(session)
+    except Exception:
+        pass
+    return ApiResponse(message="基础资料已保存", data={
+        "session_id": session_id, "domain": domain,
+        "changed": changed, "changed_count": len(changed),
+        "missing": missing,
+    })
+
+
 @router.get("/generate/{session_id}/fields", response_model=ApiResponse)
 async def get_template_fields(session_id: str, user: User = Depends(get_current_user)):
     """Get classified template fields (A/B/C/D/E) from the product skill analysis."""

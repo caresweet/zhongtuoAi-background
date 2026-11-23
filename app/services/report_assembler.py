@@ -3360,10 +3360,18 @@ class ReportAssembler:
         # 🔴 去掉文档**末尾的空白页**：最后一个段落只剩一个分页符（或全空）时，
         #    Word 会多渲染一整页空白 —— 打印/装订就多一张（业主：「最后一页空白」）。
         #    来源是模板区间/附件区末尾自带的分页符。
+        # 🔴 例外：末尾是「附件清单」时**不清** —— 附件区要留白两页给粘贴扫描件
+        #    （业主 2026-11-20 口径）。装配器在 `_add_appendices` 里已插好，
+        #    这里再清就会把这两页删掉（实测 2026-11-23 洪泽测试稿）。
         try:
             _body = doc.element.body
+            _tail_text = ""
+            for _p in reversed(doc.paragraphs):
+                if _p.text.strip():
+                    _tail_text = _p.text.strip()
+                    break
             _rm = 0
-            while True:
+            while _tail_text != "附件清单":
                 _kids = [c for c in _body.iterchildren()
                          if c.tag.split('}')[1] in ('p', 'tbl')]
                 if not _kids or _kids[-1].tag.split('}')[1] != 'p':

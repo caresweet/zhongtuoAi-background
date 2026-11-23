@@ -24,18 +24,23 @@ from app.services.test_doc_makeup import TEST_DATA  # noqa: E402
 # 地区 → 行政区划与用途（测试数据里没有的补充项）
 META = {
     "淮阴区": dict(city="淮安市", district="淮阴区", town="渔沟镇",
-                   land_use="工业用地", boundary="详见勘测定界图"),
+                   land_use="工业用地",
+                   boundary="东至渔沟镇现状村道，南至农田，西至排水渠，北至规划支路"),
     "洪泽": dict(city="淮安市", district="洪泽区", town="三河镇",
-                 land_use="工业用地", boundary="详见勘测定界图"),
+                 land_use="工业用地",
+                 boundary="东至三河镇农田，南至现状村道，西至灌溉渠，北至规划纬三路"),
     "金湖": dict(city="淮安市", district="金湖县", town="塔集镇",
-                 land_use="工业用地", boundary="详见勘测定界图"),
+                 land_use="工业用地",
+                 boundary="东至塔集镇农田，南至现状沟渠，西至乡道，北至灌溉渠"),
     "清江浦区": dict(city="淮安市", district="清江浦区", town="和平镇",
-                     land_use="工业用地", boundary="详见勘测定界图"),
+                     land_use="工业用地",
+                     boundary="东至和平镇现状道路，南至农田，西至排水沟，北至规划路"),
     "淮安区": dict(city="淮安市", district="淮安区", town="范集镇",
                    land_use="工业用地",
                    boundary="东至现状道路，南至农田，西至农田，北至灌溉渠"),
     "淮安市": dict(city="淮安市", district="淮安市", town="",
-                   land_use="输变电工程用地", boundary="详见线路路径图"),
+                   land_use="输变电工程用地",
+                   boundary="东至现状村道，南至农田，西至河道，北至规划道路"),
 }
 
 

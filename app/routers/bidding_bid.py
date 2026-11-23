@@ -138,11 +138,14 @@ def _price_advice(req: Dict[str, Any]):
 class BidGenerateRequest(BaseModel):
     tender_path: str
     company_id: int = 4
-    price_wan: float
+    price_wan: float = 0
     seed: Optional[int] = None
     use_llm: bool = True
     personnel: Optional[List[Dict[str, Any]]] = None
     agent_name: str = ""
+    # 竞争性磋商按亩计价：报省/报市单价（元/亩）；不传按磋商文件最高限价
+    unit_price_province: Optional[float] = None
+    unit_price_city: Optional[float] = None
 
 
 @router.post("/generate", response_model=ApiResponse)
@@ -153,17 +156,24 @@ async def generate_bid(request: BidGenerateRequest):
         tender = Path(request.tender_path)
     if not tender.exists():
         raise HTTPException(status_code=404, detail="招标文件不存在，请重新上传")
-    if request.price_wan <= 0:
-        raise HTTPException(status_code=400, detail="投标报价必须大于 0")
 
     from app.services.bidding_bid_builder import build_bid_document
     from app.services.bidding_tender import parse_tender
 
     req = parse_tender(tender)
+    _is_cs = req.get("bid_format") == "cuoshang"
+    if not _is_cs and request.price_wan <= 0:
+        raise HTTPException(status_code=400, detail="投标报价必须大于 0")
+    if _is_cs and not (request.unit_price_province or request.unit_price_city):
+        # 没填单价时按磋商文件最高限价出件（等于不降价，前端应提示）
+        if not (req.get("unit_prices") or {}):
+            raise HTTPException(status_code=400,
+                                detail="本项目按亩计价，请填写报省、报市单价")
     safe = "".join(ch for ch in str(req.get("project_name") or "投标文件")
                    if ch not in '\\/:*?"<>|')[:40]
-    # 询比项目叫「投选文件」，其余叫「投标文件」（文件名与文档口径一致）
-    _kind = "投选文件" if req.get("bid_format") == "xunbi" else "投标文件"
+    # 询比项目叫「投选文件」、磋商项目叫「响应文件」，其余叫「投标文件」
+    _kind = ("投选文件" if req.get("bid_format") == "xunbi"
+             else "响应文件" if _is_cs else "投标文件")
     out_name = f"{safe}_{_kind}_{uuid.uuid4().hex[:6]}.docx"
     out = Path(settings.STORAGE_DIR) / "generated" / out_name
     try:
@@ -171,7 +181,10 @@ async def generate_bid(request: BidGenerateRequest):
             tender_path=tender, company_id=request.company_id,
             price_wan=request.price_wan, out_path=out, seed=request.seed,
             personnel=request.personnel, use_llm=request.use_llm,
-            agent_name=request.agent_name)
+            agent_name=request.agent_name,
+            unit_prices={"province": request.unit_price_province,
+                         "city": request.unit_price_city}
+            if (request.unit_price_province or request.unit_price_city) else None)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"投标文件生成失败：{e}")
 
@@ -184,6 +197,7 @@ async def generate_bid(request: BidGenerateRequest):
             "project_name": req.get("project_name"),
             "project_no": req.get("project_no"),
             "price_wan": request.price_wan,
+            "unit_prices": req.get("unit_prices") or {},
             "format_chapter": req.get("format_chapter"),
         },
     )

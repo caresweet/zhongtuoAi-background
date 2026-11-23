@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 _REGION_FALLBACK_DOMAINS = ("reclamation", "bidding")
 
 
-async def resolve_template_path(domain: str, text: str) -> str:
+async def resolve_template_path(domain: str, text: str,
+                                region: str = "") -> str:
     """按域 + 地区挑模板，返回模板文件绝对路径；没有匹配返回 ""。
 
     Args:
         domain: 报告域（stability / reclamation / bidding）
         text: 用于匹配地区词的项目文本（地名、项目名、需求原文拼在一起即可）
+        region: 已识别出的地区（区县/市级）；传了就不再用文本猜
     """
     text = (text or "").strip()
 
@@ -60,7 +62,20 @@ async def resolve_template_path(domain: str, text: str) -> str:
     if not rows:
         return ""
 
-    best_region, best = pick_region_match(rows, text)
+    from app.services.region_detect import detect_region, template_region
+    # ① 已经识别出地区（区县或市级）→ 精确命中所属地区的模板
+    _want = template_region(region) if region else ""
+    if not _want and text:
+        _want = template_region(str(detect_region(text).get("region") or ""))
+    best_region, best = "", None
+    if _want:
+        for t in rows:
+            if template_region(getattr(t, "region", "") or "") == _want:
+                best_region, best = _want, t
+                break
+
+    if not best:
+        best_region, best = pick_region_match(rows, text)
 
     if not best and domain in _REGION_FALLBACK_DOMAINS:
         # 复垦/投标：没有地区模板就用该域的通用模板（region 为空的那条）
@@ -91,14 +106,26 @@ async def resolve_template_path(domain: str, text: str) -> str:
 def pick_region_match(items, text: str):
     """在 items 里按地区词匹配，返回 (命中的地区, 对应条目)；没命中返回 ("", None)。
 
-    多个命中取地区名**最长**的那条：「淮安区」比「淮安」更具体。
+    多个命中取地区名**最长**的那条：「淮安区」比「淮安」更具体；文本里已经有
+    区县名时，市级模板不再参与竞争（避免「淮安市淮安区」被市级抢走）。
     """
+    from app.services.region_detect import template_region
+
+    text = text or ""
+    has_district = any(d in text for d in
+                       ("淮安区", "淮阴区", "清江浦区", "洪泽区",
+                        "涟水县", "盱眙县", "金湖县"))
     best_region, best = "", None
     for t in items:
         r = (getattr(t, "region", "") or "").strip()
-        if not r or r not in (text or ""):
+        if not r:
             continue
-        if len(r) > len(best_region):
+        canon = template_region(r)
+        if r not in text and canon not in text:
+            continue
+        if has_district and canon == "淮安市":
+            continue
+        if len(canon) > len(template_region(best_region)):
             best_region, best = r, t
     return best_region, best
 

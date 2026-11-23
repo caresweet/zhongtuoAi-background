@@ -1436,6 +1436,40 @@ class ReportAssembler:
         except Exception as _gge:
             logger.warning(f"[闸门] 覆盖/字数检查跳过: {_gge}")
         doc.save(str(outpath))
+        # 稳评：**章节结构跟所在地区的模板走**（2026-11-20 业主口径）。
+        # 各区模板章数/顺序不同（洪泽 12、淮阴 10、淮安 14…），装配完按模板
+        # 的章标题重排/改名/取舍；模板解析不到就保持系统 14 章结构。
+        if self._domain == "stability":
+            try:
+                _tp = str(state.get("template_path") or "")
+                if _tp:
+                    from app.services.template_structure import (
+                        extract_plan, apply_plan)
+                    _plan = extract_plan(_tp)
+                    _st = apply_plan(outpath, _plan)
+                    if _st.get("applied"):
+                        logger.info(f"[模板结构] 按模板重排：{_st}")
+                        state["_template_structure"] = _st
+            except Exception as _se:
+                logger.warning(f"[模板结构] 重排跳过: {_se}")
+        # 复垦：装配后统一修补专家批注类问题（目录页码、章节号、表题、地类编码），
+        # 并跑一遍确定性审计；这些既不在正文 markdown 里，也不该留给人工。
+        if self._domain == "reclamation":
+            try:
+                from app.services.reclamation_expert_fixes import (
+                    apply_expert_fixes, audit_reclamation_docx)
+                _stats = apply_expert_fixes(outpath)
+                _issues = audit_reclamation_docx(outpath)
+                if _issues:
+                    logger.warning("[复垦审计] %d 项：%s", len(_issues),
+                                   "；".join(_issues[:8]))
+                else:
+                    logger.info("[复垦审计] 通过")
+                logger.info("[复垦专家修补] %s", _stats)
+                state["_reclamation_expert_fixes"] = _stats
+                state["_reclamation_audit"] = _issues
+            except Exception as _ef:
+                logger.warning(f"[复垦专家修补] 跳过: {_ef}")
         logger.info(f"Report assembled: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
         return f"generated/{filename}"
 
@@ -3601,7 +3635,8 @@ class ReportAssembler:
         #    横线在=留了空位可手填；不印「待填写」这类占位符（业主硬约束）。
         _rows = (
             ("项目名称：", pn),
-            ("项目单位：", filled.get("project_unit") or filled.get("org_name") or ""),
+            ("项目单位：", filled.get("project_unit")
+             or filled.get("build_unit") or filled.get("org_name") or ""),
             ("单位地址：", filled.get("unit_address") or ""),
             ("联 系 人：", filled.get("contact_name") or ""),
             ("电　　话：", filled.get("contact_phone") or ""),
@@ -6787,6 +6822,12 @@ class ReportAssembler:
         _r.font.size = Pt(14); _r.bold = True
         for _i, (_t, _) in enumerate(_sections, 1):
             self._add_para(doc, f'{_i}.{_t}', indent=False, font=FONT_SONGTI, size=Pt(14))
+
+        # 🔴 没有可渲染的附件材料 → 留白两页，供后续粘贴扫描件（业主口径）
+        if not _sections:
+            for _ in range(2):
+                doc.add_page_break()
+                self._add_para(doc, "", indent=False)
 
         # ── 按 `_sections` 的实际顺序渲染，编号动态排 ──
         for _no, (_t, _key) in enumerate(_sections, 1):

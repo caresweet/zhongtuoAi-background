@@ -9,14 +9,13 @@ v2: Added full image support — detects image markers in markdown, inserts
     (certificates, licenses, etc.) in the appendix.
 """
 
-import base64 as _base64
 import os, re, logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, List
 
 from docx import Document
-from docx.shared import Pt, Cm, Inches, RGBColor
+from docx.shared import Pt, Cm, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
@@ -60,15 +59,6 @@ def _read_page_geometry(template_path: Optional[str]):
     return (Emu(_w * _tw), Emu(_h * _tw), Emu(_top * _tw),
             Emu(_bottom * _tw), Emu(_left * _tw), Emu(_right * _tw))
 
-
-def _asset_image_to_dict(row) -> Dict:
-    """Convert AssetImage ORM row to a simple dict (avoids import issues)."""
-    return {
-        "data": _base64.b64decode(row.image_data),
-        "mime_type": row.mime_type,
-        "name": row.image_name,
-        "category": row.category,
-    }
 
 # Chinese number mapping
 _CN_NUM = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
@@ -174,8 +164,23 @@ class BiddingDocxGenerator:
         # ── Cover Page ──
         self._add_cover(doc, report_name, project_name, reference)
 
-        # ── Body Content ──
+        # ── 目录：封面之后单独一页 ──
+        # 先插 TOC 域，正文写完保存后再用 _stamp_toc 拿 LibreOffice 分页结果
+        # 换成带真实页码的静态条目（否则 WPS/Word 里只会显示「右键更新域」）。
         sections = self._parse_markdown_sections(markdown_content)
+        try:
+            from app.services.bidding_bid_builder import _add_toc, _stamp_toc
+            from app.services.bidding_style import load_bidding_style
+            style = load_bidding_style(self.storage_dir)
+        except Exception as e:      # 体例读不到也要有目录，退回默认版式
+            logger.warning(f"读取投标体例失败，目录用默认版式: {e}")
+            _add_toc = _stamp_toc = None
+            style = None
+        if _add_toc:
+            _add_toc(doc, style)
+            doc.add_page_break()
+
+        # ── Body Content ──
         for i, (title, content) in enumerate(sections):
             self._add_section(doc, title, content, available_images, i)
             if i < len(sections) - 1:
@@ -200,6 +205,16 @@ class BiddingDocxGenerator:
 
         doc.save(str(outpath))
         logger.info(f"Bidding DOCX saved: {outpath} ({len(doc.paragraphs)} paras, {len(doc.tables)} tables)")
+
+        # 用 LibreOffice 量分页，把目录域换成带页码的静态条目；没有 soffice 就保留目录域
+        if _stamp_toc:
+            titles = [t for t, _ in sections if t]
+            if titles:
+                try:
+                    ok = _stamp_toc(str(outpath), titles=titles, anchors=(), style=style)
+                    logger.info(f"投标报告目录：{len(titles)} 条，页码回填{'成功' if ok else '跳过'}")
+                except Exception as e:
+                    logger.warning(f"投标报告目录页码回填失败: {e}")
 
         return f"generated/{filename}"
 

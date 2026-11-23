@@ -21,7 +21,7 @@ from app.models.user import User
 
 from app.schemas.report import (
     StartGenerationRequest, StartGenerationResponse, ChatRequest,
-    GenerationStatusResponse, ActionResponse,
+    ActionResponse,
     WorkflowStartRequest, WorkflowResumeRequest, WorkflowStatusData,
 )
 from app.schemas.knowledge import ApiResponse
@@ -35,11 +35,8 @@ from app.agent.chapter_catalog import (
     chapter_title as _chapter_title,
 )
 from app.utils.sse import (
-    sse_event, sse_message, sse_progress, sse_status,
-    sse_data_filled, sse_error, sse_complete,
-    sse_chapter_start, sse_chapter_stream, sse_chapter_complete,
+    sse_event, sse_message, sse_status,
     sse_thinking, sse_thinking_stream, sse_phase_change,
-    sse_placeholder_filled, sse_collecting_question,
     sse_step_transition, sse_agent_status, sse_step_progress_sync,
 )
 
@@ -2691,6 +2688,9 @@ async def get_session_gaps(session_id: str, user: User = Depends(get_current_use
         "word_budget": _jsonable((session.state or {}).get("_word_budget") or {}),
         "deliverable": (session.state or {}).get("_deliverable"),
         "blockers": _jsonable((session.state or {}).get("_deliverable_blockers") or []),
+        # 复垦装配后的确定性审计（目录页码、章节号、表题、地类编码等）
+        "reclamation_audit": _jsonable(
+            (session.state or {}).get("_reclamation_audit") or []),
     })
 
 

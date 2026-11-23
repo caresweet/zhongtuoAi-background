@@ -525,8 +525,12 @@ def investment_table(est: BudgetEstimate) -> Optional[dict]:
     ]
     if est.dynamic_total:
         rows.append(["七", "动态总投资", _f(est.dynamic_total)])
+    # 专家批注：亩均投资要分静态/动态（只写一个数，评审会问是哪一个）
     if est.per_mu:
-        rows.append(["", "亩均投资（万元/亩）", _f(est.per_mu, 4)])
+        rows.append(["", "静态亩均投资（万元/亩）", _f(est.per_mu, 4)])
+        if est.dynamic_total and est.static_total:
+            _dyn_mu = est.per_mu * est.dynamic_total / est.static_total
+            rows.append(["", "动态亩均投资（万元/亩）", _f(_dyn_mu, 4)])
     return {"caption": "表7-4 土地复垦投资估算表",
             "headers": ["序号", "工程或费用名称", "金额（万元）"],
             "rows": rows}

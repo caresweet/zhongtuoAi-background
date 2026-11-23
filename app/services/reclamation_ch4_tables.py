@@ -532,9 +532,11 @@ def table_4_12(filled: dict) -> Optional[dict]:
         _total_m2 = _num((filled or {}).get("area_m2"))
     if _total_m2 <= 0:
         return None
+    # 「可复垦耕地面积」只算一级地类为耕地的面积（园地复垦后仍是园地，
+    # 不能并进耕地）；专家 2026-11-19 批注：本项目耕地 1.4000 公顷。
     _farm_m2 = sum(
         _num(r.get("面积_m2")) for r in rows_in
-        if _class_name(r.get("一级地类")) in _STRIP_TOP_CLASSES)
+        if _class_name(r.get("一级地类")) == "耕地")
     _dirs: List[str] = []
 
     def _add_dirs(value: str) -> None:

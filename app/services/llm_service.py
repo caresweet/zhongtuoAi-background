@@ -55,9 +55,9 @@ class LLMService:
     """Unified LLM client supporting OpenAI-compatible APIs.
 
     Configured via environment/.env:
-    - LLM_BASE_URL: API base URL (default: DashScope)
+    - LLM_BASE_URL: API base URL (default: DeepSeek 官方 https://api.deepseek.com)
     - LLM_API_KEY: API key
-    - LLM_MODEL: Model name (default: qwen-max / Qwen3-Max)
+    - LLM_MODEL: Model name (default: deepseek-v4-pro)
     """
 
     def __init__(self):
@@ -65,9 +65,9 @@ class LLMService:
 
         self.api_key = settings.ANTHROPIC_API_KEY
 
-        # Use LLM_MODEL from .env, default to deepseek-chat
+        # Use LLM_MODEL from .env, default to DeepSeek official
         import os as _os
-        self.model = _os.environ.get("FINETUNED_MODEL") or settings.LLM_MODEL or "deepseek-chat"
+        self.model = _os.environ.get("FINETUNED_MODEL") or settings.LLM_MODEL or "deepseek-v4-pro"
 
         # Base URL from config, fallback to DeepSeek official API
         base_url = settings.LLM_BASE_URL or settings.ANTHROPIC_BASE_URL or ""
@@ -591,45 +591,44 @@ class LLMService:
             return "{}"
 
         from app.config import settings as _s
-        vision_model = _s.VISION_MODEL or self.model
+        vision_model = _s.VISION_MODEL or "deepseek-flash"
         vision_base_url = (_s.VISION_BASE_URL or self.base_url).rstrip("/")
         if vision_base_url.endswith("/anthropic"):
             vision_base_url = vision_base_url[:-9]
         vision_key = _s.VISION_API_KEY or self.api_key
 
-        # 🔴 DeepSeek 官方视觉 API 用「message.image 数组」格式（非 OpenAI content[].image_url）
-        #     已验证：model=deepseek-v4-flash-vision-exp，image=[{"type":..,"base64":..}] 被接受。
-        #     其他 OpenAI 兼容网关（如 aigw.telecomjs.com）仍需 content[].image_url 格式。
-        is_deepseek_vision = "api.deepseek.com" in vision_base_url
-        if is_deepseek_vision:
-            img_type = (media_type.split("/")[-1] if media_type and "/" in media_type else "png").lower()
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            # 🔴 DeepSeek image 元素用 `data` 字段承载 base64（非 base64 字段）
-            messages.append({
-                "role": "user",
-                "image": [{"type": img_type, "data": image_base64}],
-                "content": text,
-            })
-        else:
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": text},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{media_type};base64,{image_base64}",
-                        },
-                    },
-                ],
-            })
+        # 🔴 统一走 OpenAI 兼容的 content[].image_url 格式。
+        #    DeepSeek 官方（api.deepseek.com）实测：deepseek-flash 能读图；
+        #    deepseek-v4-pro 收下图片但内容为空；DeepSeek 私有的
+        #    `message.image` 数组格式官方接口不认（模型会回答看不到图）。
+        img_type = (media_type or "image/png").strip()
+        if "/" not in img_type:
+            img_type = f"image/{img_type}"
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img_type};base64,{image_base64}"},
+                },
+            ],
+        })
 
         async def _do_request():
+            payload = {
+                "model": vision_model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.2,
+            }
+            # 🔴 DeepSeek 的 flash/v4 系列会先产 reasoning_content，和正文共用
+            #    max_tokens；视觉调用普遍只给几百 token，不关思考会直接空返回。
+            if self._supports_thinking_toggle():
+                payload["thinking"] = {"type": "disabled"}
             async with httpx.AsyncClient(timeout=self.timeout, limits=self.limits) as client:
                 return await client.post(
                     f"{vision_base_url}/chat/completions",
@@ -637,12 +636,7 @@ class LLMService:
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {vision_key}",
                     },
-                    json={
-                        "model": vision_model,
-                        "messages": messages,
-                        "max_tokens": max_tokens,
-                        "temperature": 0.2,
-                    },
+                    json=payload,
                 )
 
         data = await self._retry_request(_do_request, label="Vision")

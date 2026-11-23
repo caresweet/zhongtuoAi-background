@@ -56,7 +56,9 @@ def fix_heading_numbers(md: str) -> Tuple[str, int]:
             if lines[i] != ln:
                 changes += 1
         else:
-            k = int(a) or lvl2
+            # 三级编号必须跟**当前二级**走：原文 1.1 下面写成 1.2.1/1.2.2，
+            # 专家批注「1.2.1和1.2.2怎么到这里了」——改成 1.1.1/1.1.2
+            k = lvl2 or int(a)
             lvl3[k] = lvl3.get(k, 0) + 1
             new = f"{ch}.{k}.{lvl3[k]}"
             rest = ln[len(m.group(0)):]
@@ -823,7 +825,11 @@ def add_other_cost_table(md: str, filled: Dict[str, Any]) -> Tuple[str, int]:
             ("3", "竣工验收费", "工程施工费×4.7%", fin),
             ("4", "业主管理费", "（工程施工费+前期+监理+竣工）×2.8%", own)]
     if mov >= 0.005:
-        rows.append(("5", "拆迁补偿费", "按其他费用总额平衡计列", mov))
+        # 专家批注「太笼统，应该具体化」：尾差也要有可核算的计费基数，
+        # 按工程施工费折算成费率写进计算式，不再写「平衡计列」
+        _rate = mov / construction * 100.0 if construction else 0.0
+        rows.append(("5", "拆迁补偿费",
+                     f"工程施工费×{_rate:.2f}%", mov))
     table = ["| 序号 | 费用名称 | 计算式 | 金额（万元） |", "|---|---|---|---|"]
     for no, name, formula, amt in rows:
         table.append(f"| {no} | {name} | {formula} | {_fmt_wan(amt)} |")
@@ -923,6 +929,7 @@ def fix_phase_schedule(md: str, filled: Dict[str, Any], chapter: int = 8) -> Tup
     for pat, val in (
             (r'(表土剥离期安排费用)\s*[\d.]+\s*万元', p1),
             (r'(用地监测期安排费用)\s*[\d.]+\s*万元', p2),
+            (r'(用地期间安排费用)\s*[\d.]+\s*万元', p2),
             (r'(复垦施工期安排费用)\s*[\d.]+\s*万元', p3),
             (r'(管护期安排费用)\s*[\d.]+\s*万元', p4),
             (r'(各阶段费用合计)\s*[\d.]+\s*万元', sch["total"])):
@@ -944,6 +951,92 @@ def fix_phase_schedule(md: str, filled: Dict[str, Any], chapter: int = 8) -> Tup
         n += 1
         break
     return _rejoin(lines, md), n
+
+
+def fix_stray_section_numbers(md: str) -> Tuple[str, int]:
+    """正文里以「1.2.1 …」开头的散段：不是标题却带章节号，专家批注「怎么到这里了」。
+
+    真正的标题是 `#` 开头；其余行若以三级章节号开头，整行删掉（内容与
+    对应小节重复）。
+    """
+    lines = md.splitlines()
+    out, n = [], 0
+    for ln in lines:
+        s = ln.strip()
+        if (not s.startswith("#") and re.match(r'^\d+\.\d+\.\d+\s+', s)
+                and not s.startswith("|")):
+            n += 1
+            continue
+        out.append(ln)
+    return "\n".join(out), n
+
+
+def fix_list_numbering(md: str) -> Tuple[str, int]:
+    """连续编号条目重排（（1）（2）… / 1）2）…），修「（1）→（3）」这类断号。
+
+    条目之间允许空行（Markdown 常见），空行不打断同一组。
+    """
+    lines = md.splitlines()
+    n = 0
+    pat = re.compile(r'^(\s*)(（\d+）|\(\d+\)|\d+）)\s*(.*)$')
+    i = 0
+    while i < len(lines):
+        m = pat.match(lines[i])
+        if not m or lines[i].lstrip().startswith("|"):
+            i += 1
+            continue
+        style = "（）" if m.group(2).startswith("（") else (
+            "()" if m.group(2).startswith("(") else "）")
+        idxs = []
+        j = i
+        while j < len(lines):
+            if not lines[j].strip():
+                j += 1
+                continue
+            mm = pat.match(lines[j])
+            if not mm:
+                break
+            st = "（）" if mm.group(2).startswith("（") else (
+                "()" if mm.group(2).startswith("(") else "）")
+            if st != style:
+                break
+            idxs.append((j, mm.group(1), mm.group(3)))
+            j += 1
+        if len(idxs) >= 2:
+            for k, (ln_i, ind, body) in enumerate(idxs, 1):
+                if style == "（）":
+                    new_ln = f"{ind}（{k}）{body}"
+                elif style == "()":
+                    new_ln = f"{ind}({k}){body}"
+                else:
+                    new_ln = f"{ind}{k}）{body}"
+                if lines[ln_i] != new_ln:
+                    lines[ln_i] = new_ln
+                    n += 1
+        i = max(j, i + 1)
+    return "\n".join(lines), n
+
+
+def fix_expert_sentences(md: str) -> Tuple[str, int]:
+    """2026-11-19 专家批注的确定性语句修正。"""
+    n = 0
+    out = md
+    pairs = [
+        (r'复垦方向为恢复原地类([^。；]*)量不低于损毁前',
+         r'复垦方向为恢复原地类\1，复垦面积不低于损毁前面积'),
+        (r'在工程施\s*(?=淮安市自然资源和规划局淮安分局)',
+         '在施工过程中，由'),
+        (r'每年12月31\s*(?=淮安市自然资源和规划局淮安分局)',
+         '每年12月31日前向'),
+        (r'尽量少占用永久基本农田', '不占用永久基本农田'),
+        (r'综合分值均高于\s*90\s*分', '综合分值均在80分以上'),
+        (r'2027年2月至2028年6月监测管护阶段',
+         '2027年2月至2028年6月土地损毁监测阶段'),
+    ]
+    for pat, rep in pairs:
+        out, k = re.subn(pat, rep, out)
+        n += k
+    return out, n
 
 
 def fix_submit_date(filled: Dict[str, Any]) -> int:
@@ -1214,6 +1307,10 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
         md, n_merge = merge_broken_sentences(md)
         md, n_u = fix_units(md)
         md, n_d = dedupe_sections(md)
+        md, n_hn = fix_heading_numbers(md)
+        md, n_stray = fix_stray_section_numbers(md)
+        md, n_list = fix_list_numbering(md)
+        md, n_ex = fix_expert_sentences(md)
         md, n_s = fix_service_period(md, filled or {})
         md, n_ue = fix_use_period_end(md, filled or {})
         md, n_tl = fix_topsoil_land_types(md, filled or {})
@@ -1270,6 +1367,8 @@ def repair_reclamation_chapters(chapters: Dict[Any, Dict[str, Any]],
                          ("去AI味", n_ai),
                          ("长句断句", n_long), ("断句回并", n_merge),
                          ("单位hm²", n_u), ("重复段", n_d),
+                         ("小节号", n_hn), ("散落章节号", n_stray),
+                         ("条目编号", n_list), ("专家语句", n_ex),
                          ("服务年限", n_s), ("使用期起止", n_ue),
                          ("剥离地类", n_tl), ("复垦方向/面积", n_r),
                          ("地块数", n_plot),

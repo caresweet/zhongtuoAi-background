@@ -64,10 +64,140 @@ def _clean(s: str) -> str:
     return re.sub(r'[ \t　]+', " ", str(s or "")).strip()
 
 
+_CN_DIGITS = {"零": 0, "〇": 0, "壹": 1, "贰": 2, "叁": 3, "肆": 4,
+              "伍": 5, "陆": 6, "柒": 7, "捌": 8, "玖": 9}
+
+
+def _cn_int(text: str) -> int:
+    """中文大写金额 → 整数（「叁万伍仟元整」→ 35000）。
+
+    政府采购预算常写大写金额（本项目「预算金额：叁万伍仟元整」），
+    数字正则抓不到，投标文件里的报价/预算就空着。
+    """
+    total = section = number = 0
+    for ch in str(text or ""):
+        if ch in _CN_DIGITS:
+            number = _CN_DIGITS[ch]
+        elif ch in "十拾":
+            section += (number or 1) * 10
+            number = 0
+        elif ch in "百佰":
+            section += number * 100
+            number = 0
+        elif ch in "千仟":
+            section += number * 1000
+            number = 0
+        elif ch == "万":
+            total += (section + number) * 10000
+            section = number = 0
+        elif ch == "亿":
+            total = (total + section + number) * 100000000
+            section = number = 0
+        elif ch == "元":
+            break
+    return total + section + number
+
+
 # ═══════════════════════════════════════════════════════════════
 # 招标文件解析
 # ═══════════════════════════════════════════════════════════════
 _UNIT = r'([0-9]+(?:\.[0-9]+)?)\s*万元'
+
+
+def _work_items_of(blob: str) -> List[Dict[str, str]]:
+    """服务内容表（「编号\\t名称\\t工作描述」）→ 工作项清单（去重）。
+
+    docx 表格在 `extract_text` 里按行展开成制表符分隔；合并单元格会让同一行
+    出现两次（洪泽磋商文件「2 实地调查阶段」），这里按 (编号,名称,描述) 去重。
+    """
+    items: List[Dict[str, str]] = []
+    seen = set()
+    for ln in str(blob or "").splitlines():
+        m = re.match(r'^(\d+(?:\.\d+)?)\t([^\t]{2,40})\t(.*)$', ln.strip())
+        if not m:
+            continue
+        no, name = m.group(1), _clean(m.group(2))
+        desc = _clean(re.sub(r'\t+', " ", m.group(3)))
+        if not desc or desc == name:
+            continue
+        key = (no, name, desc)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"no": no, "name": name, "desc": desc})
+    return items
+
+
+def _parse_cuoshang(blob: str, work_items: Optional[List[Dict[str, str]]] = None
+                    ) -> Dict[str, Any]:
+    """竞争性磋商文件的项目要点（资格、响应格式、评分、服务期）。
+
+    磋商文件的章节号与公开招标不同（没有「第四章 评标方法」，评分表是
+    「第三部分 评标标准」里的一张表），`parse_tender` 的通用正则抓不到，
+    这里按磋商文件的固定标签单独取。
+    """
+    quals: List[str] = []
+    m = re.search(r'申请人的?资格要求[：:]?(.*?)(?:三、获取采购文件|获取采购文件)',
+                  blob, re.S)
+    if m:
+        for line in m.group(1).splitlines():
+            s = line.strip()
+            if re.match(r'^(?:（\d+）|\(\d+\)|\d+[、.．])', s):
+                quals.append(s)
+
+    qual_docs: List[str] = []
+    # 🔴 用 rfind：目录里也有同名条目（后面跟着页码点线），不能从目录开始截
+    _qs = blob.rfind("二、资质审查时供应商必须提交的资格证明文件")
+    if _qs >= 0:
+        _qe = blob.find("三、人员配备表", _qs)
+        seg = blob[_qs:_qe if _qe > _qs else _qs + 2000]
+        for line in seg.splitlines():
+            s = line.strip()
+            if re.match(r'^\d+[、.．]', s):
+                qual_docs.append(s)
+
+    sections: List[str] = []
+    # 响应文件格式的**正文**章标题（目录里的是无空格版 + 页码点线）
+    _starts = [mm.start() for mm in re.finditer(
+        r'第[一二]章\s*响\s*应\s*文\s*件\s*格\s*式', blob)]
+    if _starts:
+        for line in blob[_starts[-1]:].splitlines():
+            s = line.strip()
+            if s.startswith("示范格式"):
+                break
+            mm = re.match(r'^([一二三四五六七八九十]+)、\s*([^\n…\.]{2,40})$', s)
+            if mm:
+                sections.append(f"{mm.group(1)}、{mm.group(2)}")
+
+    scoring: List[Dict[str, Any]] = []
+    for mm in re.finditer(r'([一二三四五六七八九十]+、[^\n：:]{2,12})[：:]\s*(\d+)\s*分',
+                          blob):
+        item = _clean(mm.group(1))
+        if not any(x["item"] == item for x in scoring):
+            scoring.append({"item": item, "score": int(mm.group(2))})
+
+    scoring_sub: List[Dict[str, Any]] = []
+    for mm in re.finditer(r'(\d+、[^（(：:\n]{2,12})[（(]\s*(\d+)\s*分\s*[）)]', blob):
+        scoring_sub.append({"item": _clean(mm.group(1)),
+                            "score": int(mm.group(2))})
+
+    duration_text = ""
+    m = re.search(r'服务时间[：:]\s*([^\n。]{2,40})', blob)
+    if m:
+        duration_text = _clean(m.group(1))
+
+    return {
+        "qualifications": quals,
+        "qualification_docs": qual_docs,
+        "format_sections": sections,
+        "scoring": scoring,
+        "scoring_sub": scoring_sub,
+        "duration_text": duration_text,
+        "work_items": work_items or [],
+        # 磋商文件的人员评分普遍要求「职称证书 + 开标前六个月社保证明」，
+        # 拟派人员只能从参保名单里选（没参保的人上表会被评委扣分）
+        "personnel_insured": "社保证明" in blob,
+    }
 
 
 def parse_tender(path: str | Path) -> Dict[str, Any]:
@@ -94,14 +224,24 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     project_no = (grab(r'项目编号[:：]\s*([^\s，,]+)')
                   or grab(r'询比编号[:：]\s*([^\s，,]+)'))
     # 采购人/代理的标签各家不同（采购人：/采购人名称：/采购单位：/询比人：/招标代理机构：）
-    purchaser = (grab(r'采\s*购\s*人(?:名称)?[:：]\s*(.+)')
+    # 🔴 先认「XX信息 + 名 称：」块：磋商文件里「致：采购人」这类引用句会被
+    #    普通正则先命中，抓出来是一整段声明文字（洪泽磋商文件实测）。
+    purchaser = (grab(r'采购人信息\s*名\s*称[:：]\s*(.+)')
+                 or grab(r'采\s*购\s*人(?:名称)?[:：]\s*(.+)')
                  or grab(r'询\s*比\s*人[:：]\s*(.+)')
                  or grab(r'采购单位[:：]\s*(.+)'))
-    agency = (grab(r'采购代理机构[:：]\s*(.+)')
+    agency = (grab(r'采购代理机构信息\s*名\s*称[:：]\s*(.+)')
+              or grab(r'采购代理机构[:：]\s*(.+)')
               or grab(r'招标代理(?:机构)?[:：]\s*(.+)'))
     # 金额单位：万元 或 元（大冈镇这份写的是 62000.00 元）
     budget = grab(r'本项目预算为[:：]?\s*' + _UNIT)
     budget_yuan = grab(r'预算金额[为:：]?\s*([0-9,]+(?:\.\d+)?)\s*元')
+    if not budget_yuan and not budget:
+        _cn_budget = grab(r'预算金额[为:：]?\s*([零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元整]+)')
+        if _cn_budget:
+            _v = _cn_int(_cn_budget)
+            if _v > 0:
+                budget_yuan = str(_v)
     max_yuan = grab(r'最高(?:投选|投标)?限价[^0-9]{0,8}'
                     r'([0-9,]+(?:\.\d+)?)\s*元')
     if budget_yuan and not budget:
@@ -112,7 +252,17 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
     max_price = (grab(r'最高(?:投选|投标)?限价[^0-9]{0,10}' + _UNIT)
                  or grab(r'总价最高限价[^0-9]{0,10}' + _UNIT)
                  or budget)
-    if max_yuan and not grab(r'最高(?:投选|投标)?限价[^0-9]{0,10}' + _UNIT):
+    # 按亩计价（最高限价：350元/亩（报省）、240元/亩（报市））：
+    # 不能把「350 元」当成总价 0.035 万元，总价栏位留给预算金额。
+    unit_prices: Dict[str, float] = {}
+    _up = re.search(r'最高限价[^。\n]{0,20}?(\d+(?:\.\d+)?)\s*元/亩\s*[（(]\s*报省'
+                    r'[）)]\s*[、，,；;]?\s*(\d+(?:\.\d+)?)\s*元/亩\s*[（(]\s*报市',
+                    blob)
+    if _up:
+        unit_prices = {"province": float(_up.group(1)),
+                       "city": float(_up.group(2))}
+        max_price = budget or ""
+    elif max_yuan and not grab(r'最高(?:投选|投标)?限价[^0-9]{0,10}' + _UNIT):
         try:
             max_price = f"{float(max_yuan.replace(',', '')) / 10000:g}"
         except ValueError:
@@ -254,19 +404,38 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
             _seen_no.add(no)
             format_titles.append(t)
     # 只有「最低评标价法」的招标文件走简式八件套；询比项目（「投选人」「投选文件
-    # 格式」「附件1：封面」）走询比件；其余沿用综合评分法的全量版
+    # 格式」「附件1：封面」）走询比件；竞争性磋商（「竞争性磋商」+「响应文件格式」）
+    # 走磋商件；其余沿用综合评分法的全量版
     if "最低评标价法" in blob or "最低投标价法" in blob:
         bid_format = "compact"
     elif "投选文件格式" in blob or ("询比文件" in blob and "投选人" in blob):
         bid_format = "xunbi"
+    elif "竞争性磋商" in blob and re.search(r'响\s*应\s*文\s*件\s*格\s*式', blob):
+        bid_format = "cuoshang"
     else:
         bid_format = "full"
+
+    cuoshang: Dict[str, Any] = {}
+    if bid_format == "cuoshang":
+        cuoshang = _parse_cuoshang(blob, work_items=_work_items_of(text))
+    # 把招标文件自己写的「投标/响应文件格式」抽出来（章节、表格列名、示范格式）
+    format_spec: Dict[str, Any] = {}
+    try:
+        from app.services.bidding_format_spec import extract_format_spec
+        format_spec = extract_format_spec(path)
+    except Exception as e:
+        logger.warning(f"[招标解析] 格式章解析失败 {path}: {e}")
 
     # ── 询比件的工期（「合同签订之日起至复垦验收完成（12个月）」）──
     duration_months = 0
     _dm = re.search(r'[（(]\s*(\d{1,2})\s*个月\s*[）)]', blob)
     if _dm:
         duration_months = int(_dm.group(1))
+    # 磋商件写的是「服务时间：从合同签订之日起一年」
+    if not duration_months and bid_format == "cuoshang":
+        _dt = str(cuoshang.get("duration_text") or "")
+        if "一年" in _dt or "1年" in _dt:
+            duration_months = 12
 
     # ── 询比件的服务内容清单（第五章 服务内容表：编号/名称/工作描述）──
     #    从**未清洗**的原文里按制表符切列（`lines` 已把 \t 折成空格）
@@ -280,6 +449,9 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         if desc == name or not desc:
             continue          # 分组行（1  XXX  1）不是末级工作项
         work_items.append({"no": no, "name": name, "desc": desc})
+    # 磋商件用前面统一去重过的一份（合并单元格会重复出行）
+    if bid_format == "cuoshang" and cuoshang.get("work_items"):
+        work_items = cuoshang["work_items"]
 
     # ── 户数 / 单价（村庄测绘这类按户计价）──
     households = ""
@@ -473,7 +645,10 @@ def parse_tender(path: str | Path) -> Dict[str, Any]:
         "work_items": work_items,
         "plots": plots,
         "budget_yuan": budget_yuan,
-        "max_price_yuan": max_yuan,
+        "max_price_yuan": "" if unit_prices else max_yuan,
+        "unit_prices": unit_prices,
+        "cuoshang": cuoshang,
+        "format_spec": format_spec,
         "bid_format": bid_format,
         "price_rule": price_rule,
         "format_titles": format_titles,

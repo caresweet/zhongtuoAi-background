@@ -2,21 +2,19 @@
 
 Strategy:
 1. Digital PDFs → pdfplumber.extract_tables() (fast, accurate)
-2. Scanned PDFs → PyMuPDF render → Qwen-VL OCR + table detection
-3. Images → Qwen-VL direct analysis
+2. Scanned PDFs → PyMuPDF render → 视觉模型 OCR + table detection
+3. Images → 视觉模型直读
 
 Returns structured table data + narrative text for RAG ingestion.
 """
 
 from __future__ import annotations
 
-import io
-import json
 import logging
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import fitz  # PyMuPDF
 import pdfplumber

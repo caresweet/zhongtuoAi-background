@@ -59,12 +59,25 @@ async def main() -> int:
         filled["impl_leader"] = company["leader_name"]
         filled["impl_leader_title"] = company.get("leader_title") or ""
     title = str(filled.get("project_name") or "社会稳定风险评估报告")
+    # 🔴 按资料里的地区选模板：章节 agent 要以该地区模板当底稿，
+    #    装配阶段也要靠 template_path 做章序重排/表号重编。
+    template_path = ""
+    try:
+        from app.services.template_selector import resolve_template_path, build_match_text
+        template_path = await resolve_template_path(
+            "stability",
+            build_match_text(filled.get("location"), filled.get("project_name")),
+        ) or ""
+        print("[模板]", template_path or "未命中（按装配器兜底）")
+    except Exception as _tpl_e:
+        print("[模板] 选择失败：", _tpl_e)
     state = {
         "session_id": args.session,
         "_domain": "stability",
         "_conversation_domain": "stability",
         "report_title": title,
         "filled_data": filled,
+        "template_path": template_path,
         "_company_id": args.company_id,
         "_company": company,
         "_project_materials": [],

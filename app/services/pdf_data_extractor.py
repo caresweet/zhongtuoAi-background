@@ -143,7 +143,7 @@ class PDFDataExtractor:
         """Initialize with LLM service for VL-based OCR.
 
         Args:
-            llm_service: LLMService with chat_with_image() for Qwen-VL-Max.
+            llm_service: LLMService with chat_with_image()（视觉模型走 VISION_*，默认 deepseek-flash）。
         """
         self.llm = llm_service
         self._semaphore = asyncio.Semaphore(5)  # Limit concurrent VL calls
@@ -414,7 +414,7 @@ class PDFDataExtractor:
     # ── VL-based OCR for scanned pages ──
 
     async def _ocr_page(self, pdf_path: str, page_num: int, doc_type: str) -> str:
-        """OCR a single PDF page using Qwen-VL-Max.
+        """OCR a single PDF page using the configured vision model.
 
         Renders the page as an image, then sends to VL model with type-specific prompt.
         """

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +267,17 @@ def build_quantity_table(filled: dict) -> Optional[dict]:
     rows = filled.get(QUANTITY_ROWS_KEY)
     if not isinstance(rows, list) or not rows:
         rows = build_quantity_rows(filled)
+    else:
+        # 专家批注：表6-1 与上面章节对不上，漏了表土剥离、场地清理。
+        # 估算 Excel 里没有的这两个分部，按本项目设计参数补在表头。
+        _computed = build_quantity_rows(filled)
+        _have = {str(r.get("name") or "") for r in rows}
+        _need = [r for r in _computed
+                 if str(r.get("name") or "") in
+                 ("表土剥离", "表土回填", "垫层清理", "垫层清除", "垃圾外运")
+                 and str(r.get("name") or "") not in _have]
+        if _need:
+            rows = _need + list(rows)
     if not rows:
         return None
     _cn = ["（一）", "（二）", "（三）", "（四）", "（五）", "（六）",

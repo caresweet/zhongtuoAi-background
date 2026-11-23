@@ -1273,11 +1273,16 @@ async def node_chapter_generate(state: ReportWorkflowState) -> ReportWorkflowSta
         if not state.get("template_path"):
             try:
                 from app.services.template_selector import resolve_template_path, build_match_text
+                _mats = state.get("_project_materials") or []
+                _mat_hint = " ".join(
+                    [str(m.get("source_name") or "") for m in _mats]
+                    + [str(m.get("text_content") or "")[:60000] for m in _mats])
                 _tp = await resolve_template_path(
                     domain_of_state(state),
                     build_match_text(
                         filled.get("location"), filled.get("project_name"),
                         state.get("project_context"), state.get("initial_message"),
+                        _mat_hint,
                     ),
                 )
                 if _tp:
@@ -2122,13 +2127,17 @@ async def node_assemble_final_report(state: ReportWorkflowState) -> ReportWorkfl
         if not _tpl_path:
             try:
                 from app.services.template_selector import resolve_template_path, build_match_text
+                _mats2 = state.get("_project_materials") or []
+                _mat_hint2 = " ".join(
+                    [str(m.get("source_name") or "") for m in _mats2]
+                    + [str(m.get("text_content") or "")[:60000] for m in _mats2])
                 _tpl_path = await resolve_template_path(
                     domain_of_state(state),
                     build_match_text(
                         filled.get("location"), filled.get("project_name"),
                         filled.get("doc_reference"),
                         state.get("project_context"),
-                        state.get("initial_message"),
+                        state.get("initial_message"), _mat_hint2,
                     ),
                 )
             except Exception as _te:

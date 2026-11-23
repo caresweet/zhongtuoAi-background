@@ -200,6 +200,12 @@ async def main() -> int:
             src.unlink()
         except OSError:
             pass
+    # 装配后的专家批注修补：目录页码、地类编码、空重复表题、附件清单
+    try:
+        from app.services.reclamation_expert_fixes import apply_expert_fixes
+        print("[专家批注]", apply_expert_fixes(fixed), flush=True)
+    except Exception as e:
+        print("[专家批注] 跳过:", e, flush=True)
     print("OUTPUT", fixed, fixed.exists(), flush=True)
     try:
         dl = Path.home() / "Downloads" / _out_name

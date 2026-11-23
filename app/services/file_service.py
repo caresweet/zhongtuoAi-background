@@ -3,7 +3,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional, BinaryIO
+from typing import Optional
 from fastapi import UploadFile, HTTPException
 import aiofiles
 
@@ -485,12 +485,12 @@ class FileService:
             from app.config import settings as s
             # Config-driven vision model/endpoint (VISION_* → falls back to LLM_*).
             _vbase = (s.VISION_BASE_URL or s.LLM_BASE_URL or s.ANTHROPIC_BASE_URL
-                      or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+                      or "https://api.deepseek.com").rstrip("/")
             if _vbase.endswith("/anthropic"):
                 _vbase = _vbase[:-9]
             vision_api_url = f"{_vbase}/chat/completions"
-            api_key = s.VISION_API_KEY or s.ANTHROPIC_API_KEY or s.EMBEDDING_API_KEY
-            vision_model = s.VISION_MODEL or s.LLM_MODEL or "qwen-vl-max"
+            api_key = s.VISION_API_KEY or s.ANTHROPIC_API_KEY
+            vision_model = s.VISION_MODEL or s.LLM_MODEL or "deepseek-flash"
 
             all_text = []
             for idx in page_indices:
@@ -511,29 +511,33 @@ class FileService:
                         )
 
                         with httpx.Client(timeout=90.0) as client:
+                            _payload = {
+                                "model": vision_model,
+                                "messages": [{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/png;base64,{img_b64}",
+                                            },
+                                        },
+                                    ],
+                                }],
+                                "max_tokens": 1024,
+                                "temperature": 0.2,
+                            }
+                            # DeepSeek 先产 reasoning_content，会和正文抢 token
+                            if "deepseek" in _vbase.lower():
+                                _payload["thinking"] = {"type": "disabled"}
                             resp = client.post(
                                 vision_api_url,
                                 headers={
                                     "Content-Type": "application/json",
                                     "Authorization": f"Bearer {api_key}",
                                 },
-                                json={
-                                    "model": vision_model,
-                                    "messages": [{
-                                        "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": prompt},
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": f"data:image/png;base64,{img_b64}",
-                                                },
-                                            },
-                                        ],
-                                    }],
-                                    "max_tokens": 1024,
-                                    "temperature": 0.2,
-                                },
+                                json=_payload,
                             )
 
                         if resp.status_code == 200:

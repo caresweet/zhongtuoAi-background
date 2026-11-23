@@ -93,7 +93,8 @@ async def distill_skills(domain: str = "stability", limit: int = 50) -> Dict[str
         llm = LLMService()
         # 蒸馏用非推理模型：deepseek-v4-pro 等推理模型会把输出预算耗在思考(reasoning_content)上，
         # 导致最终 content 为空、无法解析 JSON。可用环境变量 DISTILL_MODEL 覆盖默认值。
-        llm.model = (os.environ.get("DISTILL_MODEL") or "deepseek-chat").strip()
+        # DeepSeek 官方现役模型：deepseek-flash（非推理）/ deepseek-v4-pro（推理）。
+        llm.model = (os.environ.get("DISTILL_MODEL") or "deepseek-flash").strip()
         prompt = f"""你是社会稳定风险评估报告的资深审核专家。以下是多位人工专家对报告评估后提出的优化点和不足，请蒸馏成结构化的「审核 skill」。
 
 每条 skill 两种形式之一：

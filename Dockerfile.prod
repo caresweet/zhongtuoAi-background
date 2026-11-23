@@ -44,13 +44,16 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Runtime system deps (lighter than build deps)
-# libreoffice-headless NOT available on Debian Trixie — .doc→.docx conversion disabled for now
+# 🔴 LibreOffice：目录页码要靠它把 docx 转 PDF 量分页后再回填
+#    （`template_structure.stamp_toc_pages`）；没有它目录只有点线、没有页码。
+#    Debian Trixie 没有 libreoffice-headless 包，装 libreoffice-writer 即可（自带 soffice）。
 # 🔴 中文字体：CAD 图纸渲成 PNG 走 matplotlib，没有中文字体时图纸上的
 #    标注/图名会整段丢失（实测 libredwg 渲出的「宗地图」只剩几个红点）。
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::ForceIPv4=true update \
     && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
     libpq5 \
+    libreoffice-writer \
     fonts-wqy-zenhei fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/*
 

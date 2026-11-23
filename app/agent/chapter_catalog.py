@@ -1102,6 +1102,21 @@ def template_block_for_prompt(
         #    后半章的表格与适宜性评价结论整段切掉 —— agent 拿到的是半章底稿。
         #    （12000 仍差 221 字，实测会打出「模板后续内容略」，故留足余量。）
         _base = build_template_block_from_path(template_path, chapter_number, limit=16000)
+    elif template_path and domain in (None, "", "stability"):
+        # 稳评：底稿要取**所选地区模板里对应的那一章**（洪泽第9章=建议，
+        # 淮阴区第9章=工作报告 —— 系统章号与模板章号不是一回事）
+        from app.services.template_structure import (
+            build_block_for_chapter, layout_hint_for_chapter)
+        _base = build_block_for_chapter(template_path, chapter_number, limit=16000)
+        try:
+            _hint = layout_hint_for_chapter(template_path, chapter_number)
+            if _hint and _hint not in _base:
+                _base = (_base or "") + _hint
+        except Exception as _le:
+            logger.debug(f"[模板版式] 小节规格注入跳过: {_le}")
+        if not _base:
+            from app.services.template_chapter_chunker import build_template_block_for_prompt
+            _base = build_template_block_for_prompt(chapter_number)
     else:
         from app.services.template_chapter_chunker import build_template_block_for_prompt
         _base = build_template_block_for_prompt(chapter_number)

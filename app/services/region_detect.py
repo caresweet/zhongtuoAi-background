@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict
 
 # 江苏省县级行政区（2024 年口径）
 _JS_COUNTIES = {
@@ -84,6 +84,21 @@ _BAD_PARTS = (
 _LOC_HINTS = ("位于", "地处", "坐落于", "坐落", "建设地点", "项目位置",
               "用地位置", "项目位于", "工程位于", "场址位于", "地址")
 
+# 淮安本地征地公告文号前缀 → 区县（业主 2026-11-20 给的对照，比正文词频可靠）
+_PREFIX_RULES = (
+    (r"淮拟征地告|淮拟征告", "淮阴区"),
+    (r"洪拟征告|洪征告", "洪泽区"),
+    (r"金征预告|金拟征告", "金湖县"),
+    (r"清拟征告", "清江浦区"),
+)
+
+# 线性工程跨区县：文件名/标题写「淮安段」的，按市级模板
+_CITY_LEVEL_HINTS = ("淮安段", "跨区县", "跨区项目")
+
+# 淮安市辖县级行政区（判断「跨区县 → 市级」用）
+_HUAIIAN_DISTRICTS = ("淮安区", "淮阴区", "清江浦区", "洪泽区", "涟水县",
+                      "盱眙县", "金湖县")
+
 # 候选前面必须是这些边界之一，避免把「目位于金湖县」整段抓进来
 _BOUNDARY = r"(?:^|[，。；：、\s（()）于在省市县区])"
 _CAND = re.compile(_BOUNDARY + r"([一-龥]{2,4}(?:区|县|市))")
@@ -140,6 +155,35 @@ def detect_region(text: str, filename: str = "") -> Dict[str, object]:
     if not blob.strip():
         return {"region": "", "evidence": "", "candidates": []}
 
+    # ① 征地公告文号前缀（淮拟征地告→淮阴区、洪拟征告→洪泽区…）：
+    #    这是发文机关自带的区县标识，优先于正文词频
+    head = blob[:3000]
+    for _pat, _reg in _PREFIX_RULES:
+        if re.search(_pat, filename) or re.search(_pat, head):
+            return {"region": _reg, "source": "文号前缀",
+                    "evidence": f"文号前缀 {_pat}", "candidates": []}
+
+    # ② 线性工程跨区县的（「淮安段」），按市级
+    if any(h in filename or h in text[:200] for h in _CITY_LEVEL_HINTS):
+        return {"region": "淮安市", "source": "线性工程",
+                "evidence": "标题含「淮安段」", "candidates": []}
+
+    # ③ 同时出现两个以上区县且占比都不小 → 跨区县项目，按市级
+    _cnt = {d: blob.count(d) for d in _HUAIIAN_DISTRICTS}
+    _top = max(_cnt.values() or [0])
+    _big = [d for d, c in _cnt.items() if c >= max(3, _top * 0.25)]
+    if _top >= 3 and len(_big) >= 2:
+        return {"region": "淮安市", "source": "跨区县",
+                "evidence": "涉及 " + "、".join(_big),
+                "candidates": [{"region": d, "score": c}
+                               for d, c in sorted(_cnt.items(),
+                                                  key=lambda kv: -kv[1])[:6]]}
+
+    # ④ 只写了「淮安市」、没有任何区县 → 市级模板
+    if "淮安市" in blob and not any(d in blob for d in _HUAIIAN_DISTRICTS):
+        return {"region": "淮安市", "source": "市级",
+                "evidence": "正文/文件名只出现淮安市", "candidates": []}
+
     after_city_tokens = {m.group(2) for m in _AFTER_CITY.finditer(blob)}
     scores: Dict[str, int] = {}
 
@@ -187,5 +231,18 @@ def detect_region(text: str, filename: str = "") -> Dict[str, object]:
     }
 
 
-def region_or_empty(text: str, filename: str = "") -> str:
-    return str(detect_region(text, filename).get("region") or "")
+# 模板库 region 列的历史写法不统一（洪泽 / 洪泽区、淮安 / 淮安市）：
+# 挑选模板前统一成同一套标签
+_REGION_ALIAS = {
+    "洪泽": "洪泽", "洪泽区": "洪泽",
+    "金湖": "金湖", "金湖县": "金湖",
+    "清江浦区": "清江浦区",
+    "淮安区": "淮安区", "淮阴区": "淮阴区",
+    "涟水县": "涟水县", "盱眙县": "盱眙县",
+    "淮安": "淮安市", "淮安市": "淮安市",
+}
+
+
+def template_region(region: str) -> str:
+    r = str(region or "").strip()
+    return _REGION_ALIAS.get(r, r)

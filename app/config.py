@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 
     # DeepSeek 官方 API（主文本模型）
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_MODEL: str = "deepseek-chat"
+    ANTHROPIC_MODEL: str = "deepseek-v4-pro"
     ANTHROPIC_BASE_URL: str = ""
 
     # File Storage
@@ -140,9 +140,9 @@ class Settings(BaseSettings):
     ]
     MAX_ATTACHMENT_SIZE_MB: int = 100  # Max size for non-image, non-PDF attachments
 
-    # Text LLM Service（Qwen3.7-Max via DashScope）
-    LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    LLM_MODEL: str = "qwen3-max"
+    # Text LLM Service（DeepSeek 官方 API）
+    LLM_BASE_URL: str = "https://api.deepseek.com"
+    LLM_MODEL: str = "deepseek-v4-pro"
 
     # Agent Tool-Call 开关：开启后章节 agent 生成正文前可自主调用工具（RAG/勘测定界/评分）
     ENABLE_AGENT_TOOLCALL: bool = True
@@ -203,16 +203,16 @@ class Settings(BaseSettings):
     # OCR 单字段置信度下限（低于此值 → 生成 low_conf_ocr 缺口，值照写但标记待复核）
     OCR_FIELD_CONFIDENCE_MIN: float = 0.85
 
-    # Vision model — Qwen-VL-Max via DashScope（图片识别 / OCR）
-    VISION_MODEL: str = "qwen-vl-max"
-    VISION_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # Vision model — DeepSeek 官方（deepseek-flash 已实测可读图）
+    VISION_MODEL: str = "deepseek-flash"
+    VISION_BASE_URL: str = "https://api.deepseek.com"
     VISION_API_KEY: str = ""
 
     # 缺图时的网络图片检索（可选；不配则自动降级为空候选）
     IMAGE_SEARCH_API_URL: str = ""
     IMAGE_SEARCH_API_KEY: str = ""
 
-    # RAG / Embedding (DashScope Qwen embedding)
+    # RAG / Embedding（DeepSeek 官方无 /embeddings，用 DashScope 官方接口）
     EMBEDDING_API_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     EMBEDDING_MODEL: str = "text-embedding-v3"
     EMBEDDING_API_KEY: str = ""

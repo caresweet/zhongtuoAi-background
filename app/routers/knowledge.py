@@ -11,7 +11,7 @@ from app.database.knowledge_db import get_knowledge_db
 from app.schemas.knowledge import (
     TemplateCreate, TemplateUpdate, TemplateResponse, TemplateDetailResponse,
     TemplateListResponse, PlaceholderResponse, ApiResponse,
-    KnowledgeDocumentCreate, KnowledgeDocumentResponse, KnowledgeDocumentListResponse,
+    KnowledgeDocumentResponse, KnowledgeDocumentListResponse,
 )
 from app.services.template_service import template_service
 from app.services.file_service import file_service
@@ -1119,7 +1119,6 @@ async def preview_clean(
     db: AsyncSession = Depends(get_knowledge_db),
 ):
     """Preview cleaning results: parse raw text if needed, run pipeline, return side-by-side."""
-    from fastapi import Body
     result = await db.execute(
         select(KnowledgeDocument).where(KnowledgeDocument.id == document_id)
     )
@@ -1275,7 +1274,7 @@ async def reset_clean(
 async def _index_image_document(relative_path: str, title: str) -> str:
     """Describe an image document using vision AI, for embedding as text.
 
-    Uses Qwen-VL-Max to generate a Chinese description of the image content,
+    Uses the configured vision model (VISION_*, 默认 DeepSeek deepseek-flash) to describe the image,
     which is then chunked and embedded like regular text documents.
     """
     import base64
@@ -1327,7 +1326,7 @@ async def _index_image_document(relative_path: str, title: str) -> str:
     try:
         # Route through the shared LLM service so the vision model/endpoint
         # is configurable (VISION_MODEL/VISION_BASE_URL) and consistent across
-        # the app, instead of hardcoding a DashScope Qwen-VL endpoint here.
+        # the app, instead of hardcoding a provider endpoint here.
         from app.services.llm_service import llm_service
 
         description = await llm_service.chat_with_image(

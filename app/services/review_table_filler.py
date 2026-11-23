@@ -324,6 +324,7 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
             _body.append(el)
 
     # ── ② 填表头 4 行 ──
+    _head_paras = []          # 四项（决策事项名称/责任单位/实施单位/填表日期）
     for el in _copies:
         if el.tag.split('}')[1] != 'p':
             continue
@@ -331,6 +332,7 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
         for _pre, _key in _HEAD_PREFIX:
             if txt.startswith(_pre):
                 _replace_para_text(el, f"{_pre}{d.get(_key, '') or ''}")
+                _head_paras.append(el)
                 # 🔴 表头四项（决策事项名称/责任单位/实施单位/填表日期）要与**表格左边缘对齐**：
                 #    模板里这几段带 0.99cm 首行缩进 + 两端对齐，实际渲染会跟表格错位，
                 #    整块看起来不齐（业主反馈「这几项内容的格式不对」）。
@@ -387,12 +389,13 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
         if _ri < len(tbl.rows):
             _put(_ri, 6, "√" if _ri == _tick_row else "")
 
-    # 🔴 表题「江苏省淮安市社会稳定风险评估评审表」：**黑体 二号(22pt)**，
-    #    与下方「决策事项名称：…」之间留**两行**（业主逐条指出）。
+    # 🔴 表题「江苏省淮安市社会稳定风险评估评审表」：**黑体 二号(22pt)**。
+    #    只在**复制进来的模板区间**里找 —— 装配器在本页之前还有一个章标题页
+    #    「淮安市社会稳定风险评估评审表」，按文档顺序取第一条会改错对象。
     #    模板里这条是仿宋22pt、前后各垫了 5~7 个空段。
     try:
         _title_p = None
-        for _el in (doc.element.body).iterchildren():
+        for _el in _copies:
             if _el.tag.split('}')[1] != 'p':
                 continue
             _txt = ''.join(t.text or '' for t in _el.iter(qn('w:t'))).strip()
@@ -416,22 +419,86 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
                 _b = _OE7('w:b'); _rpr.append(_b)
                 _sz = _OE7('w:sz'); _sz.set(qn('w:val'), '44'); _rpr.append(_sz)   # 22pt = 44 半点
                 _szc = _OE7('w:szCs'); _szc.set(qn('w:val'), '44'); _rpr.append(_szc)
-            # 标题之后：空段收敛到**恰好两行**
-            _nxt, _blanks = _title_p.getnext(), []
-            while _nxt is not None and _nxt.tag.split('}')[1] == 'p' \
-                    and not ''.join(t.text or '' for t in _nxt.iter(qn('w:t'))).strip():
-                _blanks.append(_nxt)
-                _nxt = _nxt.getnext()
-            for _b in _blanks[2:]:
-                _b.getparent().remove(_b)
-            while len(_blanks) < 2:
-                from docx.oxml import OxmlElement as _OE8
-                _np = _OE8('w:p')
-                _title_p.addnext(_np)
-                _blanks.append(_np)
-                if len(_blanks) >= 2:
+            # 🔴 标题 → 四项的竖向留白**按页面算**，不再写死「两行」：
+            #    删掉模板里夹在中间的空段，把「页面剩余高度」加到第一项的段前距，
+            #    形成「标题贴上、四项靠下、制单位贴底」的上下对齐版式
+            #    （业主 2026-11-23：评审表那页要上下对齐，不要都用在上方）。
+            _first_head = next((p for p in _head_paras
+                                if p.getparent() is not None), None)
+            if _first_head is not None:
+                # 标题前的空段也删掉（模板区间把目录后的空行一起带过来了，
+                # 不删会把标题顶到页面中部 —— 只动复制进来的区间元素）
+                _copy_ids = {id(x) for x in _copies}
+                _prev = _title_p.getprevious()
+                while (_prev is not None and id(_prev) in _copy_ids
+                       and _prev.tag.split('}')[1] == 'p'
+                       and not ''.join(t.text or '' for t in _prev.iter(qn('w:t'))).strip()):
+                    _pv = _prev.getprevious()
+                    _prev.getparent().remove(_prev)
+                    _prev = _pv
+                _blanks = []
+                _nxt = _title_p.getnext()
+                while _nxt is not None and _nxt is not _first_head:
+                    if _nxt.tag.split('}')[1] == 'p' and not ''.join(
+                            t.text or '' for t in _nxt.iter(qn('w:t'))).strip():
+                        _blanks.append(_nxt)
+                        _nxt = _nxt.getnext()
+                        continue
                     break
-            logger.info("[评审表] 表题已设黑体二号，其后留两行")
+                for _b in _blanks:
+                    _b.getparent().remove(_b)
+                # 页面内容高度 - 标题 - 四项（行高 20pt + 段前后各 6pt）
+                # - 制单位前两行 - 制单位 - 1.5cm 安全余量
+                from docx.shared import Cm as _Cm
+                _sec = doc.sections[-1]
+                _content = float(_sec.page_height.pt - _sec.top_margin.pt
+                                 - _sec.bottom_margin.pt)
+                _line_h = 20.0
+                _spacer = (_content - 22.0 - 4 * (_line_h + 12.0)
+                           - 2 * _line_h - _line_h - _Cm(1.5).pt)
+                if _spacer > 0:
+                    _pPr = _first_head.find(qn('w:pPr'))
+                    if _pPr is None:
+                        from docx.oxml import OxmlElement as _OE9
+                        _pPr = _OE9('w:pPr'); _first_head.insert(0, _pPr)
+                    _sp = _pPr.find(qn('w:spacing'))
+                    if _sp is None:
+                        from docx.oxml import OxmlElement as _OE10
+                        _sp = _OE10('w:spacing'); _pPr.append(_sp)
+                    for _a in ('w:beforeLines', 'w:beforeAutospacing'):
+                        if _sp.get(qn(_a)) is not None:
+                            del _sp.attrib[qn(_a)]
+                    _sp.set(qn('w:before'), str(int(_spacer * 20)))
+                logger.info(f"[评审表] 表题→四项动态留白 {int(_spacer)}pt"
+                            f"（正文区高 {int(_content)}pt）")
+            else:
+                # 兜底：找不到四项段落时维持旧版「其后两行」
+                _nxt, _blanks = _title_p.getnext(), []
+                while _nxt is not None and _nxt.tag.split('}')[1] == 'p' \
+                        and not ''.join(t.text or '' for t in _nxt.iter(qn('w:t'))).strip():
+                    _blanks.append(_nxt)
+                    _nxt = _nxt.getnext()
+                for _b in _blanks[2:]:
+                    _b.getparent().remove(_b)
+
+            # 制单位前的空段：模板里是 4 个，按上面的高度预算只留两行
+            _seal_p = None
+            for _el in _copies:
+                if _el.tag.split('}')[1] != 'p':
+                    continue
+                _t = ''.join(t.text or '' for t in _el.iter(qn('w:t'))).strip()
+                if '主管部门制' in _t:
+                    _seal_p = _el
+                    break
+            if _seal_p is not None:
+                _prev, _seal_blanks = _seal_p.getprevious(), []
+                while _prev is not None and _prev.tag.split('}')[1] == 'p' \
+                        and not ''.join(t.text or '' for t in _prev.iter(qn('w:t'))).strip():
+                    _seal_blanks.append(_prev)
+                    _prev = _prev.getprevious()
+                for _b in _seal_blanks[2:]:
+                    _b.getparent().remove(_b)
+            logger.info("[评审表] 表题已设黑体二号，标题/四项按页面动态上下对齐")
     except Exception as _te:
         logger.debug(f"评审表表题格式调整跳过: {_te}")
 

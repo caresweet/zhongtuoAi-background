@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""报告人员：未勾选时保留技术负责人，项目组成员随机取 5 人。"""
+"""报告人员：未勾选时随机取 5 名项目组成员，证书优先给有扫描件的人。"""
 
 from __future__ import annotations
 
@@ -10,15 +10,10 @@ def _people(n=10):
     return [{"姓名": f"P{i}", "拟任角色": "项目组成员"} for i in range(n)]
 
 
-def test_sample_team_keeps_lead_and_picks_five_members():
-    people = _people(10)
-    people.insert(3, {"姓名": "L", "拟任角色": "技术负责人"})
-    team = ReportAssembler._sample_team(people, 5)
-    assert len(team) == 6                      # 技术负责人 + 5 名项目组成员
-    assert any(p["拟任角色"] == "技术负责人" for p in team)
-    members = [p for p in team if p["拟任角色"] == "项目组成员"]
-    assert len(members) == 5
-    assert len({p["姓名"] for p in team}) == 6
+def test_sample_team_picks_five_members():
+    team = ReportAssembler._sample_team(_people(10), 5)
+    assert len(team) == 5
+    assert len({p["姓名"] for p in team}) == 5
 
 
 def test_sample_team_prefers_certified_members():

@@ -707,6 +707,7 @@ class ReportAssembler:
         # 人员名单缓存：未勾选时随机取 5 名项目组成员（技术负责人保留），全篇共用
         # （工作组名单 / 第7章名单 / 参与人员签字 / 证书页四处的名单必须一致）
         self._team_people = None
+        self._team_groups_cache = None
         self._cert_names = None
         self._used_template_certs: set = set()
         self._missing_images = []      # 资料里缺失的图片（只记缺口，不印占位）
@@ -2612,9 +2613,9 @@ class ReportAssembler:
             load_index, signature_or_placeholder)
 
         filled = filled or {}
-        # 🔴 与前置工作组名单同源（人员库 / 勾选人员）；取不到才退回签名库键表。
+        # 与前置工作组名单同源（五组人员去重）；取不到才退回签名库键表。
         names = [str(p.get("姓名") or "").strip()
-                 for p in (self._load_company_personnel() or [])
+                 for p in (self._team_all() or [])
                  if str((p or {}).get("姓名") or "").strip()]
         if not names:
             names = list(getattr(self, "_selected_personnel", None)
@@ -6289,23 +6290,24 @@ class ReportAssembler:
         return True
 
     def _render_personnel_roster(self, doc) -> None:
-        """第7章「成立稳评小组」成员名单 —— 由**界面勾选的人员**驱动。
+        """第7章「成立稳评小组」成员名单 —— 与前置工作组名单同一份五组分工。
 
         🔴 参照件里那份名单是**别项目的班组**（还带真实姓名），照搬即张冠李戴。
-        🔴 不写分工：人员库的「拟任角色」目前是统一默认值（项目组成员），
-           硬套「稳评负责人 / 调研 / 数据汇总」之类就是编造。只列姓名。
+        🔴 按模板的五类岗位输出（稳评负责人 / 调研 / 风险研判 / 汇总 / 档案），
+           同一人可出现在多个岗位组 —— 与金湖、洪泽等模板的写法一致。
         """
         try:
-            # 与前置工作组名单/签字区同源（未勾选时同一份随机 5 名项目组成员）
-            people = self._load_company_personnel()
-            names = []
-            for _p in people:
-                _n = str(_p.get("姓名") or "").strip()
-                if _n and _n not in names:
-                    names.append(_n)
-            if not names:
+            _groups = self._team_groups()
+            _lines = []
+            for _role, _members in _groups:
+                _names = [str(p.get("姓名") or "").strip()
+                          for p in _members if str(p.get("姓名") or "").strip()]
+                if _names:
+                    _lines.append(f"{_role}：{'、'.join(_names)}")
+            if not _lines:
                 return
-            self._add_para(doc, "成员如下：" + "、".join(names) + "。", indent=True)
+            for _line in _lines:
+                self._add_para(doc, _line, indent=True)
         except Exception as _e:
             logger.warning(f"稳评小组名单渲染失败: {_e}")
 
@@ -6323,9 +6325,8 @@ class ReportAssembler:
         （`_load_company_personnel()`：人员库按公司过滤，勾选了就按勾选）；
         签名 = 该人的手写签名图，没有就用「(此处签名)」占位图。
         """
-        # 🔴 名单必须与前置工作组名单同源：两处各查各的就会出现
-        #    「前面写项目组成员是甲、乙，签字却是丙、丁」（业主 2026-11-16 实测）。
-        people = self._load_company_personnel()
+        # 名单必须与前置工作组名单同源（五组里出现过的所有人，去重）
+        people = self._team_all()
         if not people:
             try:
                 from app.services.personnel_store import personnel_for
@@ -6401,7 +6402,11 @@ class ReportAssembler:
             logger.warning(f"读取人员库失败: {e}")
             return []
         if not sel and people:
-            people = self._sample_team(people, 5, self._names_with_certs())
+            # 公司负责人（总经理）单独进「稳评负责人」组，不从成员池里再抽
+            _leader = str((getattr(self, "_company", None) or {}).get("leader_name") or "").strip()
+            _pool = [p for p in people
+                     if not _leader or str(p.get("姓名") or "").strip() != _leader]
+            people = self._sample_team(_pool, 5, self._names_with_certs())
             logger.info("[人员] 未勾选，随机取 5 名项目组成员：%s",
                         [str(p.get("姓名") or "") for p in people
                          if isinstance(p, dict)])
@@ -6411,30 +6416,19 @@ class ReportAssembler:
     @classmethod
     def _sample_team(cls, people: list, n: int = 5,
                      certified: set = None) -> list:
-        """保留技术负责人，其余**随机取 n 名项目组成员**。
-
-        优先从「有证书扫描件」的人里抽（业主 2026-11-23：成员证书要能对应上），
-        不够再补没有扫描件的；返回顺序沿用人员库顺序。
-        """
+        """随机取 n 名项目组成员（优先有证书扫描件的），顺序沿用人员库顺序。"""
         import random
         people = [p for p in people if isinstance(p, dict)]
-        leads = [p for p in people
-                 if str(p.get("拟任角色") or "").strip() == "技术负责人"]
-        keep = leads[:1]
-        keep_ids = {id(p) for p in keep}
-        rest = [p for p in people if id(p) not in keep_ids]
-        need = max(0, n)
-        if len(rest) <= need and not certified:
-            chosen = keep_ids | {id(p) for p in rest}
-            return [p for p in people if id(p) in chosen]
-        pref = [p for p in rest
+        if len(people) <= n:
+            return people
+        pref = [p for p in people
                 if certified and str(p.get("姓名") or "").strip() in certified]
         pref_ids = {id(p) for p in pref}
-        others = [p for p in rest if id(p) not in pref_ids]
-        picked = random.sample(pref, min(need, len(pref)))
-        if len(picked) < need and others:
-            picked += random.sample(others, min(need - len(picked), len(others)))
-        chosen = keep_ids | {id(p) for p in picked}
+        others = [p for p in people if id(p) not in pref_ids]
+        picked = random.sample(pref, min(n, len(pref)))
+        if len(picked) < n and others:
+            picked += random.sample(others, min(n - len(picked), len(others)))
+        chosen = {id(p) for p in picked}
         return [p for p in people if id(p) in chosen]
 
     def _names_with_certs(self) -> set:
@@ -6462,12 +6456,93 @@ class ReportAssembler:
         self._cert_names = names
         return names
 
+    def _company_leader_person(self) -> dict:
+        """公司负责人（总经理/法人）——「稳评负责人」组固定用它。"""
+        comp = getattr(self, "_company", None) or {}
+        name = str(comp.get("leader_name") or "").strip()
+        if name:
+            _lt = str(comp.get("leader_title") or "").strip()
+            try:
+                from app.services.personnel_store import personnel_for
+                rows = personnel_for([name], self._company_id())
+                if rows:
+                    row = dict(rows[0])
+                    _t = str(row.get("职称/职务") or "").strip()
+                    if _lt and _lt not in _t:
+                        row["职称/职务"] = f"{_lt}、{_t}" if _t else _lt
+                    return row
+            except Exception:
+                pass
+            return {"姓名": name,
+                    "职称/职务": _lt,
+                    "拟任角色": "稳评负责人"}
+        people = self._load_company_personnel() or []
+        for p in people:
+            if str(p.get("拟任角色") or "").strip() == "技术负责人":
+                return p
+        return people[0] if people else {}
+
+    def _team_groups(self) -> list:
+        """按模板的五类岗位分组：负责人 / 调研 / 研判编制 / 汇总 / 档案。
+
+        人员库只有「技术负责人 / 项目组成员」两种角色，模板里的岗位分工是
+        固定结构（同一人可出现在多个组）；这里按固定结构分配，保证前置名单
+        和第 7 章「成员如下」都是模板那种五段式（业主 2026-11-23）。
+        """
+        cached = getattr(self, "_team_groups_cache", None)
+        if cached is not None:
+            return cached
+        people = [p for p in (self._load_company_personnel() or [])
+                  if isinstance(p, dict)]
+        leader = self._company_leader_person() or {}
+        _ln = str(leader.get("姓名") or "").strip()
+        members = [p for p in people if str(p.get("姓名") or "").strip() != _ln]
+        if not members:
+            members = people
+        if leader:
+            head = [leader]
+        else:
+            head = members[:1]
+        survey = members
+        analysis = members[:min(3, len(members))] if members else []
+        summary = members[3:4] or members[:1]
+        archive = members[4:5] or members[3:4] or members[:1]
+        groups = [
+            ("稳评负责人", head),
+            ("调研工作", survey),
+            ("风险研判与评估报告编制工作", analysis),
+            ("数据汇总整理", summary),
+            ("资料与档案工作", archive),
+        ]
+        self._team_groups_cache = groups
+        return groups
+
+    def _team_all(self) -> list:
+        """五组里出现过的所有人（去重、保持出现顺序）——签字区用。"""
+        out, seen = [], set()
+        for _role, items in self._team_groups():
+            for p in items:
+                n = str(p.get("姓名") or "").strip()
+                if n and n not in seen:
+                    seen.add(n)
+                    out.append(p)
+        return out
+
+    def _survey_names(self) -> list:
+        """调研工作组成员姓名 —— 人员证书只贴这些人的。"""
+        for _role, items in self._team_groups():
+            if _role == "调研工作":
+                return [str(p.get("姓名") or "").strip()
+                        for p in items if str(p.get("姓名") or "").strip()]
+        return []
+
     def _selected_personnel_cert_images(self) -> List[tuple]:
         """证书页要贴的人员证书扫描件 → [(文件路径, 图题)]。
 
         名单来源（业主口径）：
           ① 界面单独勾选的「证书人员」（`_selected_cert_personnel`，最多 3 人）；
-          ② 没勾证书人员时 = **工作组同一份 5 人名单**（`_load_company_personnel`）。
+          ② 没勾证书人员时 = **调研工作组成员**（总经理/负责人不贴资格证书 —
+             模板上贴的就是调研人员的证）。
 
         取图顺序：
           ① 人员库 `company_personnel_images`（人名 → 证书图，纯查表）；
@@ -6478,10 +6553,10 @@ class ReportAssembler:
         cert_sel = [str(x).strip() for x in
                     (getattr(self, "_selected_cert_personnel", None) or [])
                     if str(x).strip()]
-        team = self._load_company_personnel() or []
-        team_names = [str(p.get("姓名") or "").strip()
-                      for p in team if isinstance(p, dict)]
-        sel = cert_sel or [n for n in team_names if n]
+        # 业主 2026-11-23：总经理/负责人不需要资格证书，证书页贴调研工作组成员
+        _leader = str((self._company_leader_person() or {}).get("姓名") or "").strip()
+        sel = cert_sel or self._survey_names()
+        sel = [n for n in sel if n and n != _leader]
         if not sel:
             return []
 
@@ -6806,24 +6881,20 @@ class ReportAssembler:
         r.font.size = Pt(15); r.bold = True
         doc.add_paragraph()
         # 岗位标题: 宋体四号加黑靠左；内容: 宋体四号靠左
-        _personnel = self._load_company_personnel()
-        if _personnel:
-            # 🔴 按「拟任角色」分组渲染（数据来自 company_assets，更新入库即生效）
-            _groups = {}
-            for _ps in _personnel:
-                if not isinstance(_ps, dict):
+        # 🔴 按模板的五类岗位分工渲染（稳评负责人 / 调研 / 风险研判 / 汇总 / 档案）
+        _groups = self._team_groups()
+        if any(_items for _role, _items in _groups):
+            for _role, _members in _groups:
+                if not _members:
                     continue
-                _name = str(_ps.get('姓名') or '').strip()
-                if not _name:
-                    continue
-                _role = str(_ps.get('拟任角色') or '项目组成员').strip()
-                _title = str(_ps.get('职称/职务') or '').strip()
-                _desc = f"{_name}（{_title}）" if _title else _name
-                _groups.setdefault(_role, []).append(_desc)
-            for _role, _members in _groups.items():
                 self._add_para(doc, _role, bold=True, indent=False, font=FONT_SONGTI)
-                for _m in _members:
-                    self._add_para(doc, _m, indent=True, font=FONT_SONGTI)
+                for _ps in _members:
+                    _name = str(_ps.get('姓名') or '').strip()
+                    if not _name:
+                        continue
+                    _title = str(_ps.get('职称/职务') or '').strip()
+                    _desc = f"{_name}（{_title}）" if _title else _name
+                    self._add_para(doc, _desc, indent=True, font=FONT_SONGTI)
         else:
             # 回退：内置默认名单（company_assets 人员数据入库后自动切换为上方数据驱动渲染）
             self._add_para(doc, _fl["roster_lead_role"], bold=True, indent=False, font=FONT_SONGTI)

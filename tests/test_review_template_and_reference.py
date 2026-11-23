@@ -37,7 +37,9 @@ def test_bid_document_is_rejected_as_review_table():
         pytest.skip("投标文件样本不在盘上")
     from app.services.review_table_filler import _template_review_region, _is_review_region
     _tpl, region = _template_review_region(str(p))
-    assert len(region) > 100, "投标文件区间本就很大（用于验证判据有效性）"
+    # 新版按「稳评责任单位 + 稳评实施单位 + 21/24 行制式表」定位；
+    # 投标文件里没有这张表 → 区间为空或很大，都不能被判成评审表。
+    assert not region or len(region) > 100
     assert not _is_review_region(region), "投标文件不得被判为评审表区间"
 
 

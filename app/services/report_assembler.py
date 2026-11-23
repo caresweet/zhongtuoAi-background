@@ -791,6 +791,7 @@ class ReportAssembler:
         #    （2026-11-23：洪泽第四章、淮阴第三/十章、金湖与淮安市全部章都是同页）。
         #    这里先把模板结构解析出来，`_add_chapter_title_page` 按系统章号取用。
         self._tpl_plan = None
+        self._tpl_front: dict = {}
         if self._domain == "stability" and _tp:
             try:
                 from app.services.template_structure import extract_plan as _extract_plan
@@ -799,6 +800,7 @@ class ReportAssembler:
                     from app.services.file_service import file_service
                     _abs_plan = str(file_service.get_absolute_path(_tp))
                 self._tpl_plan = _extract_plan(_abs_plan)
+                self._tpl_front = getattr(self._tpl_plan, "front", {}) or {}
             except Exception as e:
                 logger.info(f"[模板结构] 版式解析跳过: {e}")
         # 🔴 复垦第4章的分析表由系统出数（见 `reclamation_ch4_tables`）——
@@ -6284,7 +6286,9 @@ class ReportAssembler:
         for img_path, caption in rest[:6]:
             self._add_image(doc, img_path, caption)
         if person_certs:
-            self._add_heading(doc, front_matter_labels(domain)["cert_section_heading"], 2)
+            _cert_title = ((getattr(self, "_tpl_front", {}) or {}).get("cert_heading")
+                           or front_matter_labels(domain)["cert_section_heading"])
+            self._add_heading(doc, _cert_title, 2)
             for img_path, caption in person_certs[:8]:
                 self._add_image(doc, img_path, caption)
         return True
@@ -6514,6 +6518,29 @@ class ReportAssembler:
             ("数据汇总整理", summary),
             ("资料与档案工作", archive),
         ]
+        # 🔴 模板有自己的一套岗位分组名就用模板的（淮安区 4 组带「1 、」编号、
+        #    淮安市叫「1.项目负责人」、清江浦区写在 6.8 正文里）；
+        #    模板没识别到才用上面的默认五组。
+        _labels = [str(x).strip() for x in
+                   ((getattr(self, "_tpl_front", {}) or {}).get("roster_groups") or [])
+                   if str(x).strip()]
+        if _labels:
+            _mapped = []
+            for _lab in _labels:
+                if "负责人" in _lab:
+                    _items = head
+                elif "调研" in _lab:
+                    _items = survey
+                elif "研判" in _lab or "编制" in _lab:
+                    _items = analysis
+                elif "汇总" in _lab:
+                    _items = summary
+                elif "档案" in _lab:
+                    _items = archive
+                else:
+                    _items = survey
+                _mapped.append((_lab, _items))
+            groups = _mapped
         self._team_groups_cache = groups
         return groups
 
@@ -6529,9 +6556,12 @@ class ReportAssembler:
         return out
 
     def _survey_names(self) -> list:
-        """调研工作组成员姓名 —— 人员证书只贴这些人的。"""
+        """调研工作组成员姓名 —— 人员证书只贴这些人的。
+
+        岗位名按模板来（可能是「2 、调研工作」「2.调研工作」），按关键字匹配。
+        """
         for _role, items in self._team_groups():
-            if _role == "调研工作":
+            if "调研" in str(_role):
                 return [str(p.get("姓名") or "").strip()
                         for p in items if str(p.get("姓名") or "").strip()]
         return []
@@ -6875,8 +6905,10 @@ class ReportAssembler:
         # ── 工作组人员及分工（宋体小三加黑居中）──
         #    🔴 标题按域取（稳评「稳评工作组…」→ 复垦「复垦方案编制人员…」）。
         _fl = front_matter_labels(domain)
+        _roster_title = ((getattr(self, "_tpl_front", {}) or {}).get("roster_heading")
+                         or _fl["roster_heading"])
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(_fl["roster_heading"])
+        r = p.add_run(_roster_title)
         r.font.name = FONT_SONGTI; r._element.rPr.rFonts.set(qn('w:eastAsia'), FONT_SONGTI)
         r.font.size = Pt(15); r.bold = True
         doc.add_paragraph()

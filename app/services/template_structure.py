@@ -81,6 +81,8 @@ class Plan:
     chapters: List[Chapter] = field(default_factory=list)
     review_in_front: bool = False
     source: str = ""
+    # 前置件写法（各模板不同）：工作组名单标题、岗位分组名、证书节标题
+    front: Dict[str, Any] = field(default_factory=dict)
 
     def by_sys(self) -> Dict[int, Chapter]:
         return {c.sys_no: c for c in self.chapters if c.sys_no}
@@ -328,6 +330,88 @@ def _annotate_layout(doc, plan: Plan) -> None:
         ch.own_page = own
 
 
+_ROLE_STARTS = ("稳评负责人", "项目负责人", "负责人", "调研工作", "风险研判",
+                "数据汇总", "资料与档案", "档案工作")
+
+
+def _match_role_label(s: str) -> str:
+    """一行文字 → 岗位名（去掉「1.」「1、」编号与「：职责说明」），不是岗位返回空。"""
+    t = (s or "").strip()
+    if "：" in t or ":" in t:
+        t = re.split(r'[：:]', t, 1)[0]
+    t = re.sub(r'^\d+\s*[、.．]?\s*', '', t).strip()
+    if len(t) > 24 or not t:
+        return ""
+    if not t.startswith(_ROLE_STARTS):
+        return ""
+    if re.search(r'[。，,；;]', t):
+        return ""
+    return t
+
+
+def _front_spec(doc) -> Dict[str, Any]:
+    """前置件的模板写法：工作组名单标题 / 岗位分组名 / 证书节标题。
+
+    六套模板并不统一（2026-11-23 实测）：
+      · 洪泽/金湖/淮阴区：稳评工作组人员及分工情况，5 组；
+      · 淮安区：4 组（无「数据汇总整理」），组名带「1 、」编号；
+      · 淮安市：标题是「社会稳定风险评估报告项目组主要成员」，
+        首组叫「1.项目负责人」，组名带「1.」编号；
+      · 清江浦区：没有独立名单页（写在 6.8 人员组成里），回退默认五组。
+    """
+    ps = list(doc.paragraphs)
+    texts = [(p.text or "").strip() for p in ps]
+    out: Dict[str, Any] = {
+        "roster_heading": "", "roster_groups": [], "cert_heading": "",
+    }
+
+    # ① 工作组名单：标题 + 岗位分组行
+    for i, t in enumerate(texts):
+        if not t or len(t) > 50:
+            continue
+        if ("工作组人员及分工" in t or "项目组主要成员" in t
+                or ("人员组成" in t and "分工" in t)):
+            out["roster_heading"] = t
+            for j in range(i + 1, min(len(texts), i + 40)):
+                tj = texts[j]
+                if not tj:
+                    continue
+                if re.match(r'^第[零一二三四五六七八九十]+章', tj):
+                    break
+                if tj in ("公司简介",):
+                    break
+                # 收齐岗位后遇到下一个「6.8.2 工作要求」这类小节标题就停；
+                # 前面的「6.8.1 人员组成」还不能停（分组行在它后面）
+                if (out["roster_groups"]
+                        and re.match(r'^\d+(\.\d+)+\s*\S', tj) and len(tj) < 60):
+                    break
+                if len(tj) > 120:
+                    continue
+                _label = _match_role_label(tj)
+                if _label:
+                    if "：" in tj or ":" in tj:
+                        _label_text = re.split(r'[：:]', tj, 1)[0].strip()
+                    else:
+                        _label_text = tj.strip()
+                    out["roster_groups"].append(_label_text)
+            break
+
+    # ② 证书节标题（人员证书/培训证书那一行）
+    for t in texts[:800]:
+        if (t and len(t) <= 30
+                and ("人员证书" in t or "培训证书" in t)
+                and not t.startswith(("1.", "2.", "3.", "4.", "5.", "6.",
+                                      "7.", "8.", "9."))):
+            out["cert_heading"] = t
+            break
+    if not out["cert_heading"]:
+        for t in texts[:800]:
+            if t and len(t) <= 30 and ("人员证书" in t or "培训证书" in t):
+                out["cert_heading"] = t
+                break
+    return out
+
+
 def extract_plan(path: str | Path) -> Plan:
     """解析模板 docx 的章标题 → Plan；解析不到返回空 Plan。"""
     from docx import Document
@@ -399,6 +483,11 @@ def extract_plan(path: str | Path) -> Plan:
         _annotate_layout(doc, plan)
     except Exception as e:
         logger.warning(f"[模板结构] 版式识别失败: {e}")
+    # 前置件写法（名单标题/岗位分组/证书节标题）
+    try:
+        plan.front = _front_spec(doc)
+    except Exception as e:
+        logger.warning(f"[模板结构] 前置件识别失败: {e}")
     return plan
 
 

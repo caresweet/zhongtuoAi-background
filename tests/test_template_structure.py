@@ -106,3 +106,27 @@ def test_extract_plan_detects_chapter_title_layout(tmp_path):
     assert by_kind["intro"].new_page is True
     assert by_kind["plan"].own_page is False      # 标题与正文同页
     assert by_kind["plan"].new_page is True       # 但章仍从新页开始
+
+
+def test_extract_plan_reads_front_matter_spec(tmp_path):
+    """前置件写法（名单标题/岗位分组/证书节标题）按模板识别。"""
+    d = Document()
+    d.add_paragraph("稳评工作组人员及分工情况")
+    d.add_paragraph("1 、稳评负责人")
+    d.add_paragraph("张三（总经理）")
+    d.add_paragraph("2 、调研工作")
+    d.add_paragraph("李四（工程师）")
+    d.add_paragraph("3 、风险研判与评估报告编制工作")
+    d.add_paragraph("4 、资料与档案工作")
+    d.add_paragraph("3.人员培训证书")
+    for t in ("第一章 编制说明", "第二章 编制依据", "第三章 拟征收决策基本情况"):
+        d.add_paragraph(t)
+    path = tmp_path / "front.docx"
+    d.save(str(path))
+
+    front = extract_plan(path).front
+    assert front["roster_heading"] == "稳评工作组人员及分工情况"
+    assert front["roster_groups"] == [
+        "1 、稳评负责人", "2 、调研工作",
+        "3 、风险研判与评估报告编制工作", "4 、资料与档案工作"]
+    assert front["cert_heading"] == "3.人员培训证书"

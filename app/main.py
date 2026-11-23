@@ -189,7 +189,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 from fastapi import Depends
 from app.deps import get_current_user, require_admin, require_staff
 from app.models.user import User
-from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning, bidding_screening, bidding_bid, ocr_review, check_rules, approval, public_stats, company, admin, client_logs
+from app.routers import knowledge, report, history, dashboard, auth, knowledge_chat, learning, bidding_screening, bidding_bid, ocr_review, check_rules, approval, public_stats, company, admin, client_logs, layout_audit
 
 PUBLIC_ROUTERS = [
     auth.router,                   # /login /register 公开；/me /refresh 自身要求登录
@@ -226,6 +226,7 @@ ADMIN_ROUTERS = [
     knowledge.router, knowledge_chat.router,      # 知识库 + 知识问答（审核/学习）
     learning.router, bidding_screening.router, bidding_bid.router,
     ocr_review.router, check_rules.router, approval.router,
+    layout_audit.router,                         # 版式审核（DOCX/PDF/图片 → 区块结构）
     admin.router,                                 # 账号/公司管理
 ]
 

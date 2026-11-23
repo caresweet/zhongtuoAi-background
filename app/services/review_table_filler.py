@@ -565,6 +565,53 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
                 _title_p = _el
                 break
         if _title_p is not None:
+            # 🔴 表题格式**量模板自己的**（字体/字号/加粗），不再写死黑体二号。
+            #    六套实测：洪泽 仿宋22加粗、淮安区 宋体21.5加粗、淮阴区 宋体22加粗、
+            #    清江浦 黑体18加粗、金湖 仿宋（字号继承样式）。
+            _src_run = None
+            for _r in _title_p.findall(qn('w:r')):
+                if ''.join(t.text or '' for t in _r.findall(qn('w:t'))).strip():
+                    _src_run = _r
+                    break
+            _font = _sz_pt = None
+            _bold = True
+            if _src_run is not None:
+                _rpr0 = _src_run.find(qn('w:rPr'))
+                if _rpr0 is not None:
+                    _rf0 = _rpr0.find(qn('w:rFonts'))
+                    if _rf0 is not None:
+                        _font = _rf0.get(qn('w:eastAsia')) or _rf0.get(qn('w:ascii'))
+                    _sz0 = _rpr0.find(qn('w:sz'))
+                    if _sz0 is not None:
+                        try:
+                            _sz_pt = float(_sz0.get(qn('w:val')) or 0) / 2.0
+                        except (TypeError, ValueError):
+                            pass
+                    _bold = _rpr0.find(qn('w:b')) is not None
+            # 金湖等模板的表题 run 不写字号 —— 从段落样式里补
+            if _font is None or _sz_pt is None:
+                _pst = _title_p.find(qn('w:pPr') + '/' + qn('w:pStyle'))
+                if _pst is not None:
+                    try:
+                        for _s in tpl.styles:
+                            if (_s.style_id or "") != (_pst.get(qn('w:val')) or ""):
+                                continue
+                            _srpr = _s.element.find(qn('w:rPr'))
+                            if _srpr is not None:
+                                _srf = _srpr.find(qn('w:rFonts'))
+                                if _font is None and _srf is not None:
+                                    _font = _srf.get(qn('w:eastAsia')) or _srf.get(qn('w:ascii'))
+                                _ssz = _srpr.find(qn('w:sz'))
+                                if _sz_pt is None and _ssz is not None:
+                                    try:
+                                        _sz_pt = float(_ssz.get(qn('w:val')) or 0) / 2.0
+                                    except (TypeError, ValueError):
+                                        pass
+                            break
+                    except Exception:
+                        pass
+            _use_font = _font or '黑体'
+            _use_sz = int(round((_sz_pt or 22.0) * 2))
             for _r in _title_p.findall(qn('w:r')):
                 _rpr = _r.find(qn('w:rPr'))
                 if _rpr is None:
@@ -576,11 +623,12 @@ def fill_review_table_into(doc, filled_data: dict, chapters: dict = None,
                 from docx.oxml import OxmlElement as _OE7
                 _f = _OE7('w:rFonts')
                 for _a in ('w:ascii', 'w:hAnsi', 'w:eastAsia'):
-                    _f.set(qn(_a), '黑体')
+                    _f.set(qn(_a), _use_font)
                 _rpr.append(_f)
-                _b = _OE7('w:b'); _rpr.append(_b)
-                _sz = _OE7('w:sz'); _sz.set(qn('w:val'), '44'); _rpr.append(_sz)   # 22pt = 44 半点
-                _szc = _OE7('w:szCs'); _szc.set(qn('w:val'), '44'); _rpr.append(_szc)
+                if _bold:
+                    _b = _OE7('w:b'); _rpr.append(_b)
+                _sz = _OE7('w:sz'); _sz.set(qn('w:val'), str(_use_sz)); _rpr.append(_sz)
+                _szc = _OE7('w:szCs'); _szc.set(qn('w:val'), str(_use_sz)); _rpr.append(_szc)
             # 🔴 标题 → 四项的竖向留白**按页面算**，不再写死「两行」：
             #    删掉模板里夹在中间的空段，把「页面剩余高度」加到第一项的段前距，
             #    形成「标题贴上、四项靠下、制单位贴底」的上下对齐版式

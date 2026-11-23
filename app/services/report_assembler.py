@@ -3178,20 +3178,36 @@ class ReportAssembler:
                     _ea, _pt = self._typo("h3")
                     _set_run_font(run, _ea, size=Pt(_pt), bold=self._heading_bold(3), ascii_font=FONT_ASCII)
 
-        # ── 4. Line spacing to 28pt ──
+        # ── 4. 行距：按模板实测（标题/正文各自的行距规则）──
+        #    🔴 必须用**最小值(atLeast)**而不是固定值(exact)：
+        #       固定值会把**大于该值的字号压扁并裁掉字的上缘** ——
+        #       实测评审表标题（22pt）被 20pt 固定行高裁掉了上方笔画。
+        #    🔴 六套模板行距并不相同（正文 1.5 倍 / 固定 27pt / 28pt），
+        #       这里按模板画像取；读不到才回落到 20pt atLeast。
         from docx.shared import Pt as _Pt2
         from docx.enum.text import WD_LINE_SPACING
-        # ── 4. 行距（随 12pt 正文；图片段一并处理，旧版跳过导致图段行距失控）──
-        from docx.shared import Pt as _Pt2
-        from docx.enum.text import WD_LINE_SPACING
+        _style_all = getattr(self, "_tpl_style", None) or {}
         for p in doc.paragraphs:
             pf = p.paragraph_format
-            # 🔴 必须用**最小值(atLeast)**而不是固定值(exact)：
-            #    固定值会把**大于该值的字号压扁并裁掉字的上缘** ——
-            #    实测评审表标题（22pt）被 20pt 固定行高裁掉了上方笔画。
-            #    atLeast 表示「行高不低于 20pt」，字号大时自动撑开。
-            pf.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
-            pf.line_spacing = _Pt2(LINE_SPACING_PT)
+            _st = (p.style.name or "") if p.style else ""
+            if "Heading 1" in _st:
+                _sd = _style_all.get("h1") or {}
+            elif "Heading 2" in _st:
+                _sd = _style_all.get("h2") or {}
+            elif "Heading 3" in _st:
+                _sd = _style_all.get("h3") or {}
+            else:
+                _sd = _style_all.get("body") or {}
+            _ls = _sd.get("line_spacing")
+            if _ls:
+                if _sd.get("line_rule") == "multiple":
+                    pf.line_spacing = float(_ls)
+                else:
+                    pf.line_spacing = _Pt2(float(_ls))
+                    pf.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+            else:
+                pf.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+                pf.line_spacing = _Pt2(LINE_SPACING_PT)
 
         # ── 5. Clean verbose unit/role descriptions ──
         for p in doc.paragraphs:
@@ -8675,11 +8691,45 @@ class ReportAssembler:
             return None
 
     def _typo(self, slot: str) -> tuple:
-        """版式槽位 → `(中文字体, 字号 pt)`：模板画像优先，读不到按域常量。"""
+        """版式槽位 → `(中文字体, 字号 pt)`：模板画像优先，读不到按域常量。
+
+        🔴 字体与字号**各自回退**：模板常只写了字号（字体继承样式），
+           旧实现要求两者都有才用模板，结果模板的 16pt 一级标题被换成域常量 22pt。
+        """
         _d = (getattr(self, "_tpl_style", None) or {}).get(slot) or {}
-        if _d.get("font") and _d.get("size"):
-            return str(_d["font"]), float(_d["size"])
-        return typography(getattr(self, '_domain', None), slot)
+        _df, _dp = typography(getattr(self, '_domain', None), slot)
+        return (str(_d.get("font") or _df), float(_d.get("size") or _dp))
+
+    @staticmethod
+    def _apply_para_style(pf, d: dict, *, default_align=None,
+                          default_first_indent=None) -> None:
+        """把模板实测的段落版式（对齐/首行缩进/行距/段前后）套到段式上。"""
+        from docx.enum.text import WD_ALIGN_PARAGRAPH as _AL
+        if default_align is not None:
+            pf.alignment = default_align
+        _align_map = {
+            "center": _AL.CENTER, "left": _AL.LEFT, "right": _AL.RIGHT,
+            "justify": _AL.JUSTIFY, "both": _AL.JUSTIFY,
+            "distribute": _AL.DISTRIBUTE,
+        }
+        _al = str((d or {}).get("align") or "").lower()
+        if _al in _align_map:
+            pf.alignment = _align_map[_al]
+        _fi = (d or {}).get("first_indent_pt")
+        if _fi is not None:
+            pf.first_line_indent = Pt(float(_fi))
+        elif default_first_indent is not None:
+            pf.first_line_indent = default_first_indent
+        _ls = (d or {}).get("line_spacing")
+        if _ls is not None:
+            if (d or {}).get("line_rule") == "multiple":
+                pf.line_spacing = float(_ls)
+            else:
+                pf.line_spacing = Pt(float(_ls))
+        if (d or {}).get("space_before_pt") is not None:
+            pf.space_before = Pt(float(d["space_before_pt"]))
+        if (d or {}).get("space_after_pt") is not None:
+            pf.space_after = Pt(float(d["space_after_pt"]))
 
     def _heading_bold(self, level: int) -> bool:
         """该级标题是否加粗：按模板实测（井神样本标题实际**不加粗**）。
@@ -9083,12 +9133,11 @@ class ReportAssembler:
         _ea, _pt = self._typo(f"h{level}")
         align = WD_ALIGN_PARAGRAPH.CENTER if level == 1 else WD_ALIGN_PARAGRAPH.LEFT
         ea, size, bold = _ea, Pt(_pt), self._heading_bold(level)
-        h.alignment = align
-        # 标题段不留首行缩进（正文才有）
-        try:
-            h.paragraph_format.first_line_indent = Cm(0)
-        except Exception:
-            pass
+        # 对齐/缩进/行距/段前后按模板实测（读不到才用域默认：一级居中、无首行缩进）
+        _hs = (getattr(self, "_tpl_style", None) or {}).get(f"h{level}") or {}
+        self._apply_para_style(h.paragraph_format, _hs,
+                               default_align=align,
+                               default_first_indent=Cm(0))
         for run in h.runs:
             _set_run_font(run, ea, size=size, bold=bold, ascii_font=FONT_ASCII)
             run.font.color.rgb = RGBColor(0, 0, 0)  # 强制黑色，覆盖 Word 默认蓝色
@@ -9099,7 +9148,12 @@ class ReportAssembler:
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY  # 🔴 正文两端对齐
         p.paragraph_format.space_after = Pt(4)
         if indent:
-            p.paragraph_format.first_line_indent = Cm(0.74)
+            # 首行缩进/行距/段前后按模板实测（读不到才用 0.74cm / 4pt）
+            _bs = (getattr(self, "_tpl_style", None) or {}).get("body") or {}
+            self._apply_para_style(
+                p.paragraph_format, _bs,
+                default_align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+                default_first_indent=Cm(0.74))
         r = p.add_run(text)
         # 🔴 正文字体按域取：稳评 宋体（逐字等于改动前）/ 复垦 **仿宋**（四份样本一致）。
         #    显式传 `font` 的调用点（目录 / 编制说明用宋体）不受影响。

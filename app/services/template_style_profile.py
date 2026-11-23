@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parents[2]
 _CACHE_DIR = _BACKEND / "data" / "template_profiles"
-_STYLE_VERSION = 4
+_STYLE_VERSION = 6
 
 _HEADING_STYLES = {
     1: ("heading 1", "heading1", "标题 1", "标题1"),
@@ -88,6 +88,61 @@ def _run_font_of(paragraph) -> tuple:
     return "", None
 
 
+def _para_format_of(para) -> Dict[str, Any]:
+    """段落版式：对齐 / 首行缩进 / 行距 / 段前段后（均为可比较的标量）。"""
+    pf = para.paragraph_format
+    out: Dict[str, Any] = {}
+
+    def _pt(v):
+        try:
+            return round(float(v.pt), 1)
+        except Exception:
+            try:
+                return round(float(v) / 12700.0, 1)     # EMU → pt
+            except Exception:
+                return None
+
+    try:
+        if para.alignment is not None:
+            out["align"] = str(getattr(para.alignment, "name",
+                                        str(para.alignment))).lower()
+    except Exception:
+        pass
+    fi = pf.first_line_indent
+    if fi is not None:
+        out["first_indent_pt"] = _pt(fi)
+    ls = pf.line_spacing
+    if ls is not None:
+        from docx.shared import Length
+        if isinstance(ls, Length):          # Length 是 int 子类，必须先判
+            out["line_spacing"] = _pt(ls)
+            out["line_rule"] = "exact"
+        elif isinstance(ls, (int, float)):
+            out["line_spacing"] = float(ls)
+            out["line_rule"] = "multiple"
+        else:
+            out["line_spacing"] = _pt(ls)
+            out["line_rule"] = "exact"
+    if pf.space_before is not None:
+        out["space_before_pt"] = _pt(pf.space_before)
+    if pf.space_after is not None:
+        out["space_after_pt"] = _pt(pf.space_after)
+    return out
+
+
+def _common_formats(paras) -> Dict[str, Any]:
+    """一组段落里出现最多的版式值（对齐/缩进/行距/段前后）。"""
+    keys = ("align", "first_indent_pt", "line_spacing", "line_rule",
+            "space_before_pt", "space_after_pt")
+    counters = {k: Counter() for k in keys}
+    for p in paras:
+        f = _para_format_of(p)
+        for k in keys:
+            if k in f:
+                counters[k][f[k]] += 1
+    return {k: c.most_common(1)[0][0] for k, c in counters.items() if c}
+
+
 def _heading_slot(doc, level: int) -> Dict[str, Any]:
     """标题版式：**样式表优先**，段落实测只补样式里缺的字体/字号。
 
@@ -97,12 +152,20 @@ def _heading_slot(doc, level: int) -> Dict[str, Any]:
     names = {x.lower() for x in _HEADING_STYLES.get(level, ())}
     fonts, sizes = Counter(), Counter()
     bold_vals = Counter()
+    paras = []
     for para in doc.paragraphs:
         st = str(getattr(getattr(para, "style", None), "name", "") or "").lower().replace(" ", "")
-        if st not in {n.replace(" ", "") for n in names}:
+        _txt = str(para.text or "").strip()
+        # 一级标题：除 Heading 1 外，也认「第四章 …」这类正文段落
+        # （洪泽/淮安区/淮阴区/清江浦区的章标题没有套标题样式）
+        _is_cn_ch = (level == 1 and _txt and len(_txt) <= 50
+                     and not st.startswith(("toc", "目录"))
+                     and re.match(r'^第[零一二三四五六七八九十]+章\s*\S', _txt) is not None)
+        if st not in {n.replace(" ", "") for n in names} and not _is_cn_ch:
             continue
-        if not str(para.text or "").strip():
+        if not _txt:
             continue
+        paras.append(para)
         font, size = _run_font_of(para)
         if font:
             fonts[font] += 1
@@ -117,22 +180,36 @@ def _heading_slot(doc, level: int) -> Dict[str, Any]:
     bold = hint.get("bold")
     if sum(bold_vals.values()) >= 3:
         bold = bold_vals.most_common(1)[0][0]
-    return {
+    out = {
         "font": hint.get("font") or (fonts.most_common(1)[0][0] if fonts else ""),
         "size": hint.get("size") or (sizes.most_common(1)[0][0] if sizes else None),
         "bold": bold,
     }
+    out.update(_common_formats(paras))
+    return out
 
 
 def _body_slot(doc) -> Dict[str, Any]:
     fonts, sizes = Counter(), Counter()
+    paras = []
+    started = False
     for para in doc.paragraphs:
         st = str(getattr(getattr(para, "style", None), "name", "") or "").lower()
+        txt = str(para.text or "").strip()
+        if not started:
+            # 正文样本从**第一章之后**开始取：封面/扉页/目录的行距与对齐不能代表正文
+            if (st.startswith(("heading 1", "heading1"))
+                    or (len(txt) <= 50
+                        and re.match(r'^第[零一二三四五六七八九十]+章\s*\S', txt))):
+                started = True
+            continue
         if st.startswith(("heading", "toc", "标题")):
             continue
-        txt = str(para.text or "").strip()
+        if re.match(r'^[图表]\s*\d', txt):      # 图表题不是正文
+            continue
         if len(txt) < 20:            # 跳过图表题、短行
             continue
+        paras.append(para)
         font, size = _run_font_of(para)
         if font:
             fonts[font] += 1
@@ -141,10 +218,12 @@ def _body_slot(doc) -> Dict[str, Any]:
         if sum(fonts.values()) >= 80:
             break
     hint = _style_hint(doc, 0)
-    return {
+    out = {
         "font": (fonts.most_common(1)[0][0] if fonts else "") or hint.get("font") or "",
         "size": (sizes.most_common(1)[0][0] if sizes else None) or hint.get("size"),
     }
+    out.update(_common_formats(paras))
+    return out
 
 
 def _table_slot(doc) -> Dict[str, Any]:

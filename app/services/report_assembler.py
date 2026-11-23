@@ -781,6 +781,20 @@ class ReportAssembler:
         #    是否有附件章）。缺省回落稳评 —— 老调用点（脚本）不传 `_domain` 时
         #    行为与改动前完全一致。
         self._domain = domain_of_state(state)
+        # 🔴 章标题版式按模板实测：有的模板章标题独占一页，有的标题只是正文页第一行
+        #    （2026-11-23：洪泽第四章、淮阴第三/十章、金湖与淮安市全部章都是同页）。
+        #    这里先把模板结构解析出来，`_add_chapter_title_page` 按系统章号取用。
+        self._tpl_plan = None
+        if self._domain == "stability" and _tp:
+            try:
+                from app.services.template_structure import extract_plan as _extract_plan
+                _abs_plan = _tp
+                if not Path(_abs_plan).exists():
+                    from app.services.file_service import file_service
+                    _abs_plan = str(file_service.get_absolute_path(_tp))
+                self._tpl_plan = _extract_plan(_abs_plan)
+            except Exception as e:
+                logger.info(f"[模板结构] 版式解析跳过: {e}")
         # 🔴 复垦第4章的分析表由系统出数（见 `reclamation_ch4_tables`）——
         #    模型写的同题表先把整张删掉，否则会出现一张空表 + 一张系统表。
         #    ⚠️ 必须放在 `self._domain` 赋值**之后**（之前取到的是默认 stability）。
@@ -8368,19 +8382,42 @@ class ReportAssembler:
     # ═══════════════════════════════════════════════════════════════
 
     def _add_chapter_title_page(self, doc, cn: str, title: str,
-                                chapter_number: int = None) -> None:
-        """章标题页：**独占一整页 + 上下左右居中**。
+                                chapter_number: int = None,
+                                own_page: bool = None,
+                                new_page: bool = None) -> None:
+        """章标题页：是否独占一整页**按模板实测**决定。
 
         🔴 用「独立一节 + 节级垂直居中(`w:vAlign=center`)」实现，不用铺空段：
         铺空段会被 `_post_generation_fix` 的「连续空段最多 2 个」清理规则删掉，
         结果标题仍旧贴在页顶（实测铺 16 个空段后被删到只剩 2 个）。
 
-        🔴 标题文本与「是否独占页」按域取（经 `chapter_catalog`）：
-           稳评 `第三章、评估过程` + 独占页居中，逐字等于改动前；
-           复垦 `3 项目概况` + 普通一级标题（样本里标题就在正文页顶，不独占页）。
+        🔴 章标题版式各地模板不同（2026-11-23 实测）：
+           洪泽/淮安区多数章独占页，但洪泽第四章正文紧跟标题；
+           淮阴区第三/十章、金湖与淮安市全部章都是标题与正文同页。
+        这些差异由 `template_structure.extract_plan` 从模板实测后写进
+        `Chapter.own_page`，这里经 `chapter_number` 取用；取不到才按域默认。
         """
         _text = chapter_heading_text(self._domain, chapter_number, cn, title)
-        if not (CHAPTER_TITLE_OWN_PAGE and chapter_title_own_page(self._domain)):
+        # 模板级版式（按系统章号找模板里的对应章）
+        _pc = None
+        if chapter_number and getattr(self, "_tpl_plan", None) is not None:
+            try:
+                _pc = self._tpl_plan.by_sys().get(int(chapter_number))
+            except Exception:
+                _pc = None
+        if _pc is not None:
+            if own_page is None:
+                own_page = _pc.own_page
+            if new_page is None:
+                new_page = _pc.new_page
+        _default_own = bool(CHAPTER_TITLE_OWN_PAGE and chapter_title_own_page(self._domain))
+        _own = _default_own if own_page is None else bool(own_page)
+        _new = True if new_page is None else bool(new_page)
+        if not _new:
+            # 模板里该章不另起新页：标题就接在上一章正文后面
+            self._add_heading(doc, _text, 1)
+            return
+        if not _own:
             # 复垦：章标题**不独占整页、不垂直居中**（样本里它就印在正文页顶端），
             # 但**仍起新页** —— 样本的每章都是从新页开始的。
             # 🔴 这一节还承担结构作用：`_setup_header_footer` 靠「第 2 节 = 正文首页」

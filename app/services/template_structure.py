@@ -68,6 +68,12 @@ class Chapter:
     sys_no: Optional[int]    # 对应系统章节号
     numbered: bool = True    # 模板是否用「第X章」
     pre: bool = False        # 位于第一个编号章之前（如评审表）
+    # 版式（按模板实测，2026-11-23）：
+    #   own_page=True  章标题独占一页，正文从下一页开始；
+    #   own_page=False 章标题与正文同页（标题只是该页第一行）。
+    #   new_page=False 该章不另起新页（少见）。
+    own_page: bool = True
+    new_page: bool = True
 
 
 @dataclass
@@ -217,6 +223,111 @@ def _from_cn_text(doc) -> List[Any]:
     return out
 
 
+def _p_page_breaks(p) -> int:
+    """段落里分页符（`w:br type=page`）个数。"""
+    from docx.oxml.ns import qn
+    return sum(1 for b in p._p.findall('.//' + qn('w:br'))
+               if (b.get(qn('w:type')) or '') == 'page')
+
+
+def _p_page_break_before(p) -> bool:
+    from docx.oxml.ns import qn
+    return p._p.find(qn('w:pPr') + '/' + qn('w:pageBreakBefore')) is not None
+
+
+def _p_has_sectpr(p) -> bool:
+    from docx.oxml.ns import qn
+    return p._p.find(qn('w:pPr') + '/' + qn('w:sectPr')) is not None
+
+
+def _leading_page_break(p) -> bool:
+    """段落内**文字之前**有分页符（模板常用它把章标题顶到新页）。"""
+    from docx.oxml.ns import qn
+    seen_text = False
+    for el in p._p.iter():
+        tag = el.tag.rsplit('}', 1)[-1]
+        if tag == 't' and (el.text or '').strip():
+            seen_text = True
+        elif (tag == 'br' and not seen_text
+              and (el.get(qn('w:type')) or '') == 'page'):
+            return True
+    return False
+
+
+def _trailing_page_break(p) -> bool:
+    """段落内**文字之后**有分页符（标题后直接跳页 → 正文在下一页）。"""
+    from docx.oxml.ns import qn
+    seen_text = False
+    for el in p._p.iter():
+        tag = el.tag.rsplit('}', 1)[-1]
+        if tag == 't' and (el.text or '').strip():
+            seen_text = True
+        elif (tag == 'br' and seen_text
+              and (el.get(qn('w:type')) or '') == 'page'):
+            return True
+    return False
+
+
+def _annotate_layout(doc, plan: Plan) -> None:
+    """按模板实测填 `Chapter.own_page/new_page`。
+
+    各地模板的章标题版式并不统一（2026-11-23 实测）：
+      · 洪泽/淮阴区/清江浦区/淮安区：章标题 `pageBreakBefore`，多数章正文
+        另起一页（标题独占一页），但个别章（洪泽第四章、淮阴第三/十章）
+        正文紧跟在标题下面 —— 不能一刀切；
+      · 金湖/淮安市：标题段首放分页符，标题只是新页第一行，正文同页。
+    """
+    ps = list(doc.paragraphs)
+    texts = [_norm(p.text or '') for p in ps]
+    styles = [((p.style.name or '') if p.style else '').lower() for p in ps]
+
+    for ch in plan.chapters:
+        if ch.kind in ('review', 'attachment'):
+            ch.own_page = True
+            ch.new_page = True
+            continue
+        tgt = _norm(ch.title)
+        if not tgt:
+            continue
+        idx = None
+        for i, nt in enumerate(texts):
+            if not nt or styles[i].startswith('toc'):
+                continue
+            if tgt not in nt or len(nt) > len(tgt) + 12:
+                continue
+            if not (nt.startswith('第') or re.match(r'^\d{1,2}', nt)
+                    or styles[i].startswith('heading')):
+                continue
+            idx = i
+            break
+        if idx is None:
+            continue
+        head = ps[idx]
+        # 是否另起新页：标题段自身（段前分页 / 段首分页符）或前一段带分页/分节
+        ch.new_page = (_p_page_break_before(head) or _leading_page_break(head)
+                       or _trailing_page_break(head))
+        if not ch.new_page:
+            j = idx - 1
+            while j >= 0:
+                if _p_page_breaks(ps[j]) or _p_has_sectpr(ps[j]):
+                    ch.new_page = True
+                    break
+                if texts[j]:
+                    break
+                j -= 1
+        # 是否独占一页：标题之后、第一段正文之前出现分页/分节
+        own = _trailing_page_break(head)
+        k = idx + 1
+        while k < len(ps):
+            q = ps[k]
+            if _p_page_break_before(q) or _p_has_sectpr(q) or _p_page_breaks(q):
+                own = True
+            if texts[k]:
+                break
+            k += 1
+        ch.own_page = own
+
+
 def extract_plan(path: str | Path) -> Plan:
     """解析模板 docx 的章标题 → Plan；解析不到返回空 Plan。"""
     from docx import Document
@@ -283,6 +394,11 @@ def extract_plan(path: str | Path) -> Plan:
                 idx=0, title=title, kind="review", sys_no=3,
                 numbered=False, pre=True))
             plan.review_in_front = True
+    # 章标题版式（独占页 / 与正文同页）按模板实测标注
+    try:
+        _annotate_layout(doc, plan)
+    except Exception as e:
+        logger.warning(f"[模板结构] 版式识别失败: {e}")
     return plan
 
 

@@ -80,3 +80,29 @@ def test_apply_plan_reorders_renames_and_renumbers(tmp_path):
     assert "表1-1 风险源清单" in texts          # 表号改按新章号
     assert "见表1-1。" in texts
     assert "表3-1 位置示意图" in texts          # 附件章内容保留并重编表号
+
+
+def test_extract_plan_detects_chapter_title_layout(tmp_path):
+    """章标题是「独占一页」还是「和正文同页」，按模板实测识别。"""
+    from docx.enum.text import WD_BREAK
+
+    d = Document()
+    # 第一章：标题独占一页（正文另起一页）
+    p1 = d.add_paragraph("第一章 编制说明")
+    p1.paragraph_format.page_break_before = True
+    q1 = d.add_paragraph("第一章正文")
+    q1.paragraph_format.page_break_before = True
+    # 第二章：标题段首分页，正文紧跟在同一页
+    p2 = d.add_paragraph()
+    p2.add_run().add_break(WD_BREAK.PAGE)
+    p2.add_run("第二章 稳评工作方案")
+    d.add_paragraph("第二章正文")
+    path = tmp_path / "layout.docx"
+    d.save(str(path))
+
+    plan = extract_plan(path)
+    by_kind = {c.kind: c for c in plan.chapters}
+    assert by_kind["intro"].own_page is True
+    assert by_kind["intro"].new_page is True
+    assert by_kind["plan"].own_page is False      # 标题与正文同页
+    assert by_kind["plan"].new_page is True       # 但章仍从新页开始

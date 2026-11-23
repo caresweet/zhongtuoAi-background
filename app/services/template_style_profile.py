@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parents[2]
 _CACHE_DIR = _BACKEND / "data" / "template_profiles"
-_STYLE_VERSION = 6
+_STYLE_VERSION = 7
 
 _HEADING_STYLES = {
     1: ("heading 1", "heading1", "标题 1", "标题1"),
@@ -161,7 +161,19 @@ def _heading_slot(doc, level: int) -> Dict[str, Any]:
         _is_cn_ch = (level == 1 and _txt and len(_txt) <= 50
                      and not st.startswith(("toc", "目录"))
                      and re.match(r'^第[零一二三四五六七八九十]+章\s*\S', _txt) is not None)
-        if st not in {n.replace(" ", "") for n in names} and not _is_cn_ch:
+        # 二级/三级小节：模板里多半没套 Heading 样式（（一）/1.1/1.），按文字形态认
+        _is_sec = False
+        if _txt and not st.startswith(("toc", "目录")):
+            if level == 2:
+                _is_sec = (len(_txt) <= 40 and re.match(
+                    r'^(（[一二三四五六七八九十]+）|[一二三四五六七八九十]+、|\d{1,2}\.\d{1,2}\s*\S)',
+                    _txt) is not None)
+            elif level == 3:
+                _is_sec = (len(_txt) <= 24
+                           and not _txt.endswith(("。", "；", "，", "："))
+                           and re.match(r'^(\d{1,2}(\.\d{1,2}){1,2}\s*\S|\d{1,2}[.、]\s*\S)',
+                                        _txt) is not None)
+        if st not in {n.replace(" ", "") for n in names} and not _is_cn_ch and not _is_sec:
             continue
         if not _txt:
             continue

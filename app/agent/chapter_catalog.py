@@ -592,8 +592,71 @@ def sections_for_prompt(domain: str | None, chapter_number: int,
             if _tpl:
                 return _tpl
         return _reclamation_sections_for_prompt(chapter_number)
+    if template_path:
+        _tpl = _stability_sections_from_template(template_path, chapter_number)
+        if _tpl:
+            return _tpl
     from app.agent.chapter_definitions import format_sections_for_prompt
     return format_sections_for_prompt(chapter_number)
+
+
+# 模板 Plan 缓存：path + mtime（模板换新后自动失效）
+_STAB_PLAN_CACHE: dict = {}
+
+
+def _stability_sections_from_template(template_path: str, chapter_number: int) -> str:
+    """稳评：从**地区模板**取本章小节（名称/编号/顺序），生成结构规范提示词。
+
+    2026-11-23：此前稳评永远用 `chapter_definitions` 那套系统小节，地区模板的
+    「（一）决策基本情况 / 1.决策名称…」从没进过提示词 —— 成稿小节名自然跟模板
+    对不上（业主：「小节名称都统计了么」）。
+    """
+    try:
+        import os
+        key = (str(template_path), os.path.getmtime(template_path))
+    except Exception:
+        key = (str(template_path), 0)
+    plan = _STAB_PLAN_CACHE.get(key)
+    if plan is None:
+        try:
+            from app.services.template_structure import extract_plan
+            plan = extract_plan(template_path)
+        except Exception:
+            return ""
+        _STAB_PLAN_CACHE.clear()
+        _STAB_PLAN_CACHE[key] = plan
+    try:
+        from app.agent.chapter_definitions import get_chapter_kind
+        _kind = get_chapter_kind(int(chapter_number))
+    except Exception:
+        _kind = ""
+    ch = None
+    if _kind:
+        ch = next((c for c in plan.chapters if c.kind == _kind), None)
+    if ch is None:
+        ch = plan.by_sys().get(int(chapter_number))
+    secs = []
+    if ch is not None:
+        secs = getattr(ch, "sections", None) or []
+    if len(secs) < 2:
+        return ""
+    # 简单校验：编号必须从「（一）」或「X.1」开始，否则多半是章节边界取错了
+    _first2 = next((s["text"] for s in secs if s["level"] == 2), "")
+    if _first2.startswith("（") and not _first2.startswith("（一）"):
+        return ""
+    if not _first2.startswith("（") and not re.match(r'^\d{1,2}\.1', _first2):
+        return ""
+    lines = [
+        "\n## 📋 本章结构规范（**逐字按地区模板小节**，禁止增删改）",
+        "🔴 小节名称、编号与顺序必须与下列清单**逐字一致**，不得换成「项目概况」等其他叫法。",
+        "🔴 标题层级：`##` = 二级小节（（一）/1.1），`###` = 三级小节（1./1.1.1）；"
+        "更深的内容用「1）2）3）」引导行，不写四级编号标题。",
+    ]
+    for s in secs:
+        marker = "##" if s.get("level") == 2 else "###"
+        lines.append(f"{marker} {s.get('text')}")
+    lines.append("\n严格按上述小节顺序逐一撰写，每节必须有实质内容，禁止增删小节或留空。")
+    return "\n".join(lines)
 
 
 def _reclamation_sections_from_template(template_path: str, chapter_number: int) -> str:

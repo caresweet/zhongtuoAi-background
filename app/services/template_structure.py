@@ -74,6 +74,9 @@ class Chapter:
     #   new_page=False 该章不另起新页（少见）。
     own_page: bool = True
     new_page: bool = True
+    # 本章的小节标题（按模板实测）：[{level: 2/3, text: "（一）决策基本情况"}]
+    # 供章节提示词「逐字按模板小节」注入，保证成稿小节名/编号/顺序跟模板走。
+    sections: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -270,41 +273,93 @@ def _trailing_page_break(p) -> bool:
     return False
 
 
+_SUB2_RE = re.compile(r'^(（[一二三四五六七八九十]+）|[一二三四五六七八九十]+、)')
+_SUB3_RE = re.compile(r'^(\d{1,2}\.\d{1,2}(\.\d{1,2})?|\d{1,2}[.、])\s*\S')
+_LIST_VERB = ('为', '确保', '根据', '按照', '通过', '加强', '严格', '依法', '做好',
+              '落实', '建立', '完善', '坚持', '实行', '规范', '控制', '对', '在',
+              '从', '以', '经', '如', '若', '凡', '本决策', '该项目')
+
+
+def _is_sub_heading(t: str, level: int) -> bool:
+    """一行文字像不像小节标题（区分正文里的编号列表）。"""
+    if not t or len(t) > 40:
+        return False
+    if t.endswith(('。', '；', ';', '，', ',', '：', ':')):
+        return False
+    if '《' in t:
+        return False
+    if level == 2:
+        return bool(_SUB2_RE.match(t))
+    if not _SUB3_RE.match(t):
+        return False
+    title = re.sub(r'^\d{1,2}(\.\d{1,2}){0,2}\s*[.、]?\s*', '', t)
+    if len(title) > 14:
+        return False
+    return not title.startswith(_LIST_VERB)
+
+
 def _annotate_layout(doc, plan: Plan) -> None:
-    """按模板实测填 `Chapter.own_page/new_page`。
+    """按模板实测填 `Chapter.own_page/new_page/sections`。
 
     各地模板的章标题版式并不统一（2026-11-23 实测）：
       · 洪泽/淮阴区/清江浦区/淮安区：章标题 `pageBreakBefore`，多数章正文
         另起一页（标题独占一页），但个别章（洪泽第四章、淮阴第三/十章）
         正文紧跟在标题下面 —— 不能一刀切；
       · 金湖/淮安市：标题段首放分页符，标题只是新页第一行，正文同页。
+
+    同时收集每章的小节标题（（一）/1.1/1.）—— 供章节提示词按模板小节写。
     """
     ps = list(doc.paragraphs)
     texts = [_norm(p.text or '') for p in ps]
     styles = [((p.style.name or '') if p.style else '').lower() for p in ps]
 
+    # ① 先定位每章的标题段（找不到的章跳过）
+    #    🔴 同一标题文字可能在小节里也出现（如「3.项目基本情况」），
+    #       要优先选章级标题（第X章 / Heading 1），不能取第一条命中。
+    found = []
     for ch in plan.chapters:
-        if ch.kind in ('review', 'attachment'):
-            ch.own_page = True
-            ch.new_page = True
-            continue
         tgt = _norm(ch.title)
         if not tgt:
             continue
-        idx = None
+        cands = []
         for i, nt in enumerate(texts):
             if not nt or styles[i].startswith('toc'):
                 continue
-            if tgt not in nt or len(nt) > len(tgt) + 12:
+            _m_ch = re.match(r'^第[零一二三四五六七八九十]+章', nt)
+            _core = nt[_m_ch.end():] if _m_ch else nt
+            # 标题可能被排版拆成两段（「第十一章 突发性事件…处置」+「应对工作预案」），
+            # 规划里的 title 是拼好的 —— 用「去章号后的前缀」兜一层
+            _hit = (tgt in nt
+                    or (len(_core) >= 6 and tgt.startswith(_core)))
+            if not _hit or len(nt) > len(tgt) + 24:
                 continue
             if not (nt.startswith('第') or re.match(r'^\d{1,2}', nt)
                     or styles[i].startswith('heading')):
                 continue
-            idx = i
-            break
-        if idx is None:
-            continue
+            if nt.startswith('第') and '章' in nt[:6]:
+                _score = 3
+            elif styles[i].startswith('heading 1'):
+                _score = 3
+            elif styles[i].startswith('heading'):
+                _score = 2
+            elif re.match(r'^\d{1,2}\s+\S', nt):
+                _score = 2
+            else:
+                _score = 1
+            cands.append((_score, i))
+        if cands:
+            cands.sort(key=lambda x: (-x[0], x[1]))
+            found.append((ch, cands[0][1]))
+    found.sort(key=lambda x: x[1])
+
+    # ② 逐章：版式 + 小节标题
+    for pos, (ch, idx) in enumerate(found):
         head = ps[idx]
+        if ch.kind in ('review', 'attachment'):
+            ch.own_page = True
+            ch.new_page = True
+            ch.sections = []
+            continue
         # 是否另起新页：标题段自身（段前分页 / 段首分页符）或前一段带分页/分节
         ch.new_page = (_p_page_break_before(head) or _leading_page_break(head)
                        or _trailing_page_break(head))
@@ -328,6 +383,28 @@ def _annotate_layout(doc, plan: Plan) -> None:
                 break
             k += 1
         ch.own_page = own
+
+        # 本章小节标题（到下一章标题为止）
+        end = found[pos + 1][1] if pos + 1 < len(found) else len(ps)
+        secs = []
+        for k in range(idx + 1, end):
+            t = (ps[k].text or '').strip()
+            if not t:
+                continue
+            sn = styles[k]
+            lvl = 0
+            if sn in ('heading 2', 'heading2') or _is_sub_heading(t, 2):
+                lvl = 2
+            elif sn in ('heading 3', 'heading3') or _is_sub_heading(t, 3):
+                lvl = 3
+            if not lvl:
+                continue
+            if re.match(r'^第[零一二三四五六七八九十]+章', t):
+                continue
+            if secs and secs[-1]["text"] == t:
+                continue
+            secs.append({"level": lvl, "text": t})
+        ch.sections = secs
 
 
 _ROLE_STARTS = ("稳评负责人", "项目负责人", "负责人", "调研工作", "风险研判",
@@ -522,6 +599,47 @@ def _rename_heading(p, text: str) -> None:
             r._element.getparent().remove(r._element)
     else:
         p.add_run(text)
+
+
+def _rename_subsections(els, doc, ch: Chapter) -> None:
+    """按模板小节名重命名本章 Heading 2/3（层级与数量完全对得上才动）。
+
+    LLM 即便收到「逐字按模板小节」的提示词也可能少写/改叫法；数量一致时
+    按顺序改回模板文字，内容不动。数量对不上就保持原样并记日志，避免张冠李戴。
+    """
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+
+    tpl_by_lvl = {2: [], 3: []}
+    for s in (getattr(ch, "sections", None) or []):
+        lvl = int(s.get("level") or 0)
+        if lvl in tpl_by_lvl:
+            tpl_by_lvl[lvl].append(str(s.get("text") or "").strip())
+    if not any(tpl_by_lvl.values()):
+        return
+    got = {2: [], 3: []}
+    for el in els:
+        if el.tag != qn('w:p'):
+            continue
+        p = Paragraph(el, doc)
+        sn = p.style.name if p.style else ""
+        if not (p.text or "").strip():
+            continue
+        if sn == "Heading 2":
+            got[2].append(p)
+        elif sn == "Heading 3":
+            got[3].append(p)
+    for lvl in (2, 3):
+        tpl = tpl_by_lvl.get(lvl) or []
+        if not tpl:
+            continue
+        n = min(len(got[lvl]), len(tpl))
+        if len(got[lvl]) != len(tpl):
+            logger.info(f"[模板结构] {ch.title} 第{lvl}级小节 "
+                        f"{len(got[lvl])}≠模板 {len(tpl)}，按前 {n} 个对位改名")
+        for p, text in zip(got[lvl][:n], tpl[:n]):
+            if text:
+                _rename_heading(p, text)
 
 
 def _rebuild_toc(doc, start_text: str = "",
@@ -735,6 +853,10 @@ def apply_plan(path: str | Path, plan: Plan) -> Dict[str, Any]:
         used.add(b["no"])
         hp = Paragraph(els[0], doc)
         _rename_heading(hp, _titles[id(ch)])
+        try:
+            _rename_subsections(els, doc, ch)
+        except Exception as _se:
+            logger.warning(f"[模板结构] {ch.title} 小节改名跳过: {_se}")
         (pre_blocks if ch.pre else seq_blocks).append(els)
 
     if not seq_blocks:

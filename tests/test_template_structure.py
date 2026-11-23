@@ -130,3 +130,45 @@ def test_extract_plan_reads_front_matter_spec(tmp_path):
         "1 、稳评负责人", "2 、调研工作",
         "3 、风险研判与评估报告编制工作", "4 、资料与档案工作"]
     assert front["cert_heading"] == "3.人员培训证书"
+
+
+def test_extract_plan_collects_subsections(tmp_path):
+    """章内小节标题（（一）/1.）按层级收集，正文编号列表不算。"""
+    d = Document()
+    d.add_paragraph("第一章 编制说明")
+    d.add_paragraph("（一）稳评理由")
+    d.add_paragraph("1.为维护人民群众的合法权益")
+    d.add_paragraph("（二）稳评目的")
+    d.add_paragraph("1.客观公正性原则")
+    for t in ("第二章 编制依据", "第三章 项目基本情况"):
+        d.add_paragraph(t)
+    path = tmp_path / "sec.docx"
+    d.save(str(path))
+
+    plan = extract_plan(path)
+    ch = by_kind = {c.kind: c for c in plan.chapters}["intro"]
+    lv2 = [s["text"] for s in ch.sections if s["level"] == 2]
+    lv3 = [s["text"] for s in ch.sections if s["level"] == 3]
+    assert lv2 == ["（一）稳评理由", "（二）稳评目的"]
+    assert lv3 == ["1.客观公正性原则"]      # 「为维护…」是正文列表，不算小节
+
+
+def test_apply_plan_renames_subsections_when_counts_match(tmp_path):
+    from docx.enum.text import WD_BREAK
+
+    d = Document()
+    _h1(d, "第一章、编制说明")
+    d.add_paragraph("（一）旧小节名", style="Heading 2")
+    d.add_paragraph("1.旧三级名", style="Heading 3")
+    d.add_paragraph("正文")
+    path = tmp_path / "rename.docx"
+    d.save(str(path))
+
+    plan = Plan(chapters=[Chapter(
+        1, "编制说明", "intro", 1,
+        sections=[{"level": 2, "text": "（一）模板小节名"},
+                  {"level": 3, "text": "1.模板三级名"}])])
+    apply_plan(path, plan)
+    texts = [p.text for p in Document(str(path)).paragraphs]
+    assert "（一）模板小节名" in texts
+    assert "1.模板三级名" in texts

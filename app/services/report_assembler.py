@@ -704,6 +704,11 @@ class ReportAssembler:
     def assemble(self, state: dict) -> str:
         """Build the final report DOCX from session state."""
         self._inserted_images = set()  # 🔴 Reset per call — avoid cross-report dedup
+        # 人员名单缓存：未勾选时随机取 5 名项目组成员（技术负责人保留），全篇共用
+        # （工作组名单 / 第7章名单 / 参与人员签字 / 证书页四处的名单必须一致）
+        self._team_people = None
+        self._cert_names = None
+        self._used_template_certs: set = set()
         self._missing_images = []      # 资料里缺失的图片（只记缺口，不印占位）
         self._chapter_image_counter = {}  # 🔴 图号统一计数器：章 → 已插入图数
         self._session_state = state  # 🔴 供系统标准表（表3-1/表3-3）渲染读取 survey_analysis
@@ -6291,10 +6296,8 @@ class ReportAssembler:
            硬套「稳评负责人 / 调研 / 数据汇总」之类就是编造。只列姓名。
         """
         try:
-            from app.services.personnel_store import personnel_for
-            sel = [str(x).strip() for x in (getattr(self, "_selected_personnel", None) or [])
-                   if str(x).strip()]
-            people = personnel_for(sel or None, self._company_id())
+            # 与前置工作组名单/签字区同源（未勾选时同一份随机 5 名项目组成员）
+            people = self._load_company_personnel()
             names = []
             for _p in people:
                 _n = str(_p.get("姓名") or "").strip()
@@ -6382,63 +6385,167 @@ class ReportAssembler:
         """从**人员库**（company_personnel 表）读取人员信息。
 
         `_selected_personnel` 非空时只返回用户勾选的人，并保持勾选顺序；
-        未勾选任何人则返回全部（保持旧行为）。库为空时返回 []，
-        由调用方回退到内置默认名单。
+        未勾选任何人则**随机抽 5 人**（业主 2026-11-23：「随机选择五个就行，
+        不要所有的都放上面」），技术负责人优先保留。整份报告共用这一份名单
+        （工作组名单 / 第7章名单 / 签字区 / 证书页），避免各处人数不一致。
+        库为空时返回 []，由调用方回退到内置默认名单。
         """
+        cached = getattr(self, "_team_people", None)
+        if cached is not None:
+            return cached
         sel = getattr(self, "_selected_personnel", None) or []
         try:
             from app.services.personnel_store import personnel_for
-            return personnel_for(sel or None, self._company_id())
+            people = personnel_for(sel or None, self._company_id())
         except Exception as e:
             logger.warning(f"读取人员库失败: {e}")
             return []
+        if not sel and people:
+            people = self._sample_team(people, 5, self._names_with_certs())
+            logger.info("[人员] 未勾选，随机取 5 名项目组成员：%s",
+                        [str(p.get("姓名") or "") for p in people
+                         if isinstance(p, dict)])
+        self._team_people = people
+        return people
 
-    def _personnel_cert_holders(self) -> list:
-        """持「社会稳定风险评估/稳评培训证书」的人员姓名（优先取用户勾选的）。"""
-        holders = []
+    @classmethod
+    def _sample_team(cls, people: list, n: int = 5,
+                     certified: set = None) -> list:
+        """保留技术负责人，其余**随机取 n 名项目组成员**。
+
+        优先从「有证书扫描件」的人里抽（业主 2026-11-23：成员证书要能对应上），
+        不够再补没有扫描件的；返回顺序沿用人员库顺序。
+        """
+        import random
+        people = [p for p in people if isinstance(p, dict)]
+        leads = [p for p in people
+                 if str(p.get("拟任角色") or "").strip() == "技术负责人"]
+        keep = leads[:1]
+        keep_ids = {id(p) for p in keep}
+        rest = [p for p in people if id(p) not in keep_ids]
+        need = max(0, n)
+        if len(rest) <= need and not certified:
+            chosen = keep_ids | {id(p) for p in rest}
+            return [p for p in people if id(p) in chosen]
+        pref = [p for p in rest
+                if certified and str(p.get("姓名") or "").strip() in certified]
+        pref_ids = {id(p) for p in pref}
+        others = [p for p in rest if id(p) not in pref_ids]
+        picked = random.sample(pref, min(need, len(pref)))
+        if len(picked) < need and others:
+            picked += random.sample(others, min(need - len(picked), len(others)))
+        chosen = keep_ids | {id(p) for p in picked}
+        return [p for p in people if id(p) in chosen]
+
+    def _names_with_certs(self) -> set:
+        """有证书扫描件的人员姓名：人员库 + 模板提取的证书索引。"""
+        cached = getattr(self, "_cert_names", None)
+        if cached is not None:
+            return cached
+        names = set()
         try:
-            for ps in self._load_company_personnel():
-                if not isinstance(ps, dict):
-                    continue
-                name = str(ps.get('姓名') or '').strip()
-                if not name:
-                    continue
-                certs = ps.get('执业资格证书') or []
-                if any(('风险评估' in str(c)) or ('稳评' in str(c)) or ('培训证' in str(c)) for c in certs):
-                    holders.append(name)
+            from app.services.personnel_store import person_images
+            for _n, *_rest in person_images(None, self._company_id()):
+                if _n:
+                    names.add(str(_n).strip())
         except Exception:
             pass
-        return holders
+        try:
+            from app.services.personnel_certs import load_index
+            for _info in (load_index() or {}).values():
+                if isinstance(_info, dict) and _info.get("is_person_cert"):
+                    _nm = str(_info.get("person_name") or "").strip()
+                    if _nm:
+                        names.add(_nm)
+        except Exception:
+            pass
+        self._cert_names = names
+        return names
 
     def _selected_personnel_cert_images(self) -> List[tuple]:
-        """🔴 证书页要贴的人员证书扫描件 → [(文件路径, 图题)]。
+        """证书页要贴的人员证书扫描件 → [(文件路径, 图题)]。
 
-        直接查**人员库** `company_personnel_images`（人名 → 证书图）。
-        证书扫描件的姓名是手写体、文件名看不出是谁，入库前由
-        `personnel_certs` 一次性视觉识别绑定；这里只做纯查表。
+        名单来源（业主口径）：
+          ① 界面单独勾选的「证书人员」（`_selected_cert_personnel`，最多 3 人）；
+          ② 没勾证书人员时 = **工作组同一份 5 人名单**（`_load_company_personnel`）。
 
-        🔴 名单来源：**「选择证书」那个独立的多选框**（`_selected_cert_personnel`，最多 3 人）。
-           它和工作组人员（`_selected_personnel`）是两回事 —— 业主口径：
-           「选择证书也是把现在有证书的人员列举出来，让用户多选，最多三个人，
-             对应的报告地方就是公司营业执照后的几张人员证书图片」。
-           没传这个新字段时回退成「工作组里持证的人」，保持旧行为。
+        取图顺序：
+          ① 人员库 `company_personnel_images`（人名 → 证书图，纯查表）；
+          ② 库里没有的，从**模板提取阶段建立的证书索引**
+             （`personnel_certs.json`，一次性视觉识别把「手写姓名」绑到图上）里
+             按姓名找 —— 这就是「缺少的话从模板中提取」。
         """
-        sel = getattr(self, "_selected_cert_personnel", None) or \
-              (getattr(self, "_selected_personnel", None) or [])
+        cert_sel = [str(x).strip() for x in
+                    (getattr(self, "_selected_cert_personnel", None) or [])
+                    if str(x).strip()]
+        team = self._load_company_personnel() or []
+        team_names = [str(p.get("姓名") or "").strip()
+                      for p in team if isinstance(p, dict)]
+        sel = cert_sel or [n for n in team_names if n]
         if not sel:
             return []
+
+        triples = []
         try:
-            from app.services.personnel_store import images_for
-            imgs = images_for(sel, self._company_id())
-            # 🔴 勾选的人没有证书扫描件时**明确报出来** —— 否则前置「人员证书」节会
-            #    整节不出现，而名单里照样列着这些人，两处对不上。
-            _missing = [n for n in sel if not any(str(n) in str(c or "") for _, c in imgs)]
-            if _missing:
-                logger.warning(f"[人员证书] 以下勾选人员没有证书扫描件入库，证书页会缺图：{_missing}")
-            return imgs
+            from app.services.personnel_store import person_images
+            triples = person_images(sel, self._company_id())
         except Exception as e:
             logger.warning(f"读取人员证书图失败: {e}")
-            return []
+
+        covered = {n for n, *_ in triples}
+        missing = [n for n in sel if n not in covered]
+        if missing:
+            for _n, _p, _cat in self._template_cert_images(missing):
+                triples.append((_n, _p, Path(_p).name, _cat))
+
+        seen, out = set(), []
+        for name, path, _img, cat in triples:
+            if path in seen:
+                continue
+            seen.add(path)
+            _cap = (f"{name}·{cat}" if cat and cat != "其他" else f"{name} 证书")
+            out.append((path, _cap[:60]))
+
+        _still = [n for n in missing if not any(t[0] == n for t in triples)]
+        if _still:
+            logger.warning(f"[人员证书] 库和模板索引里都没有这些人的证书：{_still}")
+        return out
+
+    def _template_cert_images(self, names: List[str]) -> List[tuple]:
+        """按姓名从**模板提取的证书索引**里取图 → [(姓名, 路径, 类别)]。
+
+        `storage/personnel_certs.json` 是模板/公司素材做一次视觉识别后的落盘索引
+        （手写姓名 → 图片路径）；这里只做纯查表，不再调模型。同一个人只取一张，
+        已用过的不重复取。
+        """
+        out = []
+        try:
+            from app.services.personnel_certs import load_index
+            idx = load_index() or {}
+        except Exception as e:
+            logger.warning(f"读取模板证书索引失败: {e}")
+            return out
+        by_name: Dict[str, list] = {}
+        for _k, info in idx.items():
+            if not isinstance(info, dict) or not info.get("is_person_cert"):
+                continue
+            nm = str(info.get("person_name") or "").strip()
+            fp = str(info.get("path") or _k)
+            if not nm or not Path(fp).exists():
+                continue
+            by_name.setdefault(nm, []).append(
+                (fp, str(info.get("cert_type") or "培训证书")))
+        used = getattr(self, "_used_template_certs", None)
+        if used is None:
+            used = self._used_template_certs = set()
+        for nm in names:
+            for fp, cat in by_name.get(nm, []):
+                if fp in used:
+                    continue
+                used.add(fp)
+                out.append((nm, fp, cat))
+                break
+        return out
 
     def _add_compilation_note(self, doc, filled):
         """编制说明：标题 宋体小三加黑居中；内容 仿宋四号首行缩进2格。"""

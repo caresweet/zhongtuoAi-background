@@ -488,12 +488,14 @@ def personnel_for(names: Optional[List[str]], company_id: Optional[int]) -> List
             pass
 
 
-def images_for(names: Optional[List[str]],
-               company_id: Optional[int],
-               categories: Optional[Tuple[str, ...]] = None) -> List[Tuple[str, str]]:
-    """按人名取**本公司**人员的图片 → [(路径, 图题)]，保持 names 顺序。
+def person_images(names: Optional[List[str]],
+                  company_id: Optional[int],
+                  categories: Optional[Tuple[str, ...]] = None
+                  ) -> List[Tuple[str, str, str, str]]:
+    """按人名取**本公司**人员图片 → [(姓名, 路径, 图片名, 类别)]，按 names 顺序。
 
     🔴 同 `personnel_for`：`company_id` 必填，避免把别家公司的证书图带出来。
+    🔴 同内容的副本（company_P30_rId8 与 stability_cert_02）按指纹去重。
     """
     if not company_id:
         return []
@@ -521,7 +523,6 @@ def images_for(names: Optional[List[str]],
             p = str(r["image_path"] or "")
             if not p or not Path(p).exists() or p in seen:
                 continue
-            # 🔴 company_P30_rId8 与 stability_cert_02 是同一张证书的副本，按内容去重
             try:
                 import hashlib
                 h = hashlib.md5(open(p, "rb").read()).hexdigest()
@@ -530,10 +531,10 @@ def images_for(names: Optional[List[str]],
             if h in seen_hash:
                 continue
             seen.add(p); seen_hash.add(h)
-            cap = str(r["image_name"] or f'{r["pname"]} {r["category"]}')
-            out.append((p, cap[:60]))
+            out.append((str(r["pname"] or ""), p,
+                        str(r["image_name"] or ""), str(r["category"] or "")))
         if want:
-            out.sort(key=lambda t: next((i for i, n in enumerate(want) if n in t[1]), 999))
+            out.sort(key=lambda t: next((i for i, n in enumerate(want) if n in t[0]), 999))
         return out
     except Exception as e:
         logger.warning(f"读取人员图片失败: {e}")
@@ -543,6 +544,17 @@ def images_for(names: Optional[List[str]],
             c.close()
         except Exception:
             pass
+
+
+def images_for(names: Optional[List[str]],
+               company_id: Optional[int],
+               categories: Optional[Tuple[str, ...]] = None) -> List[Tuple[str, str]]:
+    """按人名取**本公司**人员的图片 → [(路径, 图题)]，保持 names 顺序。
+
+    🔴 同 `personnel_for`：`company_id` 必填，避免把别家公司的证书图带出来。
+    """
+    return [(p, (img_name or f"{pname} {cat}")[:60])
+            for pname, p, img_name, cat in person_images(names, company_id, categories)]
 
 
 def all_personnel_names() -> List[str]:
